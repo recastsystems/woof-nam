@@ -50,8 +50,10 @@ SOURCES = {
                "licence": "public-domain (US government work, NOAA NOMADS / AWS NODD noaa-nam-pds)"},
     "gfs":    {"kind": "isobaric", "file": "raw/gfs/gfs.t{cyc:02d}z.pgrb2.0p25.f000", "gdt": 0,
                "grid": "gfs_0p25", "records": "gfs_0p25",
-               # the noaa-gfs-bdp-pds archive the fetch reads begins 2021-01-01 00Z (fetch_case.GFS_ERAS)
-               "valid_from": "2021-01-01T00",
+               # the archives the fetch reads (fetch_case.GFS_ERAS): NCEI 0.5 deg analyses from 2004-03-01 00Z
+               # (analysis boundaries), NCAR GDEX 0.25 deg forecasts from 2015-01-15 00Z, noaa-gfs-bdp-pds from
+               # 2021-01-01 00Z
+               "valid_from": "2004-03-01T00",
                "url": "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{ymd}/{cyc:02d}/atmos/"
                       "gfs.t{cyc:02d}z.pgrb2.0p25.f000",
                # Lateral boundaries (init-gfs-bocos, fetch_case row gfs-boco): forecast leads every

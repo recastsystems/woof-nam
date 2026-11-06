@@ -10,9 +10,10 @@ H point) overlaps its region; anything else is skipped with the reason printed. 
 is a row here, never a new code path.
 
 Rows today:
-- gfs-f000   GFS 0.25 deg analysis (init), global, 2021-01-01 00Z on (the NOAA S3 archive start). Subset by
-             .idx byte ranges to the records the start reads (pressure levels, surface, soil, snow, ice,
-             canopy water). Written where sources.SOURCES["gfs"]["file"] expects it.
+- gfs-f000   GFS analysis (init), global: 2021-01-01 00Z on from the NOAA S3 archive (subset by .idx byte ranges
+             to the records the start reads: pressure levels, surface, soil, snow, ice, canopy water); before it
+             the archived eras of GFS_ERAS (NCAR GDEX 0.25 deg from 2015-01-15, NCEI 0.5 deg analyses from
+             2004-03), whole files. Written where sources.SOURCES["gfs"]["file"] expects it.
 - gfs-boco   GFS 0.25 deg forecast leads every boco_interval_h covering the run, from the cycle boco_age_h
              older than the start (SOURCES["gfs"]: 6 h as operational NAM; 0 h for past cases), global.
 - nam-*      NAM native B-grid analysis bgrd3d00 (the native start), native surface bgrdsfFF and the grid 218
@@ -101,7 +102,26 @@ REGIONS = {
 
 # Path eras: the GFS bucket moved files under atmos/ with GFS v16 (first cycle 2021-03-22 12Z); before it the
 # files sit directly under the cycle folder. The bucket's archive begins 2021-01-01 00Z.
-GFS_ERAS = (("2021-01-01T00", "gfs.{ymd}/{hh}/gfs.t{hh}z.pgrb2.0p25.f{lead:03d}"),
+# Before the bucket, two archived eras of the same GFS GRIB2 (same decoder, same records; only host, grid and
+# cadence differ). An era's optional third item overrides the row: host, kind ("whole": these archives publish no
+# .idx, so whole files), and "chain": "analyses" for an era with no forecast archive online, where every
+# boundary time is the analysis (000) or the 3 h first guess (003) of the GFS cycle at or before it.
+#   2015-01-15 00Z  NCAR GDEX d084001 (NCEP GFS 0.25 deg global forecast grids, historical archive), the full
+#                   pgrb2.0p25 files 3-hourly to 240 h, read over OSDF without an account (verified 2026-11-06:
+#                   2016021512 f003 217.6 MB, 2021021400 f084 342.8 MB, 2015011512 f000 195.3 MB).
+#   2004-03-01 00Z  NCEI THREDDS model-gfs-g4-anl-files-old (GFS 0.5 deg analyses gfsanl_4, 000/003/006 of every
+#                   cycle; online 2004-03..2020-05). NCEI's 0.5 deg FORECAST archive (model-gfs-004-files) is not
+#                   online before 2019-08 except a few months, so a start before 2015-01-15 takes analysis
+#                   boundaries (verified 2026-11-06: 20110109 12Z 000 48.6 MB, 20140211 12Z 003 52.9 MB).
+GFS_GDEX = "https://osdf-director.osg-htc.org/ncar/rda/d084001"
+GFS_NCEI_G4ANL = "https://www.ncei.noaa.gov/thredds/fileServer/model-gfs-g4-anl-files-old"
+GFS_ERAS = (("2004-03-01T00", "{vym}/{vymd}/gfsanl_4_{vymd}_{vhh}00_{vofs:03d}.grb2",
+             {"host": GFS_NCEI_G4ANL, "kind": "whole", "chain": "analyses", "grid": "gfs_0p5",
+              "licence": "NOAA/NCEP GFS 0.5 deg analyses, US government work (public domain), NCEI THREDDS"}),
+            ("2015-01-15T00", "{yyyy}/{ymd}/gfs.0p25.{ymd}{hh}.f{lead:03d}.grib2",
+             {"host": GFS_GDEX, "kind": "whole",
+              "licence": "NOAA/NCEP GFS 0.25, US government work (public domain), NCAR GDEX d084001 over OSDF"}),
+            ("2021-01-01T00", "gfs.{ymd}/{hh}/gfs.t{hh}z.pgrb2.0p25.f{lead:03d}"),
             ("2021-03-22T12", "gfs.{ymd}/{hh}/atmos/gfs.t{hh}z.pgrb2.0p25.f{lead:03d}"))
 NAM_ERAS = (("2017-01-01T00", "nam.{ymd}/nam.t{hh}z.{stem}{lead:02d}.tm00.grib2"),)
 NAM_RETIRED = "2026-11-03T12"
@@ -178,6 +198,17 @@ def _download(url: str, dest: Path) -> str:
     _retry(once)
     tmp.rename(dest)
     return f"got {dest.name} {dest.stat().st_size / 1e6:.0f} MB"
+
+
+def _download_linked(url: str, start_dest: Path, dest: Path) -> str:
+    """A storm-following lead from a whole-file era: the whole file as start_dest, dest a hard link to it."""
+    msg = _download(url, start_dest)
+    if not (dest.exists() and dest.stat().st_size > 0):
+        try:
+            os.link(start_dest, dest)
+        except OSError:
+            shutil.copy2(start_dest, dest)
+    return msg
 
 
 def _follow_lead(url: str, dest: Path, start_dest: Path, pattern: re.Pattern) -> str:
@@ -320,14 +351,25 @@ def _t(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%dT%H")
 
 
-def _era_path(row, cyc: datetime, lead: int) -> str:
-    tmpl = None
-    for since, t in row["eras"]:
-        if cyc >= _t(since):
-            tmpl = t
-    if tmpl is None:
+def era_of(row, cyc: datetime) -> dict:
+    """The row's era for a cycle: {"since", "template"} plus the era's own overrides (host, kind, chain, ...)."""
+    era = None
+    for e in row["eras"]:
+        if cyc >= _t(e[0]):
+            era = {"since": e[0], "template": e[1], **(e[2] if len(e) > 2 else {})}
+    if era is None:
         raise ValueError(f"fetch-case: {row['name']} has no archive before {row['eras'][0][0]} (cycle {cyc:%Y-%m-%d %HZ})")
-    return tmpl.format(ymd=f"{cyc:%Y%m%d}", hh=f"{cyc:%H}", lead=lead, stem=row.get("stem", ""))
+    return era
+
+
+def _era_path(row, cyc: datetime, lead: int) -> str:
+    era = era_of(row, cyc)
+    # chain "analyses": lead f of cycle cyc is the analysis/first guess of the GFS cycle at or before cyc + f
+    v = cyc + timedelta(hours=lead)
+    vc = v.replace(hour=v.hour - v.hour % 6)
+    return era["template"].format(ymd=f"{cyc:%Y%m%d}", hh=f"{cyc:%H}", yyyy=f"{cyc:%Y}", lead=lead,
+                                  stem=row.get("stem", ""), vym=f"{vc:%Y%m}", vymd=f"{vc:%Y%m%d}", vhh=f"{vc:%H}",
+                                  vofs=int((v - vc).total_seconds() // 3600))
 
 
 def _leads(row, hours: int, age: int, interval: int):
@@ -371,18 +413,30 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
         required = (row["role"] == "init" and row["source"] == source) or \
                    (row["role"] == "boco" and (row["source"] == source or (source == "native" and row["source"] == "gfs")))
         cyc = cycle - timedelta(hours=age) if row["cycle"] == "boco" else cycle
+        try:
+            era = era_of(row, cyc) if "eras" in row else {}
+        except ValueError as e:
+            # a cycle before the row's first archived era (the NAM S3 archive from 2017): skipped, named
+            skipped.append((row["name"], str(e).replace("fetch-case: ", "")))
+            continue
+        # an analysis-chain era (chain "analyses") names its files by the boundary cycle and lead like any era, and
+        # _era_path maps each lead to the analysis valid then, so the boundary age changes only the names
+        host, kind = era.get("host", row.get("host")), era.get("kind", row["kind"])
         if row["kind"] == "mrms":
             for f in _leads(row, hours, age, interval):
                 jobs.append((_mrms_hour, cycle + timedelta(hours=f), raw / row["dest"], required))
             continue
         for f in _leads(row, hours, age, interval):
-            url = f"{row['host']}/{_era_path(row, cyc, f)}"
+            url = f"{host}/{_era_path(row, cyc, f)}"
             dest = raw / row["dest"].format(hh=f"{cyc:%H}", lead=f)
             if follow and row.get("follow_dest") and not (cyc == cycle and f == 0):
                 sdest = raw / row["follow_dest"].format(hh=f"{cyc:%H}", lead=f)
-                jobs.append((_follow_lead, url, dest, sdest, PATTERNS[row["follow_records"]], required))
+                if kind == "whole":
+                    jobs.append((_download_linked, url, sdest, dest, required))
+                else:
+                    jobs.append((_follow_lead, url, dest, sdest, PATTERNS[row["follow_records"]], required))
                 continue
-            if row["kind"] == "whole":
+            if kind == "whole":
                 jobs.append((_download, url, dest, required))
             else:
                 jobs.append((_subset, url, dest, PATTERNS[row["records"]], required))

@@ -105,7 +105,7 @@ that says where the files are and which fields to read differs.
 | `--source` | analysis | start times | ready after the start time | boundaries (every 3 h) | licence | for |
 |---|---|---|---|---|---|---|
 | `native` | archived NAM native analysis | cycles before 2026-11-03 12Z | archive only | GFS cycle 6 h older | US Government | the NAM's own start |
-| `gfs` | GFS 0.25 degree | from 2021-01-01 00Z | about 3.5 h | GFS cycle 6 h older | US Government | real time and recent dates |
+| `gfs` | GFS 0.25 degree (0.5 degree analyses before 2015-01-15) | from 2004-03-01 00Z | about 3.5 h | GFS cycle 6 h older (`--boco-age 0`: the start cycle's own forecast) | US Government | real time, recent dates and hindcasts |
 | `ifs-0p25` | ECMWF open data IFS HRES 0.25 degree | from 2025-03-14 12Z | about 7.5 h (00/12Z), 6.4 h (06/18Z) | same IFS cycle | CC BY 4.0 | real time and recent dates |
 | `ifs` | ECMWF open data IFS HRES 0.1 degree | from 2026-10-20 12Z | about 9.6 h (00/12Z), 8.5 h (06/18Z) | same IFS cycle | CC BY 4.0 | real time and recent dates |
 | `era5` | ECMWF ERA5 reanalysis 0.25 degree, hourly | 00, 06, 12 or 18Z from 1940-01-01 00Z | about 6 days | ERA5 analyses | CC BY 4.0 (Copernicus) | hindcasts and case studies |
@@ -118,6 +118,17 @@ has no forecast leads: the start and every boundary time are analyses, so the bo
 the reanalysis at every hour of the run. A 24 h case fetches 9 hours, about 11.5 GB (1.3 GB per hour for
 the NAM 12 km grid's latitude band, every longitude), in about 1.5 min on a fast link. The fields read and how
 they are mapped to the NAM's: `namgpu/init/source_records.py` (`ERA5`).
+
+Past GFS cycles come from the archives, through the same `gfs` row: NOAA's bucket from 2021-01-01 00Z, NCAR's GDEX
+copy of the GFS 0.25 degree forecasts (d084001, no account) from 2015-01-15 00Z, and NCEI's GFS 0.5 degree analyses
+from 2004-03-01 00Z. NCEI keeps no GFS forecast files online for the years before 2015, so a start before
+2015-01-15 takes its boundaries from the GFS analyses (and 3 h first guesses) at each boundary time. For a hindcast,
+`--boco-age 0` takes the boundaries from the start cycle itself:
+
+```
+woof-nam fetch --cycle 2016021512 --hours 48 --case-dir cases/2016-02-15_12z --source gfs --boco-age 0
+NAMGPU_BOCO_AGE_H=0 woof-nam run --case 2016-02-15_12z --source gfs --hours 48 --out runs/2016-02-15_12z
+```
 
 ## Get the input data
 

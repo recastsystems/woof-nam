@@ -67,8 +67,22 @@ GFS = {
         "CNWAT": (2, 0, 196, "1", "0", None), "WEASD": (0, 1, 13, "1", "0", None),
         "SNOD": (0, 1, 11, "1", "0", None), "ICEC": (10, 2, 0, "1", "0", None),
         "LANDSRC": (2, 0, 0, "1", "0", None),
+        # Archived GFS before the 2015-01-14 GFS upgrade (NCEI gfsanl_4, 0.5 deg) publishes soil temperature as TMP
+        # (0-0-0) on the soil layers, not TSOIL (2-0-2): read whichever the file carries (sfc_optional, fill_from).
+        "STMP1": (0, 0, 0, "106", "0", "0.1"), "STMP2": (0, 0, 0, "106", "0.1", "0.4"),
+        "STMP3": (0, 0, 0, "106", "0.4", "1"), "STMP4": (0, 0, 0, "106", "1", "2"),
     },
-    "sfc_derive": [],
+    # Records an archived GFS file may lack (fetch_case.GFS_ERAS before the S3 bucket; checked by inventory
+    # 2026-11-06): the 0.5 deg analyses (2004-2015) carry no TSOIL (TMP on the soil layers instead), no SNOD and
+    # no CNWAT; the 0.25 deg GDEX files of 2015-2016 carry no CNWAT. A file that carries them decodes them as before.
+    "sfc_optional": ("TSOIL1", "TSOIL2", "TSOIL3", "TSOIL4", "STMP1", "STMP2", "STMP3", "STMP4", "CNWAT", "SNOD"),
+    # fill_* ops run only where the file did not carry the output (a current GFS file is decoded unchanged)
+    "sfc_derive": [
+        ("TSOIL1", "fill_from", ("STMP1",)), ("TSOIL2", "fill_from", ("STMP2",)),
+        ("TSOIL3", "fill_from", ("STMP3",)), ("TSOIL4", "fill_from", ("STMP4",)),
+        ("SNOD", "fill_scale", ("WEASD", 0.005)),   # depth (m) at WRF real.exe's fixed 200 kg m-3 (as ERA5 here)
+        ("CNWAT", "fill_const", (0.0,)),            # no canopy water in the file: 0 (declared fill, as IFS/ERA5)
+    ],
     # the GFS forecast files (f006 ...) carry no CNWAT, so boundary times ask only for these (2026-11-04)
     "sfc_columns": ("PRES", "HGT", "T2", "RH2", "U10", "V10"),
     "derive_columns": (),
@@ -210,6 +224,20 @@ def derive_sfc(rec: dict, sfc: dict, only=None) -> None:
         # an optional record the file does not carry: its outputs come from rec["donor_fallback"] instead
         if all(o in rec.get("donor_fallback", {}) for o in outs) and \
                 any(isinstance(a, str) and a not in sfc for a in args):
+            continue
+        if op.startswith("fill_"):
+            # fill_from / fill_scale / fill_const: only where the file did not carry `out` (sfc_optional)
+            if out in sfc:
+                continue
+            if op == "fill_from":
+                sfc[out] = sfc[args[0]]
+            elif op == "fill_scale":
+                sfc[out] = (sfc[args[0]] * cp.float32(args[1])).astype(cp.float32)
+            elif op == "fill_const":
+                ref = next(iter(sfc.values()))
+                sfc[out] = cp.full(ref.shape, args[0], dtype=cp.float32)
+            else:
+                raise ValueError(f"source_records: unknown sfc_derive op {op!r}")
             continue
         if op == "scale":
             sfc[out] = (sfc[args[0]] * cp.float32(args[1])).astype(cp.float32)

@@ -23,7 +23,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from namgpu import paths
@@ -72,12 +72,19 @@ def current() -> dict:
             "configfile_path": str(cf)}
 
 
+BGRD3D_FIRST = datetime(2021, 9, 16)     # first bgrd3d00 on noaa-nam-pds (the site's nam-analysis window starts there)
+
+
 def archive_cycle(start: datetime) -> datetime:
-    """The archived NAM 00Z analysis of the same month and day, in the latest year the archive holds."""
+    """The archived NAM 00Z analysis of the same month and day, in the latest year the archive holds.
+    The bucket's bgrd3d00 files begin 2021-09-16 00Z (BGRD3D_FIRST; checked 2026-11-06: 2021-02-15 and 2020-02-14 are
+    404, 2021-09-16 is 200): a start before it (an archived-GFS hindcast, e.g. 2014-02-11) takes the same day of the
+    latest archived year, not its own year."""
+    day = min(start.day, 28) if start.month == 2 else start.day
+    base = start.year if start >= BGRD3D_FIRST else LAST_NAM_CYCLE.year
     for k in range(0, 12):
-        day = min(start.day, 28) if start.month == 2 else start.day
-        c = datetime(start.year - k, start.month, day)
-        if c <= LAST_NAM_CYCLE:
+        c = datetime(min(base, LAST_NAM_CYCLE.year) - k, start.month, day)
+        if BGRD3D_FIRST <= c <= LAST_NAM_CYCLE:
             return c
     raise SystemExit(f"woof-nam: no archived NAM analysis for {start:%m-%d}")
 
@@ -128,11 +135,29 @@ def ensure_static(case_dir: Path, start: datetime, source: str, card: str | None
         elif gfs_start.STATIC_NPZ.is_file():
             rec.update(action="cached", file=str(gfs_start.STATIC_NPZ))
         else:
-            cyc = archive_cycle(start)
-            src = paths.work_root() / "static" / "src" / f"nam.{cyc:%Y%m%d%H}.bgrd3d00.grib2"
-            src.parent.mkdir(parents=True, exist_ok=True)
             from namgpu.init.fetch_case import NAM, _download
-            got = _download(f"{NAM}/nam.{cyc:%Y%m%d}/nam.t{cyc:%H}z.bgrd3d00.tm00.grib2", src)
+            import urllib.error
+            # the archive has holes (no bgrd3d00 for 2021-02-14 00Z, 2026-11-06): the same day a year earlier, then
+            # the days beside it, until one is there
+            got = None
+            first = archive_cycle(start)
+            tried = []
+            for cyc in [first.replace(year=first.year - k) for k in range(0, 4)] + \
+                       [first + timedelta(days=d) for d in (-1, 1, -2, 2, -3, 3)]:
+                if cyc > LAST_NAM_CYCLE or cyc < BGRD3D_FIRST:
+                    continue
+                src = paths.work_root() / "static" / "src" / f"nam.{cyc:%Y%m%d%H}.bgrd3d00.grib2"
+                src.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    got = _download(f"{NAM}/nam.{cyc:%Y%m%d}/nam.t{cyc:%H}z.bgrd3d00.tm00.grib2", src)
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
+                    tried.append(f"{cyc:%Y%m%d%H}")
+            if got is None:
+                raise SystemExit(f"woof-nam: no archived NAM analysis for the static near {first:%Y-%m-%d} "
+                                 f"(404: {', '.join(tried)})")
             log(f"static: {gfs_start.STATIC_NPZ.name} from the archived NAM analysis {cyc:%Y-%m-%d %HZ} ({got})")
             rc = _child("namgpu.init.gfs_start", [str(src), "--out", str(gfs_start.STATIC_NPZ)], card)
             if rc != 0 or not gfs_start.STATIC_NPZ.is_file():

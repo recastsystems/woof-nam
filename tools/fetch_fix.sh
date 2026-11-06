@@ -13,5 +13,5 @@ get global_solarconstant_noaa_a0.txt           solarconstant_noaa_a0.txt
 get global_sfc_emissivity_idx.txt              sfc_emissivity_idx.txt
 get global_co2historicaldata_glob.txt          co2historicaldata_glob.txt
 get co2monthlycyc.txt                          co2monthlycyc.txt
-for y in $(seq 2015 2024); do get co2dat_4a/global_co2historicaldata_$y.txt co2historicaldata_$y.txt; done
+for y in $(seq 2004 2024); do get co2dat_4a/global_co2historicaldata_$y.txt co2historicaldata_$y.txt; done
 for y in 2025 2026; do get co2dat_4a/global_co2historicaldata_$y.txt_proj co2historicaldata_$y.txt; done
