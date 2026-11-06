@@ -121,8 +121,10 @@ per-row host arrays cut, g.joff/g.jmg set); `ctx.cfg.jm` stays GLOBAL. No ctx.sl
 - Boundaries: S strips and S corners are applied only where `slab.edges(ctx)[0]` (rank 0), N ones only where
   `slab.edges(ctx)[1]` (rank N-1). W/E strips are [.., jm_local, lnsh]. Boundary files hold the GLOBAL strips;
   bnd-read-bc scatters rows jms..jme of the W/E records.
-- Init: run once over the whole domain, saved and cut per rank (namgpu/init/slab_init.py), because the chain is
-  not reproducible run to run (float atomics in init-gwd-orog and init-vcoord-recover).
+- Init: run once over the whole domain, saved and cut per rank (namgpu/init/slab_init.py), because the chain
+  builds whole-domain fields (fits, the GWD terrain window, the boundaries) a rank cannot build from its rows. The
+  chain is reproducible run to run: init-gwd-orog and init-vcoord-recover sum in a fixed order (no float atomics,
+  2026-11-06; tests/test_determinism.py).
 - Exchanges: drv-halo-exch rows X1-X21 (E1) at the Fortran HALO_EXCH sites; iterative units exchange inside their
   loop (`slab.halo_exchange`: io-quasipost relax4e); domain-wide flags and sums go through `slab.allreduce` or the
   deterministic MONO per-row partials. Only owned rows enter a sum, a history file or a map.

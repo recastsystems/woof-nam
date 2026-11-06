@@ -1,8 +1,9 @@
 """Init once, slice per rank (multi-card NAM, MULTICARD-PLAN.md section 6; lane E2).
 
-Why: the init chain is not reproducible run to run (init-gwd-orog and init-vcoord-recover sum with float
-atomics), so two processes that each run init would start from different bits and no 1-card vs N-card
-comparison could pass. And at 4 km the whole-domain init does not fit one 32 GB card. So the init chain
+Why: the init chain builds the whole domain (whole-domain fits, the GWD terrain window, the boundaries), which
+a rank that holds only its rows cannot do, and at 4 km the whole-domain init does not fit one 32 GB card. (It
+was also not reproducible run to run until 2026-11-06: init-gwd-orog and init-vcoord-recover summed with float
+atomics; both now sum in a fixed order, tests/test_determinism.py.) So the init chain
 runs ONCE over the whole domain (on one card; --managed puts the CuPy pool in CUDA managed memory so a
 4 km domain can spill to host RAM), the whole post-init context is written to a directory (normally on
 /dev/shm), and every forecast process, the one-card run included, loads it and keeps only its rows.

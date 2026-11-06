@@ -28,10 +28,14 @@
 // Kernels:
 //   init_vcoord_fit_partial : grid (30 x 105 x LM) of 32 x 8 blocks, blockIdx.z = level.
 //                             Columns outside the b1 range contribute zero. Each block reduces
-//                             its tile in shared memory and adds the block total into acc[q][l]
-//                             with one atomicAdd per quantity per block.
-//   init_vcoord_solve       : one thread per level; writes psgml1[l] and sgml2[l] (float).
-// acc must be zeroed before init_vcoord_fit_partial (the wrapper does it once per call).
+//                             its tile in shared memory (fixed tree) and stores the block total
+//                             in acc[q][l][block] (plain store, no atomics).
+//   init_vcoord_solve       : one thread per level; sums its level's block totals in block order,
+//                             then writes psgml1[l] and sgml2[l] (float).
+// Deterministic: the block totals are summed in a fixed order. Breakage it prevents: one double
+// atomicAdd per block summed the totals in a different order every run, so the fit (and the
+// vcoord receipt, and the coordinate itself when no header is used) could differ at round-off
+// between two runs of the same case (WOOF-NAM determinism defect, 2026-11-06).
 //
 // Guard (named breakage): if PD is constant over the b1 domain the slope has no value. The
 // solve kernel writes NaN for that level (it does not write a zero slope: b = 0 makes the
@@ -49,7 +53,7 @@
 extern "C" __global__ void init_vcoord_fit_partial(
     const float* __restrict__ pres,    // [LM, JM, IM]  analysis mid-layer pressure (Pa)
     const float* __restrict__ psfc,    // [JM, IM]      surface pressure (Pa)
-    double* __restrict__ acc,          // [4, LM]       sums: Sx=PD, Sy=PRES, Sxx, Sxy
+    double* __restrict__ acc,          // [4, LM, NBLK] block sums: Sx=PD, Sy=PRES, Sxx, Sxy
     const float pt,                    // model top pressure (Pa), configfile pt
     const float pdtop,                 // pressure depth of the pressure range (Pa)
     const int im,
@@ -95,28 +99,38 @@ extern "C" __global__ void init_vcoord_fit_partial(
         __syncthreads();
     }
 
-    if (tid == 0) {
-        atomicAdd(&acc[0 * lm + l0], s_x[0]);
-        atomicAdd(&acc[1 * lm + l0], s_y[0]);
-        atomicAdd(&acc[2 * lm + l0], s_xx[0]);
-        atomicAdd(&acc[3 * lm + l0], s_xy[0]);
+    if (tid == 0 && l0 < lm) {
+        const size_t nblk = (size_t)gridDim.x * gridDim.y;
+        const size_t b = (size_t)blockIdx.y * gridDim.x + blockIdx.x;
+        acc[(0 * (size_t)lm + l0) * nblk + b] = s_x[0];
+        acc[(1 * (size_t)lm + l0) * nblk + b] = s_y[0];
+        acc[(2 * (size_t)lm + l0) * nblk + b] = s_xx[0];
+        acc[(3 * (size_t)lm + l0) * nblk + b] = s_xy[0];
     }
 }
 
 extern "C" __global__ void init_vcoord_solve(
-    const double* __restrict__ acc,    // [4, LM] sums from init_vcoord_fit_partial
+    const double* __restrict__ acc,    // [4, LM, NBLK] block sums from init_vcoord_fit_partial
     const double n,                    // number of b1 columns (IM-2)*(JM-2)
     float* __restrict__ psgml1,        // [LM] out: intercept a_l = PSGML1(l)  (Pa)
     float* __restrict__ sgml2,         // [LM] out: slope b_l = SGML2(l)
-    const int lm)
+    const int lm,
+    const int nblk)                    // blocks per level of init_vcoord_fit_partial
 {
     const int l0 = blockIdx.x * blockDim.x + threadIdx.x;
     if (l0 >= lm) return;
 
-    const double sx  = acc[0 * lm + l0];
-    const double sy  = acc[1 * lm + l0];
-    const double sxx = acc[2 * lm + l0];
-    const double sxy = acc[3 * lm + l0];
+    double q[4];
+    for (int k = 0; k < 4; ++k) {
+        const double* a = acc + ((size_t)k * lm + l0) * (size_t)nblk;
+        double t = 0.0;
+        for (int b = 0; b < nblk; ++b) t += a[b];     // block order: fixed
+        q[k] = t;
+    }
+    const double sx  = q[0];
+    const double sy  = q[1];
+    const double sxx = q[2];
+    const double sxy = q[3];
 
     const double mean_x = sx / n;
     const double mean_y = sy / n;

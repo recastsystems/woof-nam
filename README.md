@@ -240,8 +240,9 @@ woof-nam run --resume runs/x/restart        # case, source, end hour and output 
   own rows and resume on the same N cards, and that path is not written yet.
 
 A run that has to start from the same bits as another one saves the initial state with `--keep-init` (on one
-card, after the init, into `<out>/init`). The second run then starts with `--init-from <out>/init`. A fresh init
-is not bit-repeatable, because two of its sums use float atomics.
+card, after the init, into `<out>/init`). The second run then starts with `--init-from <out>/init`. That only
+saves the init time: two runs of the same case on the same card are bit for bit the same with a fresh init too
+(12 km, GFS start, digital filter, all physics, 6 h: every history hour, 0 of 6,295,450,910 values differ).
 
 ## Make maps
 

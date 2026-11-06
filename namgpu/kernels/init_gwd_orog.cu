@@ -29,7 +29,7 @@
 //   xfp2/yfp2/xfpyfp, hk, hl, hlprim, theta, sigma2, sigma, gamma (1617-1641)
 //                                                                  -> gwd_model_topo
 //   sum_topo / sum_topo4 of (topo-elev)^2 and ^4, ocean counts as topo^2, topo^4 (1647-1667)
-//                                                                  -> gwd_src_topo_var
+//                                                                  -> gwd_model_gather_var
 //   orog_stnd_dev and convexity (1670-1679)                        -> gwd_model_std_conv
 //   nul/nll/nur/nlr and nul2/nll2/nur2/nlr2 with crit_hgt = 1111.6 - 0.878*stdv (1685-1738)
 //                                                                  -> gwd_src_crit
@@ -48,7 +48,14 @@
 //     source cell is skipped (Fortran nint of NaN is undefined). The origin argument is checked on the
 //     host and refused if it leaves [-1,1].
 //
-// Float atomics (sums, max) are non-deterministic in order; the result is fast-numerics, not bitwise.
+// Deterministic (run to run, card to card): no float atomics. The source -> model mapping is many to one, so
+// the sums are gathered, not scattered. Pass 1 over the window keeps only order-free atomics: the integer
+// count, the float max (sign-bit trick, exact for any order) and each model cell's bounding box in window
+// coordinates (integer min/max). Then one thread per model cell walks its box in a fixed order (rows, then
+// columns), re-maps every source cell with the same __noinline__ gwd_bgrid_map, and adds those that land on it.
+// Breakage it prevents: the float atomicAdd sums (sum_topo, the derivative sums, sum2/sum4) summed in a
+// different order every run, so HSTDV/HCNVX/HANGL/HANIS/HSLOP could differ at round-off between two runs of
+// the same case (WOOF-NAM determinism defect, 2026-11-06).
 #include "nmmb_common.cuh"
 
 #define GWD_PI        3.14159265f
@@ -102,7 +109,8 @@ __device__ __forceinline__ void gwd_src_cell(int x, int y, int isrc, int i_lo, i
 }
 
 // ll2xy_bgrid_pt_loc (2768-2835): source point (deg) -> nearest model H cell (0-based).
-__device__ __forceinline__ bool gwd_bgrid_map(float lat, float lon, float stph0, float ctph0,
+// __noinline__: one compiled body for every pass, so the box pass and the gathers map each source cell alike.
+__device__ __noinline__ bool gwd_bgrid_map(float lat, float lon, float stph0, float ctph0,
                                               float tlm0, float dph, float dlm, float wbd,
                                               float sbd, int im, int jm, int& ii0, int& jj0)
 {
@@ -161,15 +169,14 @@ __device__ __forceinline__ void gwd_atomic_max_f(float* addr, float v)
     }
 }
 
-// Pass 1 over the find_bounds_ll window of the 30-arcsec source grid: count, sum_topo (non-ocean),
-// max_height (bgrid branch, 1534), and the squared and cross derivative sums (1571-1609).
+// Pass 1 over the find_bounds_ll window of the 30-arcsec source grid: count, max_height (bgrid branch, 1534)
+// and the model cell's box of window cells (box[0..3][cell] = xmin, xmax, ymin, ymax). Order-free atomics only.
 // One thread per window cell (x, y); the window is (i_lo..i_lo+ni-1) x (j_lo..j_lo+nj-1).
 extern "C" __global__ void gwd_src_accum(
     const short* __restrict__ dem, const float* __restrict__ origin,
     int isrc, int jsrc, int i_lo, int j_lo, int ni, int nj, int im, int jm,
     float stph0, float ctph0, float tlm0, float dph, float dlm,
-    int* __restrict__ count, float* __restrict__ sum_topo, float* __restrict__ max_h,
-    float* __restrict__ sdx2, float* __restrict__ sdy2, float* __restrict__ sdxy)
+    int* __restrict__ count, float* __restrict__ max_h, int* __restrict__ box)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -183,33 +190,73 @@ extern "C" __global__ void gwd_src_accum(
     if (!gwd_bgrid_map(lat, lon, stph0, ctph0, tlm0, dph, dlm, origin[0], origin[1],
                        im, jm, ii0, jj0)) return;
     const size_t idx = IDX2(ii0, jj0, im);
+    const size_t n = (size_t)im * (size_t)jm;
 
     const short elev = dem[IDX2(i0, j0, isrc)];
     atomicAdd(&count[idx], 1);
     if (elev != GWD_WATER) {
-        atomicAdd(&sum_topo[idx], (float)elev);
         gwd_atomic_max_f(&max_h[idx], (float)elev);
     }
+    atomicMin(&box[idx], x);
+    atomicMax(&box[n + idx], x);
+    atomicMin(&box[2 * n + idx], y);
+    atomicMax(&box[3 * n + idx], y);
+}
 
-    // derivative stencil: i wraps around the globe; one-sided rows at the first and last source row
-    const float dx = gwd_dx_row(isrc, j0);
-    float dy = gwd_dy_src(jsrc);
-    const int im1 = (i0 - 1 + isrc) % isrc;
-    const int ip1 = (i0 + 1) % isrc;
-    int jm1 = j0 - 1;
-    if (jm1 < 0) { jm1 = 0; dy = gwd_dy_src(jsrc) * 0.5f; }
-    int jp1 = j0 + 1;
-    if (jp1 > jsrc - 1) { jp1 = jsrc - 1; dy = gwd_dy_src(jsrc) * 0.5f; }
+// Gather 1, one thread per model cell: sum_topo (non-ocean) and the squared and cross derivative sums
+// (1571-1609) over the source cells that map to the cell, in window order (y, then x). Plain stores.
+// A cell no source cell maps to keeps an empty box (xmin > xmax) and gets zero sums (the wrapper refuses it).
+extern "C" __global__ void gwd_model_gather_sums(
+    const short* __restrict__ dem, const float* __restrict__ origin,
+    int isrc, int jsrc, int i_lo, int j_lo, int im, int jm,
+    float stph0, float ctph0, float tlm0, float dph, float dlm,
+    const int* __restrict__ box,
+    float* __restrict__ sum_topo, float* __restrict__ sdx2, float* __restrict__ sdy2, float* __restrict__ sdxy)
+{
+    const int ic = blockIdx.x * blockDim.x + threadIdx.x;
+    const int jc = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ic >= im || jc >= jm) return;
+    const size_t p = IDX2(ic, jc, im);
+    const size_t n = (size_t)im * (size_t)jm;
+    const int x0 = box[p], x1 = box[n + p], y0 = box[2 * n + p], y1 = box[3 * n + p];
+    const float wbd = origin[0], sbd = origin[1];
+    float st = 0.0f, sx = 0.0f, sy = 0.0f, sxy = 0.0f;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            int i0, j0;
+            gwd_src_cell(x, y, isrc, i_lo, j_lo, i0, j0);
+            float lat, lon;
+            gwd_src_latlon(i0, j0, lat, lon);
+            int ii0, jj0;
+            if (!gwd_bgrid_map(lat, lon, stph0, ctph0, tlm0, dph, dlm, wbd, sbd, im, jm, ii0, jj0)) continue;
+            if (ii0 != ic || jj0 != jc) continue;
+            const short elev = dem[IDX2(i0, j0, isrc)];
+            if (elev != GWD_WATER) st += (float)elev;
 
-    const float topo_im1 = gwd_topo_or_zero(dem[IDX2(im1, j0, isrc)]);
-    const float topo_ip1 = gwd_topo_or_zero(dem[IDX2(ip1, j0, isrc)]);
-    const float topo_jm1 = gwd_topo_or_zero(dem[IDX2(i0, jm1, isrc)]);
-    const float topo_jp1 = gwd_topo_or_zero(dem[IDX2(i0, jp1, isrc)]);
-    const float dhdx = (topo_ip1 - topo_im1) / dx;
-    const float dhdy = (topo_jp1 - topo_jm1) / dy;
-    atomicAdd(&sdx2[idx], dhdx * dhdx);
-    atomicAdd(&sdy2[idx], dhdy * dhdy);
-    atomicAdd(&sdxy[idx], dhdx * dhdy);
+            // derivative stencil: i wraps around the globe; one-sided rows at the first and last source row
+            const float dx = gwd_dx_row(isrc, j0);
+            float dy = gwd_dy_src(jsrc);
+            const int im1 = (i0 - 1 + isrc) % isrc;
+            const int ip1 = (i0 + 1) % isrc;
+            int jm1 = j0 - 1;
+            if (jm1 < 0) { jm1 = 0; dy = gwd_dy_src(jsrc) * 0.5f; }
+            int jp1 = j0 + 1;
+            if (jp1 > jsrc - 1) { jp1 = jsrc - 1; dy = gwd_dy_src(jsrc) * 0.5f; }
+            const float topo_im1 = gwd_topo_or_zero(dem[IDX2(im1, j0, isrc)]);
+            const float topo_ip1 = gwd_topo_or_zero(dem[IDX2(ip1, j0, isrc)]);
+            const float topo_jm1 = gwd_topo_or_zero(dem[IDX2(i0, jm1, isrc)]);
+            const float topo_jp1 = gwd_topo_or_zero(dem[IDX2(i0, jp1, isrc)]);
+            const float dhdx = (topo_ip1 - topo_im1) / dx;
+            const float dhdy = (topo_jp1 - topo_jm1) / dy;
+            sx += dhdx * dhdx;
+            sy += dhdy * dhdy;
+            sxy += dhdx * dhdy;
+        }
+    }
+    sum_topo[p] = st;
+    sdx2[p] = sx;
+    sdy2[p] = sy;
+    sdxy[p] = sxy;
 }
 
 // Per model cell after pass 1: topo (mean), max_height (1557), derivative means and the
@@ -245,34 +292,42 @@ extern "C" __global__ void gwd_model_topo(
     }
 }
 
-// Pass 2 over the window: sum of (topo - elev)^2 and ^4 per model cell (1647-1667).
-// Ocean source cells use topo^2 and topo^4 (no elevation term).
-extern "C" __global__ void gwd_src_topo_var(
+// Gather 2, one thread per model cell: sum of (topo - elev)^2 and ^4 (1647-1667) over the source cells that map
+// to the cell, in window order. Ocean source cells use topo^2 and topo^4 (no elevation term).
+extern "C" __global__ void gwd_model_gather_var(
     const short* __restrict__ dem, const float* __restrict__ origin,
-    int isrc, int jsrc, int i_lo, int j_lo, int ni, int nj, int im, int jm,
+    int isrc, int jsrc, int i_lo, int j_lo, int im, int jm,
     float stph0, float ctph0, float tlm0, float dph, float dlm,
-    const float* __restrict__ topo,
+    const int* __restrict__ box, const float* __restrict__ topo,
     float* __restrict__ sum2, float* __restrict__ sum4)
 {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= ni || y >= nj) return;
-    int i0, j0;
-    gwd_src_cell(x, y, isrc, i_lo, j_lo, i0, j0);
-
-    float lat, lon;
-    gwd_src_latlon(i0, j0, lat, lon);
-    int ii0, jj0;
-    if (!gwd_bgrid_map(lat, lon, stph0, ctph0, tlm0, dph, dlm, origin[0], origin[1],
-                       im, jm, ii0, jj0)) return;
-    const size_t idx = IDX2(ii0, jj0, im);
-
-    const short elev = dem[IDX2(i0, j0, isrc)];
-    const float tp = topo[idx];
-    const float d = (elev != GWD_WATER) ? (tp - (float)elev) : tp;
-    const float d2 = d * d;
-    atomicAdd(&sum2[idx], d2);
-    atomicAdd(&sum4[idx], d2 * d2);
+    const int ic = blockIdx.x * blockDim.x + threadIdx.x;
+    const int jc = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ic >= im || jc >= jm) return;
+    const size_t p = IDX2(ic, jc, im);
+    const size_t n = (size_t)im * (size_t)jm;
+    const int x0 = box[p], x1 = box[n + p], y0 = box[2 * n + p], y1 = box[3 * n + p];
+    const float wbd = origin[0], sbd = origin[1];
+    const float tp = topo[p];
+    float s2 = 0.0f, s4 = 0.0f;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            int i0, j0;
+            gwd_src_cell(x, y, isrc, i_lo, j_lo, i0, j0);
+            float lat, lon;
+            gwd_src_latlon(i0, j0, lat, lon);
+            int ii0, jj0;
+            if (!gwd_bgrid_map(lat, lon, stph0, ctph0, tlm0, dph, dlm, wbd, sbd, im, jm, ii0, jj0)) continue;
+            if (ii0 != ic || jj0 != jc) continue;
+            const short elev = dem[IDX2(i0, j0, isrc)];
+            const float d = (elev != GWD_WATER) ? (tp - (float)elev) : tp;
+            const float d2 = d * d;
+            s2 += d2;
+            s4 += d2 * d2;
+        }
+    }
+    sum2[p] = s2;
+    sum4[p] = s4;
 }
 
 // Per model cell: orog_stnd_dev = sqrt(sum2/count), convexity (1670-1679).

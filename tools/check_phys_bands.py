@@ -2,9 +2,9 @@
 
     python tools/check_phys_bands.py --rows 16 [run_forecast.py arguments: --case ... --source ... --hours 1 --out ...]
 
-Why a per-call A/B and not only two whole runs: on configurations whose stepping has float atomics (the 12 km
-parent: two runs of one tree already differ at f01, PORT/NESTS-ANYWHERE.md 20:50Z), two whole runs cannot show
-that bands change nothing. Here each call of phys-turbl-driver, phys-bmj-driver and phys-fer-driver runs twice
+Why a per-call A/B and not only two whole runs: it names the unit and field that differ. (It was also the only
+way while two whole runs of one tree differed at f01; that came from the init float atomics in init-gwd-orog,
+fixed 2026-11-06, and two whole runs are now bit for bit the same.) Here each call of phys-turbl-driver, phys-bmj-driver and phys-fer-driver runs twice
 on the same state in the same process:
   A: the whole domain (one band, exactly the code without bands),
   B: row bands of --rows rows,

@@ -240,7 +240,8 @@ def run(ctx):
     k_origin = kernels.get(UNIT, "gwd_bgrid_origin")
     k_accum = kernels.get(UNIT, "gwd_src_accum")
     k_topo = kernels.get(UNIT, "gwd_model_topo")
-    k_var = kernels.get(UNIT, "gwd_src_topo_var")
+    k_sums = kernels.get(UNIT, "gwd_model_gather_sums")
+    k_var = kernels.get(UNIT, "gwd_model_gather_var")
     k_std = kernels.get(UNIT, "gwd_model_std_conv")
     k_crit = kernels.get(UNIT, "gwd_src_crit")
     k_oaol = kernels.get(UNIT, "gwd_model_oaol")
@@ -267,13 +268,22 @@ def run(ctx):
         g_src = kernels.grid_2d(ni, nj, 1)
         g_mdl = kernels.grid_2d(im, jm, 1)
 
-        # pass 1: count, sum_topo, max_height, derivative sums
+        # pass 1: count, max_height and each model cell's box of window cells (order-free atomics only).
+        # The sums are then gathered per model cell in a fixed order (deterministic run to run; the float atomicAdd
+        # scatter they replace summed in a different order every run, WOOF-NAM determinism defect 2026-11-06).
+        box = cp.empty((4, jm, im), dtype=cp.int32)
+        box[0::2].fill(np.iinfo(np.int32).max)       # xmin, ymin
+        box[1::2].fill(-1)                           # xmax, ymax
         k_accum(g_src, blk, (
             dem, origin, np.int32(ISRC), np.int32(JSRC), np.int32(istart), np.int32(jstart),
             np.int32(ni), np.int32(nj), np.int32(im), np.int32(jm),
             sc["stph0"], sc["ctph0"], sc["tlm0"], sc["dph"], sc["dlm"],
-            scr_i["GWD_COUNT"], scr_f["GWD_SUMTOPO"], out["HZMAX"],
-            scr_f["GWD_SDX2"], scr_f["GWD_SDY2"], scr_f["GWD_SDXY"]))
+            scr_i["GWD_COUNT"], out["HZMAX"], box))
+        k_sums(g_mdl, blk, (
+            dem, origin, np.int32(ISRC), np.int32(JSRC), np.int32(istart), np.int32(jstart),
+            np.int32(im), np.int32(jm),
+            sc["stph0"], sc["ctph0"], sc["tlm0"], sc["dph"], sc["dlm"], box,
+            scr_f["GWD_SUMTOPO"], scr_f["GWD_SDX2"], scr_f["GWD_SDY2"], scr_f["GWD_SDXY"]))
 
         n_zero = int(cp.count_nonzero(scr_i["GWD_COUNT"] == 0))   # init-time sync
         if n_zero:
@@ -288,11 +298,11 @@ def run(ctx):
             scr_f["GWD_SDX2"], scr_f["GWD_SDY2"], scr_f["GWD_SDXY"],
             scr_f["GWD_TOPO"], out["HZMAX"], out["HANGL"], out["HANIS"], out["HSLOP"]))
 
-        # pass 2: squared and fourth-power topo deviations
-        k_var(g_src, blk, (
+        # pass 2: squared and fourth-power topo deviations, gathered per model cell over its box
+        k_var(g_mdl, blk, (
             dem, origin, np.int32(ISRC), np.int32(JSRC), np.int32(istart), np.int32(jstart),
-            np.int32(ni), np.int32(nj), np.int32(im), np.int32(jm),
-            sc["stph0"], sc["ctph0"], sc["tlm0"], sc["dph"], sc["dlm"],
+            np.int32(im), np.int32(jm),
+            sc["stph0"], sc["ctph0"], sc["tlm0"], sc["dph"], sc["dlm"], box,
             scr_f["GWD_TOPO"], scr_f["GWD_SUM2"], scr_f["GWD_SUM4"]))
 
         # orog_stnd_dev and convexity
@@ -328,6 +338,7 @@ def run(ctx):
             "HLENSW": int(cp.count_nonzero((cul + clr) == 0)),
             "HLENNW": int(cp.count_nonzero((cur + cll) == 0)),
         }
+    del box
     ctx.tables["gwd_report"] = {"bounds_is_ie_js_je": (istart, iend, jstart, jend),
                                 "zero_ol_denominator_cells": zero_ol}
     print(f"{UNIT}: ol cells with zero denominator (written 0, Fortran writes NaN): {zero_ol}")

@@ -42,12 +42,11 @@ _STALE_TABLE_KEYS = ("pdsg1", "psg1", "dsg1", "dsg2", "sg1", "sg2", "sgml1", "sg
                      "bmj_vert")
 
 
-def _device_acc(ctx, lm: int):
+def _device_acc(lm: int, nblk: int):
+    """Block sums [4, LM, NBLK] (every slot is stored by init_vcoord_fit_partial, then summed in block order by
+    init_vcoord_solve: no atomics, the same answer every run). Init-only, so not cached in ctx.tables."""
     import cupy as cp
-    key = "vcoord_acc"
-    if key not in ctx.tables:
-        ctx.tables[key] = cp.zeros((4, lm), dtype=cp.float64)
-    return ctx.tables[key]
+    return cp.empty((4, lm, nblk), dtype=cp.float64)
 
 
 def _put(st, name: str, host: np.ndarray):
@@ -144,8 +143,9 @@ def run(ctx):
     pdtop = float(ctx.cfg.ptsgm) - pt              # as grid.vcoord_from_config
     n_b1 = float((im - 2) * (jm - 2))              # b1 columns (CONTRACT.md section 0)
 
-    acc = _device_acc(ctx, lm)
-    acc[...] = 0.0
+    grid3 = kernels.grid_2d(im, jm, lm)
+    nblk = int(grid3[0]) * int(grid3[1])
+    acc = _device_acc(lm, nblk)
     psgml1_d = cp.zeros((lm,), dtype=cp.float32)
     sgml2_d = cp.zeros((lm,), dtype=cp.float32)
 
@@ -154,13 +154,13 @@ def run(ctx):
     cp.cuda.get_current_stream().synchronize()
     with ctx.stream:
         fit = kernels.get(UNIT, FIT)
-        fit(kernels.grid_2d(im, jm, lm), kernels.BLOCK_2D, (
+        fit(grid3, kernels.BLOCK_2D, (
             pres, psfc, acc, np.float32(pt), np.float32(pdtop),
             np.int32(im), np.int32(jm), np.int32(lm),
         ))
         solve = kernels.get(UNIT, SOLVE)
         solve(((lm + 127) // 128, 1, 1), (128, 1, 1), (
-            acc, np.float64(n_b1), psgml1_d, sgml2_d, np.int32(lm),
+            acc, np.float64(n_b1), psgml1_d, sgml2_d, np.int32(lm), np.int32(nblk),
         ))
     # The one init-time sync: the host reads below need both kernels finished. (Without it the
     # asnumpy copies raced the non-blocking stream and read partial sums.)

@@ -22,19 +22,27 @@ def compare_hour(args) -> dict:
     a, b, name = args
     with netCDF4.Dataset(Path(a) / name) as da, netCDF4.Dataset(Path(b) / name) as db:
         va, vb = set(da.variables), set(db.variables)
-        h = {"file": name, "vars": len(va & vb), "only_a": sorted(va - vb), "only_b": sorted(vb - va), "diff": []}
+        h = {"file": name, "vars": len(va & vb), "only_a": sorted(va - vb), "only_b": sorted(vb - va), "diff": [],
+             "words": 0, "words_diff": 0}
         for v in sorted(va & vb):
             xa, xb = np.asarray(da[v][:]), np.asarray(db[v][:])
             if xa.shape != xb.shape:
                 h["diff"].append({"var": v, "shape": [list(xa.shape), list(xb.shape)]})
                 continue
+            h["words"] += int(xa.size)
             if xa.dtype.kind == "f":
                 same = np.array_equal(xa.view(np.uint32 if xa.itemsize == 4 else np.uint64),
                                       xb.view(np.uint32 if xb.itemsize == 4 else np.uint64))
             else:
                 same = np.array_equal(xa, xb)
             if not same:
-                d = {"var": v, "n": int(np.count_nonzero(xa != xb))}
+                if xa.dtype.kind == "f":      # bit patterns: a NaN in both is the same word, -0 vs +0 is not
+                    u = np.uint32 if xa.itemsize == 4 else np.uint64
+                    n = int(np.count_nonzero(xa.view(u) != xb.view(u)))
+                else:
+                    n = int(np.count_nonzero(xa != xb))
+                h["words_diff"] += n
+                d = {"var": v, "n": n}
                 if xa.dtype.kind == "f" and xa.ndim >= 2:
                     d["maxabs"] = float(np.nanmax(np.abs(xa.astype(np.float64) - xb.astype(np.float64))))
                     rows = np.nonzero(np.any((xa != xb).reshape(-1, xa.shape[-2], xa.shape[-1]), axis=(0, 2)))[0]
@@ -55,11 +63,14 @@ def compare(a: Path, b: Path, workers: int = 8) -> dict:
     for h in hours:
         nbad += len(h["diff"]) + len(h["only_a"]) + len(h["only_b"])
         first = h["diff"][0] if h["diff"] else None
-        print(f"{h['file']}: {h['vars']} vars, {len(h['diff'])} differ" + (f"; first {first}" if first else ""),
-              flush=True)
+        print(f"{h['file']}: {h['vars']} vars, {len(h['diff'])} differ, {h['words_diff']:,} of {h['words']:,} words"
+              + (f"; first {first}" if first else ""), flush=True)
     rec["hours"] = hours
     rec["bitwise"] = nbad == 0 and not rec["only_a"] and not rec["only_b"] and len(fa) > 0
-    print(f"{len(hours)} hours compared: {'BITWISE IDENTICAL' if rec['bitwise'] else 'DIFFERENT'}", flush=True)
+    rec["words"] = sum(h["words"] for h in hours)
+    rec["words_diff"] = sum(h["words_diff"] for h in hours)
+    print(f"{len(hours)} hours compared: {'BITWISE IDENTICAL' if rec['bitwise'] else 'DIFFERENT'} "
+          f"({rec['words_diff']:,} of {rec['words']:,} words differ)", flush=True)
     return rec
 
 

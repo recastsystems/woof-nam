@@ -318,9 +318,9 @@ def main(argv=None):
     g = gridmod.build(cfg)
     multi = rank_setup(g) if "NAMGPU_RANK" in os.environ else None   # several cards: this process is one rank
     if multi is not None and a.init_from is None:
-        raise SystemExit("--cards N needs --init-from <saved init>: the init chain sums with float atomics "
-                         "(init-gwd-orog, init-vcoord-recover), so ranks that each ran it would start from different "
-                         "bits; the init runs once (namgpu.init.slab_init save) and every rank loads its rows")
+        raise SystemExit("--cards N needs --init-from <saved init>: a rank holds only its own rows, and the init "
+                         "chain builds the whole domain (whole-domain fits, the GWD terrain window, the boundaries), "
+                         "so the init runs once (namgpu.init.slab_init save) and every rank loads its rows")
     if multi is not None:
         g = multi["grid"]                                     # the rank's grid (slab.local_grid)
     if a.init_from is not None or a.resume is not None:

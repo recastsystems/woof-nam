@@ -117,7 +117,7 @@ def main():
     ap.add_argument("--step-mib", type=int, default=32, help="snapshot every N MiB of new high-water")
     ap.add_argument("--init-from", type=Path, default=None,
                     help="a saved init (python -m namgpu.init.slab_init save): both arms of a bitwise check start from "
-                         "the same bits (the init chain sums with float atomics)")
+                         "the same bits (and skip the init time)")
     a = ap.parse_args()
     import cupy as cp
     from namgpu import state as statemod

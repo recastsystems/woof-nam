@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Two runs of the same case now give the same forecast, bit for bit. The terrain statistics the gravity-wave drag
+  reads (standard deviation, convexity, slope, anisotropy and angle of the sub-grid orography) were summed with
+  floating-point atomics, in a different order on every run, so about a fifth of the 12 km cells differed in the
+  last bit between two runs. The digital filter spread that over the domain before the 0 h output, and convective
+  cells grew it to several kelvin and millimetres within hours. The sums are now gathered per cell in a fixed
+  order, as is the vertical-coordinate fit. Measured on the 12 km grid (2026-11-03 06Z GFS start, digital filter,
+  all physics, 6 h, one card): two runs before the fix differed in 3,140,115,881 of 6,295,450,910 history values;
+  after it, in none. No change in speed.
+
 ## 0.1.3 (2026-11-05)
 
 - Radiation no longer hangs when it runs in 2-row chunks. A chunk of 2 rows owned no row, so the chunk loop never
