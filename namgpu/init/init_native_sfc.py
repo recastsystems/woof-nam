@@ -17,6 +17,17 @@ Outputs (ctx.st, NMMB names, CONTRACT layout):
     STC, SMC, SH2O [4, JM, IM]; TSKIN, SST, SICE, SM, TG, SI (mm), SNO (mm), SNOWC, ALBEDO, VEGFRC, Z0,
     Z0BASE, CMC [JM, IM] float32; IVGTYP, ISLTYP [JM, IM] int32.
 Conversions and the frozen-fraction formula are documented in the kernel header.
+
+Urban soil moisture from a foreign land model (urban_soilw, before the kernel). NAM's SFLX replaces the soil
+parameters of an urban point (VEGTYP == IW, 13 for IGBP) with SMCMAX 0.45, SMCREF 0.42, SMCWLT = SMCDRY 0.40
+(module_LS_NOAHLSM.F90:1851-1858), so NMMB Noah only evaporates from an urban soil holding 0.40-0.45. The NAM's own
+analysis cycles those points in that range (0.43 at the Carolina airports, 2026-01-23 12Z). A start whose land state
+comes from another model (GFS, IFS, ERA5, ...) carries that model's soil moisture for the soil class, 0.22 at the
+same points: below the urban wilting point, so those cells never evaporate and their 2 m dewpoint runs 10-20 F too
+dry under daytime mixing in dry air (KGSO/KRDU/KINT/KCLT, Jan 2026 wedge; 4-8 F in the Dec 2022 Northeast case).
+For such a source each urban land point keeps its relative wetness: (theta - SMCWLT)/(SMCMAX - SMCWLT) of the
+point's STAS soil class, mapped onto the urban range 0.40-0.45. Every other point, and every point of the NAM's own
+analysis or a WOOF-NAM parent (already NMMB Noah's state), is unchanged.
 Run the self-test (random plausible inputs, full size, NaN/Inf check):
     source env.sh && python -m namgpu.init.init_native_sfc
 """
@@ -39,6 +50,52 @@ OPT_KEYS = ("SNOWC",)   # NAM's snowc record overrides the 0.98/0 rule when pres
 OUT_FLOAT_2D = ("TSKIN", "SST", "SICE", "SM", "TG", "SI", "SNO", "SNOWC", "ALBEDO", "VEGFRC",
                 "Z0", "Z0BASE", "CMC")
 OUT_SOIL = ("STC", "SMC", "SH2O")
+
+# Urban soil (module_LS_NOAHLSM.F90:1851-1858, SFLX: IF(VEGTYP==IW) SMCMAX=0.45, SMCWLT=0.40). IW = 13 for IGBP
+# (IVEGSRC 1, phys_noah_driver.IVEGSRC). Sources whose soil moisture is NMMB Noah's own keep it as it is.
+URBAN_IW = 13
+URBAN_SMCWLT = 0.40
+URBAN_SMCMAX = 0.45
+OWN_LAND_SOURCES = ("native", "parent")
+
+
+def _stas_wlt_max():
+    """STAS SOILPARM wilting point and porosity per soil class (1-based class k at index k-1), host float32."""
+    import numpy as np
+    from namgpu.init import init_static_missing as ism
+    t = ism._noah().load_tables(mminlu="MODIFIED_IGBP_MODIS_NOAH", mminsl="STAS", tbl_dir=ism.TBL_DIR)
+    return np.asarray(t.wltsmc, np.float32).ravel(), np.asarray(t.maxsmc, np.float32).ravel()
+
+
+def urban_soilw(soilw, vgtyp, sotyp, land, wlt=None, smax=None):
+    """Soil moisture [4, JM, IM] with urban land points mapped from their soil class's range onto the urban one.
+
+    theta_urban = 0.40 + 0.05 * clip((theta - SMCWLT_k) / (SMCMAX_k - SMCWLT_k), 0, 1), k = the point's STAS class.
+    A class with no range (water, ice) takes the urban wilting point. Non-urban or water points are returned as given.
+    Works on cupy or numpy arrays. Returns (array, number of urban land points changed)."""
+    try:
+        import cupy as cp
+        xp = cp.get_array_module(soilw)
+    except ImportError:          # CPU-only test environment
+        import numpy as xp
+    if wlt is None or smax is None:
+        wlt, smax = _stas_wlt_max()
+    wlt_d, max_d = xp.asarray(wlt, dtype=xp.float32), xp.asarray(smax, dtype=xp.float32)
+    k = xp.clip(xp.asarray(sotyp).astype(xp.int32) - 1, 0, wlt_d.size - 1)
+    w, m = wlt_d[k][None], max_d[k][None]
+    span = m - w
+    rel = xp.where(span > 0, xp.clip((soilw - w) / xp.where(span > 0, span, 1.0), 0.0, 1.0), 0.0)
+    mapped = (xp.float32(URBAN_SMCWLT) + xp.float32(URBAN_SMCMAX - URBAN_SMCWLT) * rel).astype(xp.float32)
+    urban = ((xp.asarray(vgtyp) == URBAN_IW) & (xp.asarray(land) > 0.5))[None]
+    return xp.ascontiguousarray(xp.where(urban, mapped, soilw).astype(xp.float32)), int(urban.sum())
+
+
+def soilw_for_source(raw, source, wlt=None, smax=None):
+    """The soil moisture init-native-sfc starts from: the source's own, with urban_soilw applied when the source's
+    land state is not NMMB Noah's own (OWN_LAND_SOURCES). Returns (array, urban points changed or None)."""
+    if source is None or source in OWN_LAND_SOURCES:
+        return raw["SOILW"], None
+    return urban_soilw(raw["SOILW"], raw["VGTYP"], raw["SOTYP"], raw["LAND"], wlt, smax)
 
 
 def _check_raw(raw, im, jm):
@@ -77,12 +134,17 @@ def run(ctx):
     else:
         snowc_arr, has_snowc = cp.zeros((jm, im), dtype=cp.float32), 0
     has_snowc_d = cp.asarray([has_snowc], dtype=cp.int32)
+    source = (ctx.tables.get("grid_source") or {}).get("source")
+    soilw, n_urban = soilw_for_source(raw, source)
+    if n_urban is not None:
+        print(f"{UNIT}: {source} soil moisture on {n_urban} urban land points mapped onto the NAM urban range "
+              f"{URBAN_SMCWLT}-{URBAN_SMCMAX} (relative wetness of the soil class kept)", flush=True)
     k = kernels.get(KFILE, KERNEL)
     scope = ctx.stream if ctx.stream is not None else contextlib.nullcontext()
     grid, block = kernels.grid_cols(im, jm), (BLOCK,)
     with scope:
         k(grid, block, (
-            raw["TSOIL"], raw["SOILW"], raw["TMP_SFC"], raw["ICEC"], raw["LAND"],
+            raw["TSOIL"], soilw, raw["TMP_SFC"], raw["ICEC"], raw["LAND"],
             raw["TSOIL_3M"], raw["SNOD"], raw["WEASD"], raw["ALBDO"], raw["VEG"], raw["SFCR"],
             snowc_arr, has_snowc_d, raw["CNWAT"], raw["VGTYP"], raw["SOTYP"],
             bexp, psisat, smcmax,
