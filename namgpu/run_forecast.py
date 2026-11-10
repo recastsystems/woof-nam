@@ -1045,8 +1045,9 @@ def missing_case_folder(a, start) -> None:
     if cdir.is_dir():
         return
     src = "" if a.source in ("native", None) else f" --source {a.source}"
+    hours = max(1, -int(-a.hours // 1))                   # fetch takes whole hours: cover the run
     raise SystemExit(f"woof-nam run: no case folder {cdir}; fetch it first: woof-nam fetch --cycle "
-                     f"{start:%Y%m%d%H} --hours {a.hours:g} --case-dir {cdir}{src}")
+                     f"{start:%Y%m%d%H} --hours {hours} --case-dir {cdir}{src}")
 
 
 def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool = True) -> int:

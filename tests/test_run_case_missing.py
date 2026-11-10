@@ -31,3 +31,11 @@ def test_an_existing_case_folder_goes_on(tmp_path, monkeypatch):
     monkeypatch.setattr(run_forecast, "memory_check", stop)
     with pytest.raises(Reached):
         run_forecast.main(["--case", "2026-01-23_12z", "--source", "gfs", "--hours", "1", "--out", str(tmp_path / "r")])
+
+def test_part_hours_ask_for_whole_fetch_hours(tmp_path, monkeypatch):
+    monkeypatch.setenv("NAMGPU_ROOT", str(tmp_path))
+    monkeypatch.delenv("NAMGPU_RANK", raising=False)
+    monkeypatch.setattr(run_forecast, "memory_check", lambda a: pytest.fail("reached the memory check"))
+    with pytest.raises(SystemExit) as e:
+        run_forecast.main(["--case", "2026-01-23_12z", "--hours", "2.5", "--out", str(tmp_path / "r")])
+    assert " --hours 3 --case-dir " in str(e.value) and not str(e.value).endswith("--source native"), str(e.value)
