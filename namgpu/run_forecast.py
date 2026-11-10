@@ -444,7 +444,8 @@ def main(argv=None):
     from namgpu import domains
     domains.select(a.domain, a.source)
     if "NAMGPU_RANK" not in os.environ:
-        domains.start_of(Path(a.case) if a.case_dir is not None else paths.case_dir(a.case))   # the name, in one line
+        start0 = domains.start_of(Path(a.case) if a.case_dir is not None else paths.case_dir(a.case))   # the name, in one line
+        missing_case_folder(a, start0)
         rc = memory_check(a)
         if rc:
             return rc
@@ -1032,6 +1033,20 @@ def launch(a, argv, static_rec=None) -> int:
     if ok and not a.no_maps:
         return maps_only(str(a.case), out, a.case_dir, not a.no_columns)
     return 0 if ok else 1
+
+
+def missing_case_folder(a, start) -> None:
+    """A case folder that does not exist stops in one line naming the fetch, before any card or init work (it
+    stopped deep in the init with a traceback). The nest and suite doors make their case folder before they call run;
+    --resume and --source parent take theirs from the run they continue."""
+    if a.resume is not None or a.source == "parent":
+        return
+    cdir = a.case_dir.resolve() if a.case_dir is not None else paths.case_dir(a.case)
+    if cdir.is_dir():
+        return
+    src = "" if a.source in ("native", None) else f" --source {a.source}"
+    raise SystemExit(f"woof-nam run: no case folder {cdir}; fetch it first: woof-nam fetch --cycle "
+                     f"{start:%Y%m%d%H} --hours {a.hours:g} --case-dir {cdir}{src}")
 
 
 def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool = True) -> int:

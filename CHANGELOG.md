@@ -9,6 +9,8 @@
 - The CDF soil start and RUC with HRRR soil classes (both presets use them) fetch what they need on first use: the
   soil table of the start month (268 MB, pinned) and the BNU soil set (8 MB, through `gpuwm fetch-geog`). From a
   fresh install the run used to build its start and then stop with a traceback.
+- `woof-nam run --case X` with no case folder X stops at once with one line that names the `woof-nam fetch` command
+  for it; it used to stop in the start with a traceback.
 - `woof-nam suite --no-products` passes when every forecast completes and keeps each nest's history; it returned 1 after
   a clean forecast, counting the GRIB2 hours it had been told not to write.
 - `woof-nam suite` on 4 cards runs the CONUS nest on all four (63-68 s per forecast hour measured on 4 x RTX PRO 6000;
