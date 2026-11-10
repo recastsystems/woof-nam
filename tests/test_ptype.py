@@ -152,6 +152,6 @@ def test_the_frame_holds_the_type_carriers(product_set):
     names = products.frame_carriers(sets.get(product_set))
     for name in products.PTYPE_CARRIERS:
         assert names.count(name) == 1
-    src = inspect.getsource(products.wrf_frame)
+    src = inspect.getsource(products.wrf_frame) + inspect.getsource(products._wrf_frame_write)   # the writer half
     assert "for name in frame_carriers(ps):" in src            # the write loop
     assert "if n not in PTYPE_CARRIERS" in src                  # the pool still leaves them to the main process

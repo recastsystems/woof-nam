@@ -33,6 +33,7 @@ a companion file on a Lambert grid (NAM 218 frame) for the maps.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -246,12 +247,28 @@ def write_from_shm(path: str, shm_name: str, meta: dict) -> str:
 
 
 def write_payload(path: Path, payload: dict) -> Path:
-    """NetCDF encode and write.  Host data only; safe on a worker thread."""
+    """NetCDF encode and write.  Host data only; safe on a worker thread.
+
+    The file is written under a dot name beside `path` (.<name>.part) and renamed into place whole, so a reader that
+    sees `path` sees a finished file. Breakage it prevents: a products or maps follower could not tell a history
+    hour still being written from a finished one, so it took each hour only once the next hour's file appeared,
+    one model hour late (65 s an hour on the 3 km CONUS nest)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.part")
+    try:
+        _write_payload(tmp, payload)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _write_payload(path: Path, payload: dict) -> Path:
     import netCDF4  # noqa: PLC0415
 
     valid, start = payload["valid"], payload["start"]
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     d = payload["dims"]
     with netCDF4.Dataset(path, "w", format="NETCDF4") as nc:
         nc.createDimension("Time", None)

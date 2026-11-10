@@ -48,7 +48,7 @@ jobs:
       - name: moving-nest tests (CPU)
         run: |
           python -m pip install --quiet numpy scipy netCDF4 pytest
-          PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_follow_bocos.py tests/test_follow_door.py tests/test_follow_prepcap.py tests/test_follow_replay.py tests/test_follow_segment.py tests/test_small_card.py tests/test_helpers.py tests/test_memory_path.py tests/test_nest_door.py tests/test_ncep_nests.py tests/test_coupled_tables.py tests/test_soil_cdf_fetch.py tests/test_ptype.py tests/test_products_inventory.py tests/test_tempo_versions.py tests/test_woof_nam_next_rows.py tests/test_suite_card_share.py tests/test_suite_retry.py tests/test_suite_table.py tests/test_products_run_ctx.py tests/test_suite_no_products.py tests/test_hexdep.py tests/test_ruc_bnu_fetch.py tests/test_run_case_missing.py
+          PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_follow_bocos.py tests/test_follow_door.py tests/test_follow_prepcap.py tests/test_follow_replay.py tests/test_follow_segment.py tests/test_small_card.py tests/test_helpers.py tests/test_memory_path.py tests/test_nest_door.py tests/test_ncep_nests.py tests/test_coupled_tables.py tests/test_soil_cdf_fetch.py tests/test_ptype.py tests/test_products_inventory.py tests/test_tempo_versions.py tests/test_woof_nam_next_rows.py tests/test_suite_card_share.py tests/test_suite_retry.py tests/test_suite_table.py tests/test_products_run_ctx.py tests/test_suite_no_products.py tests/test_hexdep.py tests/test_ruc_bnu_fetch.py tests/test_run_case_missing.py tests/test_products_pipeline.py
 
       - name: winter/CAD scorer (Rust reader and station statistics)
         run: |

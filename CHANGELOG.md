@@ -2,6 +2,9 @@
 
 ## 0.2.0 (candidate)
 
+- GRIB2 products are written sooner, with the same files byte for byte: each hour is taken as soon as its history
+  file is complete and published as soon as its writer ends, the hand-off frame runs its longest jobs first, and the
+  pinned GRIB2 writer does its shared column work once per hour and stops a failed parcel lift early.
 - gpuwm-hex is optional. Only TEMPO microphysics, MYNN v6.1 and the suites that use TEMPO (`hrrrv5`, `rapv5`,
   `woof-nam-next-12km`, `woof-nam-next-7p6km`) need it (`pip install "recast-woof-nam[modern]"`, gpuwm-hex 0.5.0 or
   newer). Without it, a run that asks for one of them stops before it starts, with one line, where it used to stop at

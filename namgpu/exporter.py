@@ -33,11 +33,11 @@ NAME = "rw_rrfs_upp"
 REPO = "recastsystems/woof-nam"
 # the woof-nam release whose assets carry this writer (a dev build fetches from the release it leads to)
 ASSET_RELEASE = "v0.2.0"
-# built from gpuwm 5c948bead2ae47a278caf08ff55c0473c66e2021 (crate rw-grib2export, bin rw_rrfs_upp) with Rust 1.94.0
+# built from gpuwm 712ca847a9a38d68faa37eb86383196855e4db04 (crate rw-grib2export, bin rw_rrfs_upp) with Rust 1.94.0
 # in quay.io/pypa/manylinux_2_28_x86_64@sha256:c2261579b9c2e5d45aa93312f73e2a302182e3e977b558581a1838d6fed3d8e6
 PINS = {
-    "linux-x86_64": {"asset": "rw_rrfs_upp-linux-x86_64", "bytes": 16797248,
-                     "sha256": "cd74b73e8b5342b913a0f4518baa86f7321ce88727102b4b1ce8b4f8eec8fbea"},
+    "linux-x86_64": {"asset": "rw_rrfs_upp-linux-x86_64", "bytes": 16904352,
+                     "sha256": "9937ff91c753e7370f6ba6d3b6562b8acde611840f9c76c2191842644411264a"},
 }
 FETCH_CMD = "woof-nam fetch-bridges"
 

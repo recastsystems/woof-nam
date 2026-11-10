@@ -43,7 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -238,15 +238,22 @@ def pad_attrs(og, i0: int, j0: int) -> dict:
             "WOOF_FULL_LA2": np.float64(la2), "WOOF_FULL_LO2": np.float64(lo2 % 360.0)}
 
 
+_SG_KEYS: dict = {}
+
+
 def tables_for(gkey):
     """(tables, output frame) for a job's grid key: None = grid 218 from the 12 km parent (awphys); else
     (set name, sets.OutGrid, history path[, pad]) = that output grid (or window of it) from the history's own NMMB
-    grid. Cached per process."""
+    grid. Cached per process; the history's grid key is read once per path (a pool worker otherwise read the
+    history's XLAT/XLONG again for every field)."""
     if gkey is None:
         return _tables()
     name, out, hist = gkey[:3]
-    sg = SourceGrid(hist)
-    k = (name, out, sg.key())
+    if hist not in _SG_KEYS:
+        sg = SourceGrid(hist)
+        _SG_KEYS[hist] = (sg.key(), sg)
+    key, sg = _SG_KEYS[hist]
+    k = (name, out, key)
     if k not in _SET_TABLES:
         _SET_TABLES[k] = (build_tables_out(sg, out), out)
     return _SET_TABLES[k]
@@ -397,6 +404,52 @@ def _read_regrid(job):
     return name, (_interp_for(ps, name)(tab, a), dims)
 
 
+def _read_regrid_to(arg):
+    """Worker: _read_regrid, with the regridded array left as <where>/<name>.npy in host RAM for the main process to
+    map, instead of pickled back through the pool's pipe (a 3 km nest hour is 7 GB of arrays: received and unpickled
+    one after the other in the main process, that was the frame's longest serial step after the pool)."""
+    where, job = arg
+    name, got = _read_regrid(job)
+    if got is None or where is None:
+        return name, got
+    a, dims = got
+    path = os.path.join(where, f"{name}.npy")
+    np.save(path, np.ascontiguousarray(a), allow_pickle=False)
+    return name, (path, dims)
+
+
+def _mapped(v):
+    """A pool result as the frame uses it: (array, dims), the array mapped from host RAM when the worker left it there."""
+    if v is None or not isinstance(v[0], str):
+        return v
+    return np.load(v[0], mmap_mode="r", allow_pickle=False), v[1]
+
+
+# The longest field-pool jobs, first: a carrier that reads several 3-D fields itself, then every 3-D field. Breakage
+# it prevents: NAM_CLDBASE (seven 3-D reads, 15 s on the CONUS nest) was queued last and ran alone after every other
+# job had finished, the pool's tail.
+HEAVY_FIRST = ("NAM_CLDBASE", "NAM_TCDC")
+
+
+def _job_order(jobs, three_d) -> list:
+    rank = {n: i for i, n in enumerate(HEAVY_FIRST)}
+    return sorted(jobs, key=lambda j: rank.get(j[1], len(rank) + (0 if j[1] in three_d else 1)))
+
+
+def _frame_shm(history: Path, est_bytes: int):
+    """A fresh folder in host RAM for one frame's regridded fields ($NAMGPU_PRODUCTS_SHM, default /dev/shm), or None
+    with a printed line when it has no room (the fields then come back through the pool's pipe, as before)."""
+    root = Path(os.environ.get("NAMGPU_PRODUCTS_SHM", "/dev/shm"))
+    try:
+        free = shutil.disk_usage(root).free
+    except OSError:
+        free = 0
+    if free < 2 * est_bytes:
+        print(f"woof-nam products: {history.name}: {root} has {free / 1e9:.1f} GB free, under twice this frame's "
+              f"{est_bytes / 1e9:.1f} GB: its fields come back through the pool's pipe (slower)", flush=True)
+        return None
+    return tempfile.mkdtemp(prefix=f"woof-nam-frame-{os.getpid()}-", dir=root)
+
 
 # The four precipitation-type carriers (awphys records 336-339, namgpu.products.ptype) are computed here, in the main
 # process, from one classification per hour, and the CuPy pool is emptied after it. Breakage it prevents: in the
@@ -450,8 +503,29 @@ def wrf_frame(history: Path, dst: Path, pool=None, t=None, f=None, ps=None, gkey
         jobs = [(str(history), n) for n in names] + [(str(history), n) for n in carriers]
     else:
         jobs = [(str(history), n, gkey, cctx) for n in names + carriers]
-    got = dict(pool.map(_read_regrid, jobs) if pool is not None else map(_read_regrid, jobs))
-    got.update(_ptype_carriers(history, gkey, cctx))
+    three_d = set(PASS_3D + ("PRES", "PH", "U", "V", "W") + PASS_NMM + PASS_3D_NEST)
+    jobs = _job_order(jobs, three_d)
+    shm = None
+    if pool is not None:
+        ny0, nx0 = t["wx"].shape
+        with netCDF4.Dataset(history) as s0:
+            nz0 = s0.dimensions["bottom_top"].size
+        shm = _frame_shm(history, 4 * ny0 * nx0 * ((nz0 + 1) * len(three_d) + len(names) + len(carriers) + 16))
+    try:
+        return _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm)
+    finally:
+        if shm is not None:
+            shutil.rmtree(shm, ignore_errors=True)
+
+
+def _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm) -> dict:
+    import netCDF4
+    # the pool takes every job now (Executor.map submits them all); the precipitation types are classified here in
+    # the main process meanwhile, then the pool's results are collected
+    it = pool.map(_read_regrid_to, [(shm, j) for j in jobs]) if pool is not None else map(_read_regrid, jobs)
+    ptype = _ptype_carriers(history, gkey, cctx)
+    got = {name: _mapped(v) for name, v in it}
+    got.update(ptype)
     with netCDF4.Dataset(history) as s:
         get = lambda n: got[n][0]  # noqa: E731
         lat, lon = t["lat"].astype(np.float32), t["lon"].astype(np.float32)
@@ -1054,12 +1128,12 @@ def _run_ctx(run_dir: Path) -> dict:
 
 def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, threads: int = 8,
         device: str = "gpu", bits: int = DEFAULT_BITS, table: Path | None = None, follow: bool = False,
-        poll_s: float = 5.0, idle_timeout_s: float = 1800.0, until: Path | None = None,
+        poll_s: float = 1.0, idle_timeout_s: float = 1800.0, until: Path | None = None,
         set_name: str | None = None) -> dict:
     """Every history hour of a run (or `hours`) -> one awphys file each, plus <out>/index.json.
 
     follow: keep watching the run folder while the forecast runs and write each hour as soon as its history file
-    is complete (a later history file exists and this one's size held across one poll, or the run's
+    is complete (the history writer renames each file into place whole; its size held across one poll, or the run's
     forecast-receipt.json is written); stop once the receipt is there and every hour is done, or after
     `idle_timeout_s` with no new history file and no receipt (the run died: exit with an error). <out>/DONE is
     written at the end of a followed run.
@@ -1118,9 +1192,10 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
     handled: set[str] = set()
     sizes: dict[str, int] = {}
 
-    def done(h):
+    def done(item):
+        h, fut = item
         try:
-            r = _finish_hour(h)
+            r = fut.result()
             rows_out.append(r)
             print(f"{r['file']}: {r['records']} records, {r['bytes'] / 1e6:.1f} MB, frame {r['frame_s']} s, "
                   f"writer {r['writer_s']} s", flush=True)
@@ -1132,13 +1207,16 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
         receipt = (run_dir / "forecast-receipt.json").is_file() or (until is not None and Path(until).exists())
         files = sorted(run_dir.glob("wrfout_d01_*"))
         ready = []
-        for i, f in enumerate(files):
+        for f in files:
             if f.name in handled:
                 continue
             size = f.stat().st_size
             stable = sizes.get(f.name) == size and size > 0
             sizes[f.name] = size
-            if not follow or receipt or (i + 1 < len(files) and stable):
+            # the history writer (namgpu.io.history.write_payload, and the multi-card merge) renames each hour into
+            # place whole: an hour is taken once its file is there and its size held across one poll, not when the
+            # next hour's file appears (that held every hour back one model hour)
+            if not follow or receipt or stable:
                 ready.append(f)
         return ready, receipt
 
@@ -1147,11 +1225,25 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
     # GPU for the post). netCDF is never touched from two threads, and the pool never forks from one.
     # Up to `workers` writer processes are in flight (a writer on a whole NOAA nest grid is many times one on grid 218, so one
     # at a time would fall behind the forecast); the frames are still built one after the other in this thread.
+    # A 1 s poll (a glob and a stat): an hour is taken 1-2 s after its whole file appears (the 5 s poll and its
+    # one-poll size hold cost 5-10 s of every hour on the 3 km CONUS nest).
+    # Each hour in flight is (hour, its finisher): a thread that waits for the hour's writer and puts the file and
+    # its .idx in place as soon as the writer exits. Breakage it prevents: the main thread finished hours only when it
+    # had nothing new to build, so a written hour waited for the next hour's frame (40-90 s on the 3 km CONUS nest)
+    # before it was public; in a replay at the model's pace the last file landed 138 s after its history hour.
     pending: list = []
     in_flight = max(1, int(workers or 1))
     last_new = time.monotonic()
-    with ProcessPoolExecutor(max_workers=max(2, min(16, (os.cpu_count() or 8) // 2))) as fields:
+
+    def harvest():
+        for item in [p for p in pending if p[1].done()]:
+            pending.remove(item)
+            done(item)
+
+    with ProcessPoolExecutor(max_workers=max(2, min(16, (os.cpu_count() or 8) // 2))) as fields, \
+            ThreadPoolExecutor(max_workers=in_flight + 1, thread_name_prefix="products-finish") as finisher:
         while True:
+            harvest()
             ready, receipt = ready_files()
             for f in ready:
                 handled.add(f.name)
@@ -1166,14 +1258,13 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
                     print("FAILED", errors[-1], flush=True)
                     continue
                 if len(pending) >= in_flight:
-                    done(pending.pop(0))
-                pending.append(h)
+                    done(pending.pop(0))           # writers in flight at most `workers`: wait for the oldest
+                pending.append((h, finisher.submit(_finish_hour, h)))
+                harvest()
             if not follow:
                 break
             if receipt and not ready_files()[0]:
                 break
-            if pending and not ready:
-                done(pending.pop(0))               # nothing new yet: finish the oldest hour in flight while waiting
             if time.monotonic() - last_new > idle_timeout_s and not receipt:
                 errors.append(f"no new history file in {idle_timeout_s:.0f} s and no forecast-receipt.json: "
                               f"the run stopped")
