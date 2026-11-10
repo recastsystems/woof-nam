@@ -1,8 +1,8 @@
 # NOAA NAM awphys records in WOOF-NAM files
 
-One row per record of NOAA's nam.tHHz.awphys06.tm00.grib2 (454 records), checked against a WOOF-NAM f06 of the same case (2025-03-14 12Z) with `tools/grib2_compat_table.py --plain`. "identical keys" means every GRIB2 key a decoder selects on (name, level, step, units, codes, grid and NOAA's precision) equals NOAA's; only the generating process number (254, WOOF-NAM, where NOAA's is 84) differs by design. See COMPATIBILITY.md.
+One row per record of NOAA's nam.tHHz.awphys06.tm00.grib2 (454 records), checked against a WOOF-NAM 0.2.0 f06 of the same case (2026-01-23 12Z, GFS start) with `tools/grib2_compat_table.py --plain`. "identical keys" means every GRIB2 key a decoder selects on (name, level, step, units, codes, grid and NOAA's precision) equals NOAA's; only the generating process number (254, WOOF-NAM, where NOAA's is 84) differs by design. In the notes, D is the decimal and E the binary scale factor. See COMPATIBILITY.md.
 
-Summary: 444 present with identical keys, 0 present with differing keys, 10 not in the checked file.
+Summary: 408 present with identical keys, 42 present with a differing decimal or binary scale factor, 4 not produced.
 
 | rec | NAM record (name, level) | present | identical keys | notes |
 |---|---|---|---|---|
@@ -24,19 +24,19 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 15 | HGT 50 mb | yes | yes |  |
 | 16 | TMP 50 mb | yes | yes |  |
 | 17 | RH 50 mb | yes | yes |  |
-| 18 | VVEL 50 mb | yes | yes |  |
+| 18 | VVEL 50 mb | yes | no | E NOAA 1 / ours 0 |
 | 19 | DZDT 50 mb | yes | yes |  |
 | 20.1 | UGRD 50 mb | yes | yes |  |
 | 20.2 | VGRD 50 mb | yes | yes |  |
-| 21 | TKE 50 mb | yes | yes |  |
+| 21 | TKE 50 mb | yes | no | D NOAA 11 / ours 8; E NOAA 1 / ours 0 |
 | 22 | HGT 75 mb | yes | yes |  |
 | 23 | TMP 75 mb | yes | yes |  |
 | 24 | RH 75 mb | yes | yes |  |
-| 25 | VVEL 75 mb | yes | yes |  |
+| 25 | VVEL 75 mb | yes | no | D NOAA 4 / ours 5; E NOAA 0 / ours 1 |
 | 26 | DZDT 75 mb | yes | yes |  |
 | 27.1 | UGRD 75 mb | yes | yes |  |
 | 27.2 | VGRD 75 mb | yes | yes |  |
-| 28 | TKE 75 mb | yes | yes |  |
+| 28 | TKE 75 mb | yes | no | D NOAA 7 / ours 5 |
 | 29 | HGT 100 mb | yes | yes |  |
 | 30 | TMP 100 mb | yes | yes |  |
 | 31 | RH 100 mb | yes | yes |  |
@@ -44,7 +44,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 33 | DZDT 100 mb | yes | yes |  |
 | 34.1 | UGRD 100 mb | yes | yes |  |
 | 34.2 | VGRD 100 mb | yes | yes |  |
-| 35 | TKE 100 mb | yes | yes |  |
+| 35 | TKE 100 mb | yes | no | D NOAA 4 / ours 5 |
 | 36 | HGT 125 mb | yes | yes |  |
 | 37 | TMP 125 mb | yes | yes |  |
 | 38 | RH 125 mb | yes | yes |  |
@@ -58,17 +58,17 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 45 | RH 150 mb | yes | yes |  |
 | 46 | VVEL 150 mb | yes | yes |  |
 | 47 | DZDT 150 mb | yes | yes |  |
-| 48.1 | UGRD 150 mb | yes | yes |  |
-| 48.2 | VGRD 150 mb | yes | yes |  |
-| 49 | TKE 150 mb | yes | yes |  |
+| 48.1 | UGRD 150 mb | yes | no | D NOAA 1 / ours 2 |
+| 48.2 | VGRD 150 mb | yes | no | D NOAA 1 / ours 2 |
+| 49 | TKE 150 mb | yes | no | D NOAA 4 / ours 3 |
 | 50 | HGT 175 mb | yes | yes |  |
 | 51 | TMP 175 mb | yes | yes |  |
 | 52 | RH 175 mb | yes | yes |  |
 | 53 | VVEL 175 mb | yes | yes |  |
 | 54 | DZDT 175 mb | yes | yes |  |
-| 55.1 | UGRD 175 mb | yes | yes |  |
-| 55.2 | VGRD 175 mb | yes | yes |  |
-| 56 | TKE 175 mb | yes | yes |  |
+| 55.1 | UGRD 175 mb | yes | no | D NOAA 1 / ours 2 |
+| 55.2 | VGRD 175 mb | yes | no | D NOAA 1 / ours 2 |
+| 56 | TKE 175 mb | yes | no | D NOAA 4 / ours 3 |
 | 57 | HGT 200 mb | yes | yes |  |
 | 58 | TMP 200 mb | yes | yes |  |
 | 59 | RH 200 mb | yes | yes |  |
@@ -84,7 +84,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 68 | DZDT 225 mb | yes | yes |  |
 | 69.1 | UGRD 225 mb | yes | yes |  |
 | 69.2 | VGRD 225 mb | yes | yes |  |
-| 70 | TKE 225 mb | yes | yes |  |
+| 70 | TKE 225 mb | yes | no | D NOAA 3 / ours 2 |
 | 71 | HGT 250 mb | yes | yes |  |
 | 72 | TMP 250 mb | yes | yes |  |
 | 73 | RH 250 mb | yes | yes |  |
@@ -93,11 +93,11 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 76.1 | UGRD 250 mb | yes | yes |  |
 | 76.2 | VGRD 250 mb | yes | yes |  |
 | 77 | ABSV 250 mb | yes | yes |  |
-| 78 | TKE 250 mb | yes | yes |  |
+| 78 | TKE 250 mb | yes | no | D NOAA 3 / ours 2 |
 | 79 | HGT 275 mb | yes | yes |  |
 | 80 | TMP 275 mb | yes | yes |  |
 | 81 | RH 275 mb | yes | yes |  |
-| 82 | VVEL 275 mb | yes | yes |  |
+| 82 | VVEL 275 mb | yes | no | E NOAA 0 / ours 1 |
 | 83 | DZDT 275 mb | yes | yes |  |
 | 84.1 | UGRD 275 mb | yes | yes |  |
 | 84.2 | VGRD 275 mb | yes | yes |  |
@@ -113,7 +113,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 93 | HGT 325 mb | yes | yes |  |
 | 94 | TMP 325 mb | yes | yes |  |
 | 95 | RH 325 mb | yes | yes |  |
-| 96 | VVEL 325 mb | yes | yes |  |
+| 96 | VVEL 325 mb | yes | no | D NOAA 3 / ours 4; E NOAA 0 / ours 1 |
 | 97 | DZDT 325 mb | yes | yes |  |
 | 98.1 | UGRD 325 mb | yes | yes |  |
 | 98.2 | VGRD 325 mb | yes | yes |  |
@@ -125,8 +125,8 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 104 | DZDT 350 mb | yes | yes |  |
 | 105.1 | UGRD 350 mb | yes | yes |  |
 | 105.2 | VGRD 350 mb | yes | yes |  |
-| 106 | TKE 350 mb | yes | yes |  |
-| 107 | HGT 375 mb | yes | yes |  |
+| 106 | TKE 350 mb | yes | no | D NOAA 3 / ours 2 |
+| 107 | HGT 375 mb | yes | no | E NOAA 1 / ours 2 |
 | 108 | TMP 375 mb | yes | yes |  |
 | 109 | RH 375 mb | yes | yes |  |
 | 110 | VVEL 375 mb | yes | yes |  |
@@ -134,7 +134,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 112.1 | UGRD 375 mb | yes | yes |  |
 | 112.2 | VGRD 375 mb | yes | yes |  |
 | 113 | TKE 375 mb | yes | yes |  |
-| 114 | HGT 400 mb | yes | yes |  |
+| 114 | HGT 400 mb | yes | no | E NOAA 1 / ours 2 |
 | 115 | TMP 400 mb | yes | yes |  |
 | 116 | RH 400 mb | yes | yes |  |
 | 117 | VVEL 400 mb | yes | yes |  |
@@ -163,10 +163,10 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 137 | RH 475 mb | yes | yes |  |
 | 138 | VVEL 475 mb | yes | yes |  |
 | 139 | DZDT 475 mb | yes | yes |  |
-| 140.1 | UGRD 475 mb | yes | yes |  |
-| 140.2 | VGRD 475 mb | yes | yes |  |
+| 140.1 | UGRD 475 mb | yes | no | D NOAA 1 / ours 2 |
+| 140.2 | VGRD 475 mb | yes | no | D NOAA 1 / ours 2 |
 | 141 | TKE 475 mb | yes | yes |  |
-| 142 | HGT 500 mb | yes | yes |  |
+| 142 | HGT 500 mb | yes | no | D NOAA 3 / ours 2; E NOAA 4 / ours 1 |
 | 143 | TMP 500 mb | yes | yes |  |
 | 144 | RH 500 mb | yes | yes |  |
 | 145 | VVEL 500 mb | yes | yes |  |
@@ -175,7 +175,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 147.2 | VGRD 500 mb | yes | yes |  |
 | 148 | ABSV 500 mb | yes | yes |  |
 | 149 | TKE 500 mb | yes | yes |  |
-| 150 | HGT 525 mb | yes | yes |  |
+| 150 | HGT 525 mb | yes | no | D NOAA 3 / ours 2; E NOAA 4 / ours 1 |
 | 151 | TMP 525 mb | yes | yes |  |
 | 152 | RH 525 mb | yes | yes |  |
 | 153 | VVEL 525 mb | yes | yes |  |
@@ -214,7 +214,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 182 | DZDT 625 mb | yes | yes |  |
 | 183.1 | UGRD 625 mb | yes | yes |  |
 | 183.2 | VGRD 625 mb | yes | yes |  |
-| 184 | TKE 625 mb | yes | yes |  |
+| 184 | TKE 625 mb | yes | no | D NOAA 2 / ours 1 |
 | 185 | HGT 650 mb | yes | yes |  |
 | 186 | TMP 650 mb | yes | yes |  |
 | 187 | RH 650 mb | yes | yes |  |
@@ -222,7 +222,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 189 | DZDT 650 mb | yes | yes |  |
 | 190.1 | UGRD 650 mb | yes | yes |  |
 | 190.2 | VGRD 650 mb | yes | yes |  |
-| 191 | TKE 650 mb | yes | yes |  |
+| 191 | TKE 650 mb | yes | no | D NOAA 2 / ours 1 |
 | 192 | HGT 675 mb | yes | yes |  |
 | 193 | TMP 675 mb | yes | yes |  |
 | 194 | RH 675 mb | yes | yes |  |
@@ -230,7 +230,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 196 | DZDT 675 mb | yes | yes |  |
 | 197.1 | UGRD 675 mb | yes | yes |  |
 | 197.2 | VGRD 675 mb | yes | yes |  |
-| 198 | TKE 675 mb | yes | yes |  |
+| 198 | TKE 675 mb | yes | no | D NOAA 2 / ours 1 |
 | 199 | HGT 700 mb | yes | yes |  |
 | 200 | TMP 700 mb | yes | yes |  |
 | 201 | RH 700 mb | yes | yes |  |
@@ -239,7 +239,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 204.1 | UGRD 700 mb | yes | yes |  |
 | 204.2 | VGRD 700 mb | yes | yes |  |
 | 205 | ABSV 700 mb | yes | yes |  |
-| 206 | TKE 700 mb | yes | yes |  |
+| 206 | TKE 700 mb | yes | no | D NOAA 2 / ours 1 |
 | 207 | HGT 725 mb | yes | yes |  |
 | 208 | TMP 725 mb | yes | yes |  |
 | 209 | RH 725 mb | yes | yes |  |
@@ -247,7 +247,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 211 | DZDT 725 mb | yes | yes |  |
 | 212.1 | UGRD 725 mb | yes | yes |  |
 | 212.2 | VGRD 725 mb | yes | yes |  |
-| 213 | TKE 725 mb | yes | yes |  |
+| 213 | TKE 725 mb | yes | no | D NOAA 2 / ours 1 |
 | 214 | HGT 750 mb | yes | yes |  |
 | 215 | TMP 750 mb | yes | yes |  |
 | 216 | RH 750 mb | yes | yes |  |
@@ -255,7 +255,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 218 | DZDT 750 mb | yes | yes |  |
 | 219.1 | UGRD 750 mb | yes | yes |  |
 | 219.2 | VGRD 750 mb | yes | yes |  |
-| 220 | TKE 750 mb | yes | yes |  |
+| 220 | TKE 750 mb | yes | no | D NOAA 2 / ours 1 |
 | 221 | HGT 775 mb | yes | yes |  |
 | 222 | TMP 775 mb | yes | yes |  |
 | 223 | RH 775 mb | yes | yes |  |
@@ -263,16 +263,16 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 225 | DZDT 775 mb | yes | yes |  |
 | 226.1 | UGRD 775 mb | yes | yes |  |
 | 226.2 | VGRD 775 mb | yes | yes |  |
-| 227 | TKE 775 mb | yes | yes |  |
-| 228 | HGT 800 mb | yes | yes |  |
+| 227 | TKE 775 mb | yes | no | D NOAA 2 / ours 1 |
+| 228 | HGT 800 mb | yes | no | E NOAA 4 / ours 3 |
 | 229 | TMP 800 mb | yes | yes |  |
 | 230 | RH 800 mb | yes | yes |  |
 | 231 | VVEL 800 mb | yes | yes |  |
 | 232 | DZDT 800 mb | yes | yes |  |
 | 233.1 | UGRD 800 mb | yes | yes |  |
 | 233.2 | VGRD 800 mb | yes | yes |  |
-| 234 | TKE 800 mb | yes | yes |  |
-| 235 | HGT 825 mb | yes | yes |  |
+| 234 | TKE 800 mb | yes | no | D NOAA 2 / ours 1 |
+| 235 | HGT 825 mb | yes | no | E NOAA 4 / ours 3 |
 | 236 | TMP 825 mb | yes | yes |  |
 | 237 | RH 825 mb | yes | yes |  |
 | 238 | VVEL 825 mb | yes | yes |  |
@@ -280,7 +280,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 240.1 | UGRD 825 mb | yes | yes |  |
 | 240.2 | VGRD 825 mb | yes | yes |  |
 | 241 | TKE 825 mb | yes | yes |  |
-| 242 | HGT 850 mb | yes | yes |  |
+| 242 | HGT 850 mb | yes | no | E NOAA 4 / ours 3 |
 | 243 | TMP 850 mb | yes | yes |  |
 | 244 | RH 850 mb | yes | yes |  |
 | 245 | VVEL 850 mb | yes | yes |  |
@@ -289,7 +289,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 247.2 | VGRD 850 mb | yes | yes |  |
 | 248 | ABSV 850 mb | yes | yes |  |
 | 249 | TKE 850 mb | yes | yes |  |
-| 250 | HGT 875 mb | yes | yes |  |
+| 250 | HGT 875 mb | yes | no | E NOAA 4 / ours 3 |
 | 251 | TMP 875 mb | yes | yes |  |
 | 252 | RH 875 mb | yes | yes |  |
 | 253 | VVEL 875 mb | yes | yes |  |
@@ -297,7 +297,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 255.1 | UGRD 875 mb | yes | yes |  |
 | 255.2 | VGRD 875 mb | yes | yes |  |
 | 256 | TKE 875 mb | yes | yes |  |
-| 257 | HGT 900 mb | yes | yes |  |
+| 257 | HGT 900 mb | yes | no | E NOAA 4 / ours 3 |
 | 258 | TMP 900 mb | yes | yes |  |
 | 259 | RH 900 mb | yes | yes |  |
 | 260 | VVEL 900 mb | yes | yes |  |
@@ -305,7 +305,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 262.1 | UGRD 900 mb | yes | yes |  |
 | 262.2 | VGRD 900 mb | yes | yes |  |
 | 263 | TKE 900 mb | yes | yes |  |
-| 264 | HGT 925 mb | yes | yes |  |
+| 264 | HGT 925 mb | yes | no | E NOAA 4 / ours 3 |
 | 265 | TMP 925 mb | yes | yes |  |
 | 266 | RH 925 mb | yes | yes |  |
 | 267 | VVEL 925 mb | yes | yes |  |
@@ -313,7 +313,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 269.1 | UGRD 925 mb | yes | yes |  |
 | 269.2 | VGRD 925 mb | yes | yes |  |
 | 270 | TKE 925 mb | yes | yes |  |
-| 271 | HGT 950 mb | yes | yes |  |
+| 271 | HGT 950 mb | yes | no | E NOAA 4 / ours 3 |
 | 272 | TMP 950 mb | yes | yes |  |
 | 273 | RH 950 mb | yes | yes |  |
 | 274 | VVEL 950 mb | yes | yes |  |
@@ -322,7 +322,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 276.2 | VGRD 950 mb | yes | yes |  |
 | 277 | TKE 950 mb | yes | yes |  |
 | 278 | HINDEX surface | yes | yes |  |
-| 279 | HGT 975 mb | yes | yes |  |
+| 279 | HGT 975 mb | yes | no | E NOAA 4 / ours 3 |
 | 280 | TMP 975 mb | yes | yes |  |
 | 281 | RH 975 mb | yes | yes |  |
 | 282 | VVEL 975 mb | yes | yes |  |
@@ -339,7 +339,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 291 | ABSV 1000 mb | yes | yes |  |
 | 292 | TKE 1000 mb | yes | yes |  |
 | 293 | MSLET mean sea level | yes | yes |  |
-| 294 | HGT 1000 mb | yes | yes |  |
+| 294 | HGT 1000 mb | yes | no | E NOAA 4 / ours 3 |
 | 295 | REFD 4000 m above ground | yes | yes |  |
 | 296 | REFD 1000 m above ground | yes | yes |  |
 | 297 | PRES surface | yes | yes |  |
@@ -363,12 +363,12 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 315 | CNWAT surface | yes | yes |  |
 | 316 | WEASD surface | yes | yes |  |
 | 317 | SNOWC surface | yes | yes |  |
-| 318 | SNOD surface | yes | yes |  |
+| 318 | SNOD surface | yes | no | E NOAA 2 / ours 3 |
 | 319 | SMDRY surface | yes | yes |  |
 | 320 | POROS surface | yes | yes |  |
 | 321 | TMP 2 m above ground | yes | yes |  |
 | 322 | SPFH 2 m above ground | yes | yes |  |
-| 323 | DPT 2 m above ground | yes | yes |  |
+| 323 | DPT 2 m above ground | yes | no | D NOAA 1 / ours 2 |
 | 324 | RH 2 m above ground | yes | yes |  |
 | 325 | TMAX 2 m above ground (5-6 h max) | yes | yes |  |
 | 326 | TMIN 2 m above ground (5-6 h min) | yes | yes |  |
@@ -376,16 +376,16 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 328 | MINRH 2 m above ground (5-6 h min) | yes | yes |  |
 | 329.1 | UGRD 10 m above ground | yes | yes |  |
 | 329.2 | VGRD 10 m above ground | yes | yes |  |
-| 330 | MAXUW 10 m above ground (5-6 h max) | no | - | not in the checked file: its history predates the hourly 10 m maximum wind output (see COMPATIBILITY.md) |
-| 331 | MAXVW 10 m above ground (5-6 h max) | no | - | not in the checked file: its history predates the hourly 10 m maximum wind output (see COMPATIBILITY.md) |
+| 330 | MAXUW 10 m above ground (5-6 h max) | yes | yes |  |
+| 331 | MAXVW 10 m above ground (5-6 h max) | yes | yes |  |
 | 332 | APCP surface (0-6 h acc) | yes | yes |  |
 | 333 | ACPCP surface (0-6 h acc) | yes | yes |  |
 | 334 | WEASD surface (0-6 h acc) | no | - | not produced (see COMPATIBILITY.md, 'Not in the files') |
 | 335 | HGT lowest level of the wet bulb zero | yes | yes |  |
-| 336 | CSNOW surface | no | - | not produced (see COMPATIBILITY.md, 'Not in the files') |
-| 337 | CICEP surface | no | - | not produced (see COMPATIBILITY.md, 'Not in the files') |
-| 338 | CFRZR surface | no | - | not produced (see COMPATIBILITY.md, 'Not in the files') |
-| 339 | CRAIN surface | no | - | not produced (see COMPATIBILITY.md, 'Not in the files') |
+| 336 | CSNOW surface | yes | yes |  |
+| 337 | CICEP surface | yes | yes |  |
+| 338 | CFRZR surface | yes | yes |  |
+| 339 | CRAIN surface | yes | yes |  |
 | 340 | SFCR surface | yes | yes |  |
 | 341 | FRICV surface | yes | yes |  |
 | 342 | CD surface | yes | yes |  |
@@ -452,7 +452,7 @@ Summary: 444 present with identical keys, 0 present with differing keys, 10 not 
 | 394 | ICEC surface | yes | yes |  |
 | 395 | ALBDO surface | yes | yes |  |
 | 396 | SHTFL surface | yes | yes |  |
-| 397 | LHTFL surface | yes | yes |  |
+| 397 | LHTFL surface | yes | no | D NOAA 0 / ours 1 |
 | 398 | TCDC entire atmosphere (considered as a single layer) | yes | yes |  |
 | 399 | DSWRF surface | yes | yes |  |
 | 400 | DLWRF surface | yes | yes |  |

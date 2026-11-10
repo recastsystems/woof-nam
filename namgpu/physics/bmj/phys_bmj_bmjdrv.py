@@ -64,6 +64,20 @@ def _dxh_device(st, g):
     return st.fields["BMJ_DXH"]
 
 
+_NOSHAL = None
+
+
+def _kernel_no_shallow():
+    """The same bmjdrv source compiled with -DBMJ_NO_SHALLOW (shallow columns take the no-convection exit). Only the
+    MYNN-EDMF arm asks for it (phys_mynn_edmf.bmj_shallow_off); the NAM default module is untouched."""
+    global _NOSHAL
+    if _NOSHAL is None:
+        import cupy as cp
+        src = (kernels.HERE / f"{UNIT.replace('-', '_')}.cu").read_text()
+        _NOSHAL = cp.RawModule(code=src, options=kernels.OPTIONS + ("-DBMJ_NO_SHALLOW",)).get_function(KERNEL)
+    return _NOSHAL
+
+
 def run(ctx):
     cfg, g, st = ctx.cfg, ctx.grid, ctx.st
     im, jm, lm = int(g.im), int(g.jm), int(g.lm)
@@ -83,7 +97,11 @@ def run(ctx):
     f32 = np.float32
     i32 = np.int32
 
-    kern = kernels.get(UNIT, KERNEL)
+    from namgpu.physics.mynn import phys_mynn_edmf
+    if phys_mynn_edmf.bmj_shallow_off():
+        kern = _kernel_no_shallow()
+    else:
+        kern = kernels.get(UNIT, KERNEL)
     scope = ctx.stream if ctx.stream is not None else contextlib.nullcontext()
     with scope:
         kern(kernels.grid_cols(im, jm), kernels.BLOCK_COL, (

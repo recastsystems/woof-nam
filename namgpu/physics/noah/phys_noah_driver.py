@@ -113,8 +113,9 @@ def _tbl_args(ctx):
     return ctx.tables["noah_tbl_args"]
 
 
-def run(ctx):
-    """Launch the NOAHLSM driver over the B1 land-sea points. Returns the output arrays by name."""
+def run(ctx, skip_land=False):
+    """Launch the NOAHLSM driver over the B1 land-sea points. Returns the output arrays by name.
+    skip_land: land points without sea ice are left to the RUC LSM (NAMGPU_LSM=ruc, phys-ruc-driver)."""
     st = ctx.st
     g = ctx.grid
     im, jm, lm = int(g.im), int(g.jm), int(g.lm)
@@ -174,7 +175,7 @@ def run(ctx):
             f32(dt), i32(NSOIL), i32(IVEGSRC), i32(UCMCALL), i32(FRPCPN),
             i32(LUTYPE_ID), i32(SLTYPE_ID),
             i32(2), i32(im - 1), i32(2), i32(jm - 1),
-            i32(im), i32(jm), i32(lm), *_tbl_args(ctx)))
+            i32(im), i32(jm), i32(lm), *_tbl_args(ctx), i32(int(skip_land))))
 
     return {"TSFC": st["TSFC"], "TWBS": twbs, "QWBS": qwbs, "ELFLX": elflx, "GRNFLX": grnflx,
             "SMSTAV": smstav, "SMSTOT": smstot, "SSROFF": ssroff, "BGROFF": bgroff,

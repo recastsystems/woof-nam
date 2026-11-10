@@ -51,7 +51,7 @@ DEFAULT_MIB = 512
 WHOLE_HEADROOM_MIB = 1024       # free memory kept beside a whole-domain call (fragments, the unit's small temporaries)
 MIN_ROWS = 8
 LIMITS_KEY = "NMMB_LIMITS"
-ROW_VECTORS = frozenset({"BMJ_DXH"})
+ROW_VECTORS = frozenset({"BMJ_DXH", "UGWP_DXM"})
 # Host grid arrays per row: [JM, IM] fields and these 1-D [JM] vectors (sg*/dsg* are vertical, never sliced).
 GRID_ROW_VECTORS = ("dxh", "dxv")
 # First-call guess of the band working set in [LM+1] row-planes per row (then the measured value is used).

@@ -23,12 +23,13 @@ API:
     run(ctx)                 a Driver-protocol entry point: stamps "step <ntimestep>".
 
 Storage: ctx.timings["_rec"] (labels, host stamps, device stamps, counters) and ctx.tables["timing_dev"]
-(uint64 device buffer of CAPACITY slots, allocated on the first stamp).
+(a list of uint64 device blocks of CAPACITY slots: the first allocated on the first stamp, one more whenever the
+stamps since the last drain fill the blocks held; drain copies them all back).
 
-Capacity: CAPACITY slots are available between two drains. A stamp taken while the buffer is full
-(no drain since CAPACITY stamps) is not recorded; it is counted in "dropped", and the receipt says so.
-CAPACITY covers one forecast hour of the NAM 12 km parent (dt 25 s, 144 steps, about 80 stages per
-step, about 11,500 stamps). A shorter dt needs a larger CAPACITY; the receipt reports the value used.
+Capacity: no stamp is dropped. With one fixed block of CAPACITY slots, the 300 start-up filter steps of the 12 km
+parent (no drain until the first forecast hour) filled it before the first drain, and every forecast-hour stamp
+after them was dropped (profile, 2026-11-09). A new block is a pool allocation and a memset, no sync.
+"dropped" stays in the receipt (always 0).
 """
 from __future__ import annotations
 
@@ -54,11 +55,16 @@ def _rec(ctx) -> dict:
     return t["_rec"]
 
 
-def _dev_buf(ctx):
+def _dev_buf(ctx, slot: int = 0):
+    """The device block holding `slot` (stamps since the last drain), allocated when first needed."""
     import cupy as cp
-    if "timing_dev" not in ctx.tables:
-        ctx.tables["timing_dev"] = cp.zeros((CAPACITY,), dtype=cp.uint64)
-    return ctx.tables["timing_dev"]
+    blocks = ctx.tables.get("timing_dev")
+    if not isinstance(blocks, list):
+        blocks = []
+        ctx.tables["timing_dev"] = blocks
+    while len(blocks) <= slot // CAPACITY:
+        blocks.append(cp.zeros((CAPACITY,), dtype=cp.uint64))
+    return blocks[slot // CAPACITY]
 
 
 def _scope(ctx):
@@ -68,16 +74,13 @@ def _scope(ctx):
 def stamp(ctx, label: str) -> None:
     rec = _rec(ctx)
     slot = rec["pending"]
-    if slot >= CAPACITY:
-        rec["dropped"] += 1
-        return
     rec["labels"].append(str(label))
     rec["host_ns"].append(time.perf_counter_ns())
     rec["device_ns"].append(None)            # filled by drain()
     rec["pending"] = slot + 1
     k = kernels.get(UNIT, KERNEL)
     with _scope(ctx):
-        k((1,), (1,), (_dev_buf(ctx), np.int32(slot)))
+        k((1,), (1,), (_dev_buf(ctx, slot), np.int32(slot % CAPACITY)))
 
 
 def drain(ctx) -> None:
@@ -88,7 +91,10 @@ def drain(ctx) -> None:
         return
     import cupy as cp
     with _scope(ctx):
-        vals = [int(v) for v in cp.asnumpy(_dev_buf(ctx)[:n])]
+        blocks = ctx.tables["timing_dev"]
+        vals = []
+        for b in range((n + CAPACITY - 1) // CAPACITY):
+            vals += [int(v) for v in cp.asnumpy(blocks[b][:min(CAPACITY, n - b * CAPACITY)])]
     start = len(rec["labels"]) - n            # the pending stamps are the last n labels
     rec["device_ns"][start:] = vals
     rec["pending"] = 0

@@ -4,8 +4,8 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 2	REFD	0.16.195	105:1	-	-	-	REFD_ON_HYBRID_LVL	-	history REFL_10CM (microphysics plus the BMJ convective term, as NAM's post DBZ) at the lowest mass level (NAM: DBZ at level LM); the history floors it at -20 dBZ as NAM does
 3	REFC	0.16.196	200:0	-	-	-	carrier:COMPOSITE	-	column maximum of history REFL_10CM (microphysics plus the BMJ convective term, as NAM's post) on the native grid (history COMPOSITE), then regridded, as NAM's post then interpolation; -20 dBZ floor
 4	VIS	0.19.0	1:0	-	-	-	NAM_VIS	-	UPP CALVIS hydrometeor extinction at the lowest level, at most 24,135 m (NAM's cap)
-5	VIS	0.19.0	3:0	-	-	-	-	-	left out: NAM's visibility at cloud top has no published method to port
-6	var2_0_197	2.0.197	105:1	-	-	-	-	-	left out: NAM's file holds 0 at every point; the model does not export the Blackadar mixing length
+5	VIS	0.19.0	3:0	-	-	-	-	-	left out: no verified cloud-top visibility definition or carrier; surface visibility is a different diagnostic.
+6	var2_0_197	2.0.197	105:1	-	-	-	-	-	left out: the frozen run does not export the mixing-length diagnostic at the lowest hybrid level.
 7	HGT	0.3.5	220:0	-	-	-	NAM_HGT_PBL	-	bulk Richardson PBL height above ground relative to the lowest level (shear form), critical 0.25
 8.1	UGRD	0.2.2	220:0	-	-	-	NAM_UGRD_PBL	-	pressure-weighted mean wind below the bulk Richardson PBL height
 8.2	VGRD	0.2.3	220:0	-	-	-	NAM_VGRD_PBL	-	pressure-weighted mean wind below the bulk Richardson PBL height
@@ -374,12 +374,12 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 331	var0_2_223	0.2.223	103:10	-	max	-	MAX_VGD_ON_SPEC_HGT_LVL_ABOVE_GRND_10m	-	io-max-fields V10MAX; needs U10MAX/V10MAX in the history
 332	APCP	0.1.8	1:0	-	acc	since:12h	carrier:APCP_S12	-	RAINNC+RAINC since the last 12 h reset (history differenced); NAM: 0-6 h at f06, 12-13 h at f13
 333	ACPCP	0.1.10	1:0	-	acc	since:12h	carrier:ACPCP_S12	-	RAINC since the last 12 h reset (history differenced)
-334	WEASD	0.1.13	1:0	-	acc	-	-	-	LEFT OUT (needs a run): NAM's ACSNOW (snowfall water equivalent, Noah) differenced to the 12 h bucket; the device keeps ACSNOW but resets it every 3 h and no history writes it yet
+334	WEASD	0.1.13	1:0	-	acc	-	-	-	LEFT OUT: ACSNOW is written but resets every 3 h before boundary history writes; a complete 12 h snowfall bucket cannot be recovered. SNOWNC only contains grid-scale snowfall.
 335	HGT	0.3.5	245:0	-	-	-	NAM_HGT_WETBULB_ZERO	-	first upward 0 C crossing of the wet-bulb temperature from 2 m; at or below 0 C at 2 m: extrapolated below ground at g/cp
-336	var0_1_195	0.1.195	1:0	-	-	-	-	-	LEFT OUT: NAM's dominant precipitation type (CALWXT_DOMINANT of five algorithms, masked by the last physics step's precipitation PREC); needs PREC, SR and F_RimeF in the history and the five-algorithm port
-337	var0_1_194	0.1.194	1:0	-	-	-	-	-	LEFT OUT: as rec 336 (dominant precipitation type)
-338	var0_1_193	0.1.193	1:0	-	-	-	-	-	LEFT OUT: as rec 336 (dominant precipitation type)
-339	var0_1_192	0.1.192	1:0	-	-	-	-	-	LEFT OUT: as rec 336 (dominant precipitation type)
+336	var0_1_195	0.1.195	1:0	-	-	-	carrier:NAM_CSNOW	-	dominant precipitation type (namgpu.products.ptype, written from the papers: NCEP Baldwin 1994, revised NCEP, Ramer 1993, Bourgouin 2000 and the microphysics; majority vote, ties to ZR > IP > SN > RA; where the last physics step's rate PREC/(DT NPHS) >= 0.05 mm/h); 1 = this type, nearest point
+337	var0_1_194	0.1.194	1:0	-	-	-	carrier:NAM_CICEP	-	dominant precipitation type (namgpu.products.ptype, written from the papers: NCEP Baldwin 1994, revised NCEP, Ramer 1993, Bourgouin 2000 and the microphysics; majority vote, ties to ZR > IP > SN > RA; where the last physics step's rate PREC/(DT NPHS) >= 0.05 mm/h); 1 = this type, nearest point
+338	var0_1_193	0.1.193	1:0	-	-	-	carrier:NAM_CFRZR	-	dominant precipitation type (namgpu.products.ptype, written from the papers: NCEP Baldwin 1994, revised NCEP, Ramer 1993, Bourgouin 2000 and the microphysics; majority vote, ties to ZR > IP > SN > RA; where the last physics step's rate PREC/(DT NPHS) >= 0.05 mm/h); 1 = this type, nearest point
+339	var0_1_192	0.1.192	1:0	-	-	-	carrier:NAM_CRAIN	-	dominant precipitation type (namgpu.products.ptype, written from the papers: NCEP Baldwin 1994, revised NCEP, Ramer 1993, Bourgouin 2000 and the microphysics; majority vote, ties to ZR > IP > SN > RA; where the last physics step's rate PREC/(DT NPHS) >= 0.05 mm/h); 1 = this type, nearest point
 340	SFCR	2.0.1	1:0	-	-	-	carrier:NAM_SFCR	-	Z0 (SURFCE.f); nearest point
 341	FRICV	0.2.197	1:0	-	-	-	carrier:NAM_FRICV	-	USTAR (SURFCE.f)
 342	CD	0.2.196	1:0	-	-	-	carrier:NAM_CD	-	USTAR^2 / B-grid lowest-layer-and-z0 mean wind squared (CALDRG.f), on the device; NAM packs this record at decimal scale -2, so its values are multiples of 100 (0 nearly everywhere)
@@ -441,7 +441,7 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 389	CIN	0.7.7	108:18000	108:0	-	-	NAM_CIN_ON_SPEC_PRES_ABOVE_GRND_180-0mb	-	NAM best CIN (CALCAPE type 2), <= 0
 390	HPBL	0.3.196	1:0	-	-	-	HPBL_ON_SURFACE	-	the model's MYJ PBLH; needs PBLH in the history
 391	RH	0.1.1	104:0.33	104:1	-	-	NAM_RH_SIGMA_LYR	-	pressure-weighted mean RH, sigma 0.33-1.0
-392	var0_17_192	0.17.192	1:0	-	-	-	-	-	LEFT OUT: NAM's lightning flag (0.17.192) has no carrier in the port
+392	var0_17_192	0.17.192	1:0	-	-	-	-	-	LEFT OUT: no qualified lightning parameterization or lightning-flag carrier in the frozen run.
 393	LAND	2.0.0	1:0	-	-	-	carrier:NAM_LAND	-	1 - SM, 0 where SICE > 0.1 (FIXED.f); nearest point
 394	ICEC	10.2.0	1:0	-	-	-	carrier:NAM_ICEC	-	SICE (FIXED.f); nearest point
 395	ALBDO	0.19.1	1:0	-	-	-	carrier:NAM_ALBDO	-	ALBEDO * 100 (FIXED.f)

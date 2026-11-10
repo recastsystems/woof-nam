@@ -23,6 +23,10 @@ DEFAULT_CONFIGFILE = PARM / "nam_configfile"
 # init-static-build file for that grid) and domain_name (the case boco folder is boco-<domain_name>, so the
 # 12 km boco files are never overwritten).
 CONFIG_ENV = "NAMGPU_CONFIGFILE"
+# Radiation override for modernisation arms (port addition): NAMGPU_RADIATION=rrtmgp sets shortwave and longwave
+# to rrtmgp (RTE+RRTMGP, namgpu.physics.rrtmgp); the configfile and its static set stay as they are.
+RADIATION_ENV = "NAMGPU_RADIATION"
+SCHEME_ENV = {"NAMGPU_CONVECTION": "convection", "NAMGPU_NTIEDTKE_SHALLOW": "ntiedtke_shallow"}
 
 
 def configfile_path(path=None) -> Path:
@@ -106,6 +110,21 @@ def parse_configfile(path: Path, subs: dict[str, str] | None = None) -> dict:
         if val in subs:
             val = subs[val]
         out[key.strip()] = _coerce(val)
+    return _overrides(out)
+
+
+# NAMGPU_CONFIG_SET="key=value[,key=value...]": configfile keys replaced for this process, e.g. a scheme option such as
+# convection=gf on the stock conus12 row (its static surface and domain row stay as they are). Unset: the file as written.
+CONFIG_SET_ENV = "NAMGPU_CONFIG_SET"
+
+
+def _overrides(out: dict) -> dict:
+    spec = os.environ.get(CONFIG_SET_ENV, "").strip()
+    for item in filter(None, (s.strip() for s in spec.split(","))):
+        if "=" not in item:
+            raise ValueError(f"{CONFIG_SET_ENV}: {item!r} is not key=value")
+        k, v = (s.strip() for s in item.split("=", 1))
+        out[k] = _coerce(v)
     return out
 
 
@@ -150,6 +169,9 @@ class NamConfig:
     rhgrd: float
     np3d: int
     filter_method: int
+    # orographic drag scheme: nam (NAM module_GWD, the frozen default), ugwp (NOAA-GSL UGWP drag suite, the RRFS
+    # one; on wherever selected, it is scale-aware), off. NAMGPU_GWD (woof-nam run --gwd) or configfile gwd_scheme.
+    gwd_scheme: str = "nam"
     # hybrid levels (nam_namelist.nps &nemsinterp)
     pt: float = 200.0
     ptsgm: float = 30000.0
@@ -172,6 +194,7 @@ class NamConfig:
     ico2flg: int = 1            # runtime value: rad_initialize_nmmb.f:138 ico2flg = ICO2 = 1 (module_SOLVER_GRID_COMP.F90:10656)
     ivflip: int = 0             # runtime value: rad_initialize_nmmb.f:183 ivflip = IFLIP = 0 (module_SOLVER_GRID_COMP.F90:10714)
     isubcsw: int = 0            # module_SOLVER_GRID_COMP.F90:10697 ISUBCSW=0 (McICA sub-columns off on the NAM path)
+    mp_column: str = ""         # column microphysics replacing the NMMB scheme of that slot ('tempo': TEMPO v3 on the thompson layout)
     iovrsw: int = 1             # module_SOLVER_GRID_COMP.F90:10693 IOVR_SW=1 (max-random overlap, sw)
     iovrlw: int = 1             # module_SOLVER_GRID_COMP.F90:10695 IOVR_LW=1 (max-random overlap, lw)
     isubclw: int = 0            # module_SOLVER_GRID_COMP.F90:10702 ISUBCLW=0 (McICA sub-columns off, lw)
@@ -218,11 +241,16 @@ class NamConfig:
         return -2.0 * self.ref_sbd / (self.jm - 1)
 
 
-def static_npz(cfg) -> Path | None:
+def static_npz(cfg, base: bool = False) -> Path | None:
     """The domain's own static file (configfile key static_npz), or None for the NAM grid."""
     v = cfg.raw.get("static_npz")
     if not v:
         return None
+    # domains.ensure_static points the run at the month file it checked or built (NAMGPU_STATIC_NPZ): the shared
+    # file was rebuilt in place by every run of another month, so two runs started together wrote one .part file
+    # (BadZipFile 'VEG.npy', concurrent runs, 2026-11-09 04:44Z) and a run could read the other month's
+    if not base and os.environ.get("NAMGPU_STATIC_NPZ"):
+        return Path(os.environ["NAMGPU_STATIC_NPZ"])
     p = Path(str(v))
     return p if p.is_absolute() else paths.work_root() / p
 
@@ -239,6 +267,16 @@ def grid_stamp(cfg) -> dict:
     grid (other jm, or a centre that rounds to the same name) must be rebuilt, never reused (review round 3, #1)."""
     return {"im": int(cfg.im), "jm": int(cfg.jm), "lm": int(cfg.lm), "tph0d": round(float(cfg.tph0d), 4),
             "tlm0d": round(float(cfg.tlm0d), 4), "wbd": round(float(cfg.wbd), 6), "sbd": round(float(cfg.sbd), 6)}
+
+
+def nps_namelist(r: dict) -> Path:
+    """The NPS namelist that gives this grid's hybrid levels: the configfile port key nps_namelist (a file in parm/
+    or an absolute path; a domain with another layer count carries its own coord_levs), else parm/nam_namelist.nps."""
+    v = r.get("nps_namelist")
+    if not v:
+        return PARM / "nam_namelist.nps"
+    p = Path(str(v))
+    return p if p.is_absolute() else PARM / p
 
 
 def parse_nps_coord_levs(path: Path) -> tuple[float, float, list[float]]:
@@ -331,26 +369,69 @@ def window(r: dict) -> dict:
     return dict(r, wbd=wbd, sbd=sbd, win_i0=i0, win_j0=j0, wbd0=wbd0, sbd0=sbd0)
 
 
+# Modernised column microphysics a configfile may name in `microphysics:`: the NMMB slot whose tracer layout and
+# Fortran branches (tracer index, UPDATE_WATER, RRTM np3d 8, history) the run uses, and the column scheme that
+# replaces that slot's scheme (driver.physics_plan). Modernisation lane mp-tempo (2026-11-08).
+MP_COLUMNS = {"tempo": ("thompson",)}
+MP_ENV = "NAMGPU_MP"
+
+
+GWD_SCHEMES = ("nam", "ugwp", "off")
+
+
+def _gwd_scheme(r: dict) -> str:
+    v = (os.environ.get("NAMGPU_GWD") or str(r.get("gwd_scheme", "nam"))).strip().lower()
+    if v not in GWD_SCHEMES:
+        raise ValueError(f"gwd scheme {v!r}: choose one of {GWD_SCHEMES} (NAMGPU_GWD / --gwd / configfile gwd_scheme)")
+    return v
+
+
+def _gwdflg(r: dict) -> bool:
+    return {"off": False, "ugwp": True}.get(_gwd_scheme(r), bool(r["gwdflg"]))
+
+
 def load(configfile: Path | None = None, npsfile: Path | None = None) -> NamConfig:
     r = window(row_window(parse_configfile(configfile or PARM / "nam_configfile")))
-    pt, ptsgm, levs = parse_nps_coord_levs(npsfile or PARM / "nam_namelist.nps")
-    flags = parse_nps_flags(npsfile or PARM / "nam_namelist.nps")
+    from .physics import suites as _suites  # noqa: PLC0415  (a suite row's env knobs and configfile keys)
+    r = _suites.prepare(r)
+    mp = os.environ.get(MP_ENV, "").strip()
+    if mp:            # NAMGPU_MP=tempo: the column microphysics on the configured grid (thompson layout, np3d 8)
+        if mp not in MP_COLUMNS:
+            raise ValueError(f"{MP_ENV}={mp!r}: known column microphysics are {sorted(MP_COLUMNS)}")
+        r = dict(r, microphysics=mp, np3d=8, spec_adv=True)
+    if os.environ.get(RADIATION_ENV, "").strip() == "rrtmgp":
+        r["shortwave"] = r["longwave"] = "rrtmgp"
+    # Scheme overrides for modernisation arms (port addition): the configfile and its static set stay as they
+    # are; only the named scheme key changes. NAMGPU_CONVECTION=ntiedtke picks New Tiedtke in CUCNVC.
+    for env, key in SCHEME_ENV.items():
+        v = os.environ.get(env, "").strip()
+        if v:
+            r[key] = v
+    npsfile = npsfile or nps_namelist(r)
+    pt, ptsgm, levs = parse_nps_coord_levs(npsfile)
+    flags = parse_nps_flags(npsfile)
     dt = r["dt_int"] + (r["dt_num"] / r["dt_den"] if r["dt_den"] else 0.0)
     fdt = r["filt_dt_int"] + (r["filt_dt_num"] / r["filt_dt_den"] if r["filt_dt_den"] else 0.0)
-    return NamConfig(
+    cfg = NamConfig(
         raw=r, im=r["im"], jm=r["jm"], lm=r["lm"], tph0d=r["tph0d"], tlm0d=r["tlm0d"],
         wbd=r["wbd"], sbd=r["sbd"], dt=dt, filt_dt=fdt, nphs=r["nphs"], nprecip=r["nprecip"],
         nrads=r["nrads"], nradl=r["nradl"], idtad=r["idtad"], idtadt=r["idtadt"],
         lnsh=r["lnsh"], lnsv=r["lnsv"], secadv=r["secadv"], smag2=r["smag2"],
         codamp=r["codamp"], wcor=r["wcor"], hydro=r["hydro"], global_=r["global"],
-        microphysics=r["microphysics"], convection=r["convection"],
-        turbulence=r["turbulence"], sfc_layer=r["sfc_layer"],
+        microphysics=MP_COLUMNS.get(str(r["microphysics"]).strip(), (str(r["microphysics"]),))[0],
+        mp_column=("" if str(r["microphysics"]).strip() not in MP_COLUMNS else str(r["microphysics"]).strip()),
+        convection=r["convection"],
+        turbulence=os.environ.get("NAMGPU_TURBULENCE") or r["turbulence"],
+        sfc_layer=os.environ.get("NAMGPU_SFC_LAYER") or r["sfc_layer"],
         land_surface=r["land_surface"], shortwave=r["shortwave"], longwave=r["longwave"],
-        gwdflg=r["gwdflg"], rhgrd=r["rhgrd"], np3d=r["np3d"],
+        gwdflg=_gwdflg(r), gwd_scheme=_gwd_scheme(r), rhgrd=r["rhgrd"], np3d=r["np3d"],
         filter_method=int(r["filter_method"]), pt=pt, ptsgm=ptsgm, coord_levs=levs,
         win_i0=int(r.get("win_i0", 0)), win_j0=int(r.get("win_j0", 0)), wbd0=r.get("wbd0"), sbd0=r.get("sbd0"),
         **flags,
     )
+    from .physics import suites  # noqa: PLC0415  (physics suite row: configfile keys it owns)
+    suites.apply(cfg)
+    return cfg
 
 
 if __name__ == "__main__":

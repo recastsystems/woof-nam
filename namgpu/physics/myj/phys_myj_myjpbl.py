@@ -99,7 +99,8 @@ def run(ctx):
             _field(st, "DUDT"), _field(st, "DVDT"),
             _field(st, "RTHBLTEN"), _field(st, "RQBLTEN"), _field(st, "RQCBLTEN"),
             _field(st, "SFCZ"), _field(st, "HSTDV"),
-            _field(st, "TSFC"), _field(st, "XLAND"),
+            # NMP_TSK_MYJ exists only under NAMGPU_LSM=noahmp (flux-consistent skin, phys_noahmp_driver)
+            _field(st, "NMP_TSK_MYJ" if "NMP_TSK_MYJ" in st.fields else "TSFC"), _field(st, "XLAND"),
             _field(st, "SICE"), _field(st, "SNOW"),
             _field(st, "CHKLOWQ"), _field(st, "ELFLX"),
             _field(st, "AKHS"), _field(st, "AKMS"),

@@ -2,7 +2,7 @@
 
 Checks, each one line: the card (nvidia-smi: name, memory, driver), CuPy and NVRTC (a small kernel compiled and run),
 the WPS_GEOG terrain and land data a new grid's static build reads, the map renderer, the GRIB2 writer of
-`woof-nam products`, and what fits on the card by the same memory estimate the `nest` and `run` doors refuse with
+`woof-nam products`, gpuwm-hex (only TEMPO, MYNN v6.1 and the suites built on them need it), and what fits on the card by the same memory estimate the `nest` and `run` doors refuse with
 (nest/domain.py vram_estimate): the 12 km CONUS grid and the largest square 3 km nest.
 Exit 0 when the card and CuPy work (missing data and writers are listed with the command that fetches them),
 1 when there is no usable card or CuPy cannot compile.
@@ -79,6 +79,15 @@ def writer() -> tuple[bool, str]:
     return False, exporter.missing_message() + " (only `woof-nam products` needs it; it fetches it on first use)"
 
 
+def hex_check() -> tuple[bool, str]:
+    from namgpu import hexdep
+    v = hexdep.installed()
+    if v is not None:
+        return True, f"gpuwm-hex {v}: TEMPO, MYNN v6.1 and the hrrrv5, rapv5 and woof-nam-next suites can run"
+    return False, (f"{hexdep.missing()}: TEMPO, MYNN v6.1 and the hrrrv5, rapv5 and woof-nam-next suites need "
+                   f"{hexdep.NEEDS} ({hexdep.INSTALL}); everything else runs without it")
+
+
 def what_fits(c: dict) -> list[str]:
     from namgpu.nest import domain
     # one nvidia-smi reading of the card for the whole search (the estimate asks for its name and size per call)
@@ -142,7 +151,8 @@ def main(argv=None) -> int:
     ok, msg = cupy_check()
     _line("ok" if ok else "FAILED", "cupy/nvrtc", msg)
     bad += 0 if ok else 1
-    for what, fn in (("terrain data", terrain), ("map renderer", renderer), ("GRIB2 writer", writer)):
+    for what, fn in (("terrain data", terrain), ("map renderer", renderer), ("GRIB2 writer", writer),
+                     ("gpuwm-hex", hex_check)):
         ok, msg = fn()
         _line("ok" if ok else "missing", what, msg)
     if c is not None:

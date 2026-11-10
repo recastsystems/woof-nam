@@ -28,6 +28,13 @@ taumol23/25/28 is the minimum over live columns only).
 Declared divergence (as the band units' own headers state): MINVAL(laytrop) groups. The Fortran takes it
 over each CHK = 8 day-column tile; taumol23 does that here, taumol25 and taumol28 take it over the chunk.
 Not bitwise; the per-column result differs only in layers between the two minima.
+
+Batched windows (rrtm_call.BATCH_KEY): rrtm-call may run B consecutive radiation row windows as one batch (one
+launch set over all their rows, so the column kernels fill the card instead of 7,632-column grids). The groups
+above stay those of each column's own window: window_kmins builds, per day column, the CHK-group minimum
+(taumol19, taumol23) and the window minimum (taumol25, taumol28) over its owning window's day run, exactly what
+a launch of that window alone computes (kernels/rrtm_sw_kmin_windows.cu). So the radiation output does not
+depend on the batch size. Without a batch (B = 1) nothing here changes.
 """
 from __future__ import annotations
 
@@ -41,6 +48,11 @@ CHK = 8
 NS = {16: 0, 17: 6, 18: 18, 19: 26, 20: 34, 21: 44, 22: 54, 23: 56, 24: 66, 25: 74, 26: 80, 27: 86,
       28: 94, 29: 100}
 NG = {16: 6, 17: 12, 18: 8, 19: 8, 20: 10, 21: 10, 22: 2, 23: 10, 24: 8, 25: 6, 26: 6, 27: 8, 28: 6, 29: 12}
+
+KMIN8_KEY = "sw_seam:kmin8"     # per day column: MINVAL(laytrop) of its CHK group in its own window (batched)
+KMINW_KEY = "sw_seam:kminw"     # per day column: MINVAL(laytrop) over its own window's day columns (batched)
+BATCH_KEY = "rrtm_call:batch"   # rrtm_call: the batch's window geometry (device arrays), batched calls only
+_INT_MAX = int(np.iinfo(np.int32).max)
 
 _F2 = ("colmol", "fac00", "fac01", "fac10", "fac11", "selffac", "selffrac", "forfac", "forfrac")
 _I2 = ("jp", "jt", "jt1", "indself", "indfor")
@@ -125,11 +137,43 @@ def cldprop(ctx, ch, cstart, nc):
         ch["cldfrc"][...] = cldfrc.reshape(nlay, nc).T
 
 
+def window_kmins(ctx, ch, cstart, nc):
+    """Batched windows only: KMIN8_KEY and KMINW_KEY per day column (see the module docstring). Device only."""
+    import cupy as cp
+    from namgpu import kernels
+    geom = ctx.tables.get(BATCH_KEY)
+    if geom is None:
+        for k in (KMIN8_KEY, KMINW_KEY):
+            if dict.__contains__(ctx.tables, k):
+                dict.__delitem__(ctx.tables, k)
+        return
+    if cstart != 0:
+        raise RuntimeError(f"sw-seam: batched windows need one SW chunk per batch (cstart {cstart})")
+    nlay = int(ch["pavel"].shape[1])
+    st = ctx.st
+    im = int(ctx.grid.im)
+    lt = ch["laytrop"][:nc]
+    nwin = int(geom["nwin"])
+    kwin = cp.full((nwin,), _INT_MAX, dtype=cp.int32)
+    k8 = cp.empty((nc,), dtype=cp.int32)
+    kw = cp.empty((nc,), dtype=cp.int32)
+    grid = kernels.grid_cols(nc, 1)
+    kernels.get("rrtm_sw_kmin_windows", "rrtm_sw_kmin_win")(grid, kernels.BLOCK_COL, (
+        lt, st["SW_NDAY"], st["SW_CSUM"], geom["win_r0"], geom["win_r1"],
+        np.int32(nwin), np.int32(im), np.int32(nc), kwin))
+    kernels.get("rrtm_sw_kmin_windows", "rrtm_sw_kmin_cols")(grid, kernels.BLOCK_COL, (
+        lt, st["SW_IDXDAY"], st["SW_NDAY"], st["SW_CSUM"], geom["win_r0"], geom["win_r1"],
+        geom["row_owner"], kwin, np.int32(im), np.int32(nc), np.int32(nlay), np.int32(CHK), k8, kw))
+    ctx.tables[KMIN8_KEY] = k8
+    ctx.tables[KMINW_KEY] = kw
+
+
 # --- taumol: sfluxzen (radsw_main_nmmb.f:3240-3330) ---------------------------------------------------------
 def taumol(ctx, ch, cstart, nc):
     import cupy as cp
     with ctx.stream:
         L = layer_major(ctx, ch, cstart, nc)
+        window_kmins(ctx, ch, cstart, nc)        # after setcoef (laytrop), before the band units read it
         sfl = _mod("phys_rrtm_sw_table_sflux")
         sfl.run(ctx)
         p = sfl.PREFIX
@@ -182,14 +226,22 @@ def band23(ctx, ch, cstart, nc):
     m = _mod("phys_rrtm_sw_taumol23")
     L = ctx.tables[KEY_L]
     nlay = L["nlay"]
+    k8 = ctx.tables.get(KMIN8_KEY) if dict.__contains__(ctx.tables, KMIN8_KEY) else None
     with ctx.stream:
-        tpr = -(-nc // CHK)
-        lt = cp.pad(L["laytrop"], ((0, 0), (0, tpr * CHK - nc)), constant_values=int(np.iinfo(np.int32).max))
-        kmin = cp.ascontiguousarray(lt.reshape(1, tpr, CHK).min(axis=2).astype(cp.int32).ravel())
         out = {"taug": cp.zeros((NG[23], nlay, nc), dtype=cp.float32),
                "taur": cp.zeros((NG[23], nlay, nc), dtype=cp.float32)}
-    m.taumol23_chunk(_inp(L, _ALL), _tab(ctx, m.TAB_KEY, m.load_tables), kmin, out, 0, nc, nlay, 1, nc, tpr,
-                     stream=ctx.stream)
+        if k8 is None:
+            tpr = -(-nc // CHK)
+            lt = cp.pad(L["laytrop"], ((0, 0), (0, tpr * CHK - nc)), constant_values=_INT_MAX)
+            kmin = cp.ascontiguousarray(lt.reshape(1, tpr, CHK).min(axis=2).astype(cp.int32).ravel())
+    if k8 is None:
+        m.taumol23_chunk(_inp(L, _ALL), _tab(ctx, m.TAB_KEY, m.load_tables), kmin, out, 0, nc, nlay, 1, nc, tpr,
+                         stream=ctx.stream)
+    else:
+        # batched windows: the same flat layout seen as nc rows of one column, so the kernel's tile of a column
+        # (row * tiles_per_row + i / CHK with i = 0, tiles_per_row = 1) is the column itself: kmin = k8[column]
+        m.taumol23_chunk(_inp(L, _ALL), _tab(ctx, m.TAB_KEY, m.load_tables), k8[:nc], out, 0, nc, nlay, nc, 1, 1,
+                         stream=ctx.stream)
     with ctx.stream:
         _put(ch, 23, out["taug"], out["taur"])
 
@@ -211,7 +263,9 @@ def band25(ctx, ch, cstart, nc):
     L = ctx.tables[KEY_L]
     out = m.alloc_outputs(L["nlay"], 1, nc)
     kmin = cp.zeros((1,), dtype=cp.int32)
-    m.taumol25(_inp(L, _ALL), out, _tab(ctx, m.TAB_KEY, m.load_tables), kmin, stream=ctx.stream)
+    kw = ctx.tables.get(KMINW_KEY) if dict.__contains__(ctx.tables, KMINW_KEY) else None
+    m.taumol25(_inp(L, _ALL), out, _tab(ctx, m.TAB_KEY, m.load_tables), kmin, stream=ctx.stream,
+               kmin_col=None if kw is None else kw[:nc])
     with ctx.stream:
         _put(ch, 25, out["taug"], out["taur"])
 
@@ -229,7 +283,9 @@ def band28(ctx, ch, cstart, nc):
     m = _mod("phys_rrtm_sw_taumol28")
     L = ctx.tables[KEY_L]
     out = m.alloc_outputs(L["nlay"], 1, nc)
-    m.taumol28(_inp(L, _ALL), out, _tab(ctx, m.TAB_KEY, m.load_tables), stream=ctx.stream)
+    kw = ctx.tables.get(KMINW_KEY) if dict.__contains__(ctx.tables, KMINW_KEY) else None
+    m.taumol28(_inp(L, _ALL), out, _tab(ctx, m.TAB_KEY, m.load_tables), stream=ctx.stream,
+               kmin_col=None if kw is None else kw[:nc])
     with ctx.stream:
         _put(ch, 28, out["taug"], out["taur"])
 

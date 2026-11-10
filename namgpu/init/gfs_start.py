@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from namgpu.init import source_records as srec
+from namgpu.init import source_grids as sgr
 
 UNIT = "init-gfs-start"
 from namgpu import paths  # noqa: E402
@@ -133,6 +134,10 @@ def decode_source(ctx, path, tmpdir, pts=None, sfc_keys=None, rec=None, host=Non
 
     rec = srec.GFS if rec is None else rec
     pl_dcp, sfc_tab = rec["pl"], rec["sfc"]
+    if sfc_keys is not None:
+        # outputs of the column derivations (aigfs PRES, RH2) are computed, not decoded
+        derived = {o for o, _, _ in rec.get("column_derive", ())}
+        sfc_keys = tuple(k for k in sfc_keys if k not in derived)
     t_dec = time.perf_counter()
     if rec.get("container", "grib2") == "regular-netcdf":
         # the latitude band of the points (default the state's H and V points), every longitude (the fetch
@@ -149,8 +154,11 @@ def decode_source(ctx, path, tmpdir, pts=None, sfc_keys=None, rec=None, host=Non
         return dec, sfc, grid
     inv = g2.inventory(path)
     r0 = inv[0]
+    if int(r0["gdt"]) in (32769, 30) and rec.get("container", "grib2") == "grib2":
+        return decode_projected(ctx, path, tmpdir, rec, inv, sfc_keys)
     if int(r0["gdt"]) != 0:
-        raise ValueError(f"{UNIT}: {path} is GDT {r0['gdt']}, the isobaric path places only GDT 0")
+        raise ValueError(f"{UNIT}: {path} is GDT {r0['gdt']}, the isobaric path places only GDT 0 and the regional "
+                         "grids of source_grids.py (rotated lat-lon 3.32769, Lambert conformal 3.30)")
     nx, ny = int(r0["nx"]), int(r0["ny"])
     # The gather writes rows south to north (row j = -90 + j dlat) for a north-first global file (lat1 = 90):
     # GFS and ECMWF open data both are. Any other first latitude would be misregistered by this row arithmetic.
@@ -237,10 +245,26 @@ def decode_source(ctx, path, tmpdir, pts=None, sfc_keys=None, rec=None, host=Non
             os.environ.pop("RAYON_NUM_THREADS", None)
         else:
             os.environ["RAYON_NUM_THREADS"] = rayon_prev
+    # Same-grid donors (aigfs: terrain from the same cycle's GFS analysis on the same 0.25 deg grid), cut with this
+    # file's own window. A donor on another grid is refused: its rows would not be this file's rows.
+    for k, spec in rec.get("same_grid_donors", {}).items():
+        dpath = Path(ctx.case_dir) / spec["file"].format(cyc=int(ctx.start.hour) if ctx.start is not None else 0)
+        if not dpath.is_file():
+            raise FileNotFoundError(f"{UNIT}: same-grid donor file {dpath} missing (fetch the gfs start)")
+        dsel = _selsfc(spec["spec"])
+        dinv = [r for r in g2.inventory(dpath) if dsel(r)]
+        if len(dinv) != 1 or (int(dinv[0]["nx"]), int(dinv[0]["ny"])) != (nx, ny) or \
+                abs(float(dinv[0]["lon1"]) - lon1) > 1e-6 or abs(float(dinv[0]["lat1"]) - float(r0["lat1"])) > 1e-6:
+            raise ValueError(f"{UNIT}: same-grid donor {dpath.name} {spec['spec']}: need one record on {path.name}'s "
+                             f"own {nx} x {ny} grid")
+        got = g2.run(ctx, dpath, {"X": dsel}, **kw)
+        sfc[k] = cp.ascontiguousarray(cut(got["X"]))
+        del got
     # Missing (bitmap) points: the sanitiser fills from present neighbours; MISSING marks them.
     pl[pl == MISSING] = cp.float32(np.nan)                          # in place, no second copy of the set
     if rec["pl_derive"]:
         srec.derive_pl(rec, pl, plev, PL_ORDER)
+    srec.derive_columns_sfc(rec, pl, plev, PL_ORDER, sfc)
     if rec["sfc_derive"]:
         srec.derive_sfc(rec, sfc, only=None if sfc_keys is None else rec["derive_columns"])
     s2 = cp.stack([sfc["PRES"], sfc["HGT"]])
@@ -253,10 +277,132 @@ def decode_source(ctx, path, tmpdir, pts=None, sfc_keys=None, rec=None, host=Non
     if getattr(ctx, "tables", None) is not None:
         ctx.tables["gfs_window"] = {"rows": [j0, j1], "lat": [-90.0 + j0 * dlat, -90.0 + (j1 - 1) * dlat],
                                     "lon0": grid.lon0, "ncol": ncol, "periodic": bool(periodic)}
+        # what stage() merges a row with a fallback by: a global source covers every point, so only its top blends
+        ctx.tables["source_proj"] = sgr.GlobalLatLon(nx, ny)
+        ctx.tables["source_grid"] = {**ctx.tables["source_proj"].describe(), "top_pa": float(min(plev))}
     nrec = sum(len(x) for x in jobs.values())
     print(f"{UNIT}: decoded {Path(path).name} ({Path(path).stat().st_size / 1e6:.0f} MB): {nrec} records, "
           f"{len(jobs)} grib2_dump processes at once (one core each), rows {j0}..{j1 - 1} of {ny}, "
           f"{ncol} of {nx} columns, {len(plev)} levels, {time.perf_counter() - t_dec:.1f} s", flush=True)
+    return dec, sfc, grid
+
+
+def decode_projected(ctx, path, tmpdir, rec, inv, sfc_keys=None):
+    """decode_source for a regional isobaric file on a rotated lat-lon grid (NCEP template 3.32769: RAP wrfprsf00).
+
+    Every record is decoded whole (953 x 834 for RAP: 0.8 M points, a GFS-sized record), grid-relative winds are
+    turned to earth-relative on the source grid (source_grids.RotatedGrid.wind_turn), the record table's pl_add records
+    are summed into their slot (graupel into snow) and its pl_extra records are kept beside the slots
+    (ctx.tables["source_extra"]: TKE for the warm start). The init-gfs-hinterp Grid carries the projection, so every
+    interpolation of this source places the target points in the source's own rotated coordinates."""
+    import time
+    import cupy as cp
+    from concurrent.futures import ThreadPoolExecutor
+    from namgpu.init import init_grib2_decode as g2
+    from namgpu.init import init_gfs_hinterp as hin
+    from namgpu.init import source_grids as sgr
+    from namgpu.init.sources import _selsfc
+
+    t_dec = time.perf_counter()
+    proj = sgr.grid_of(path)
+    nx, ny = proj.nx, proj.ny
+    if (int(inv[0]["nx"]), int(inv[0]["ny"])) != (nx, ny):
+        raise ValueError(f"{UNIT}: {path}: section 3 says {nx}x{ny}, the inventory {inv[0]['nx']}x{inv[0]['ny']}")
+    pl_dcp, sfc_tab = rec["pl"], rec["sfc"]
+    lev = {}
+    for r in inv:
+        if str(r["level_type"]) == "100":
+            lev.setdefault(r["dcp"], set()).add(float(r["level_value"]))
+    need = [pl_dcp[n] for n in rec["pl_need"]]
+    plev = sorted(set.intersection(*[lev[d] for d in need]), reverse=True)      # ground up (high p first)
+    plev = [p for p in plev if p >= 100.0]
+    keys = tuple(sfc_tab) if sfc_keys is None else tuple(sfc_keys)
+    sels = []
+    for v, name in enumerate(PL_ORDER):
+        if name not in pl_dcp:
+            continue
+        sels += [(("pl", v, k), _sel_pl(pl_dcp[name], p)) for k, p in enumerate(plev) if p in lev.get(pl_dcp[name], ())]
+        for a, dcp in enumerate(rec.get("pl_add", {}).get(name, ())):
+            sels += [(("add", v, k, a), _sel_pl(dcp, p)) for k, p in enumerate(plev) if p in lev.get(dcp, ())]
+    extra_names = tuple(rec.get("pl_extra", {})) if sfc_keys is None else ()      # the start only
+    for xn in extra_names:
+        dcp = rec["pl_extra"][xn]
+        sels += [(("extra", xn, k), _sel_pl(dcp, p)) for k, p in enumerate(plev) if p in lev.get(dcp, ())]
+    sels += [(("sfc", n), _selsfc(sfc_tab[n])) for n in keys]
+    jobs = {}
+    for key, sel in sels:                 # one grib2_dump process per variable (GFS-sized grid, as decode_source)
+        jobs.setdefault(key[:2] if key[0] != "sfc" else ("sfc",), {})[key] = sel
+    kw = dict(missing_value=MISSING, tmpdir=tmpdir, expect_shape=(nx, ny))
+    stream = getattr(ctx, "stream", None)
+    # A source whose surface records sit in a second file of the same grid (RRFS: prslev + 2dfld): the record table
+    # names the file-name substitution; that file must be on the same grid (checked), or every surface field would land
+    # in the wrong cells.
+    sfc_path = path
+    if rec.get("sfc_file_from"):
+        a, b = rec["sfc_file_from"]
+        sfc_path = Path(path).with_name(Path(path).name.replace(a, b))
+        if not sfc_path.is_file():
+            raise FileNotFoundError(f"{UNIT}: {sfc_path} missing (the surface file of {Path(path).name})")
+        if sgr.grid_of(sfc_path).describe() != proj.describe():
+            raise ValueError(f"{UNIT}: {sfc_path.name} is not on the grid of {Path(path).name}")
+
+    def one(item):
+        key, sel = item
+        with (stream if stream is not None else contextlib.nullcontext()):
+            return g2.run(ctx, sfc_path if key == ("sfc",) else path, sel, **kw)
+    pl = cp.zeros((len(PL_ORDER), len(plev), ny, nx), dtype=cp.float32)
+    extra = {xn: cp.zeros((len(plev), ny, nx), dtype=cp.float32) for xn in extra_names}
+    sfc, adds = {}, []
+    rayon_prev = os.environ.get("RAYON_NUM_THREADS")
+    os.environ["RAYON_NUM_THREADS"] = str(max(1, _cores.usable() // max(1, len(jobs))))
+    try:
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+            for got in ex.map(one, jobs.items()):
+                for key, a in got.items():
+                    if key[0] == "pl":
+                        pl[key[1], key[2]] = a
+                    elif key[0] == "add":
+                        adds.append((key[1], key[2], a))
+                    elif key[0] == "extra":
+                        extra[key[1]][key[2]] = cp.where(a == MISSING, cp.float32(0.0), a)
+                    else:
+                        sfc[key[1]] = cp.ascontiguousarray(a)
+                del got
+    finally:
+        if rayon_prev is None:
+            os.environ.pop("RAYON_NUM_THREADS", None)
+        else:
+            os.environ["RAYON_NUM_THREADS"] = rayon_prev
+    for v, k, a in adds:                 # after every slot is in place (the futures finish in any order)
+        pl[v, k] += cp.where(a == MISSING, cp.float32(0.0), a)
+    del adds
+    if proj.grid_relative_winds:
+        turn = proj.wind_turn(xp=cp)
+        iu, iv = PL_ORDER.index("UGRD"), PL_ORDER.index("VGRD")
+        u = cp.where(pl[iu] == MISSING, cp.float32(np.nan), pl[iu])
+        v = cp.where(pl[iv] == MISSING, cp.float32(np.nan), pl[iv])
+        sgr.to_earth(u, v, turn)
+        pl[iu], pl[iv] = u, v
+        del u, v
+        if "U10" in sfc and "V10" in sfc:
+            miss = (sfc["U10"] == MISSING) | (sfc["V10"] == MISSING)
+            u, v = sfc["U10"].copy(), sfc["V10"].copy()
+            sgr.to_earth(u, v, turn)
+            sfc["U10"] = cp.where(miss, cp.float32(MISSING), u)
+            sfc["V10"] = cp.where(miss, cp.float32(MISSING), v)
+    dec = _derive_and_decode(ctx, rec, pl, plev, sfc, sfc_keys)
+    grid = hin.Grid(lat0=0.0, lon0=0.0, dlat=1.0, dlon=1.0, lon_periodic=False, proj=proj)
+    if getattr(ctx, "tables", None) is not None:
+        ctx.tables["source_proj"] = proj
+        ctx.tables["source_grid"] = {**proj.describe(), "top_pa": float(min(plev))}
+        if extra_names:
+            ctx.tables["source_extra"] = {"fields": extra, "grid": grid, "plev": list(plev)}
+    nrec = sum(len(x) for x in jobs.values())
+    print(f"{UNIT}: decoded {Path(path).name} ({Path(path).stat().st_size / 1e6:.0f} MB): {nrec} records on the "
+          f"{nx}x{ny} {proj.kind} grid, {len(jobs)} grib2_dump processes, "
+          f"{len(plev)} levels {plev[0] / 100:g}-{plev[-1] / 100:g} hPa"
+          f"{', winds turned to earth-relative' if proj.grid_relative_winds else ''}, "
+          f"{time.perf_counter() - t_dec:.1f} s", flush=True)
     return dec, sfc, grid
 
 
@@ -379,6 +525,78 @@ def _shift(a, dj, di, lon_periodic, fill):
     return res
 
 
+_RING_STEP = r"""
+extern "C" __global__ void ring_step(const float* __restrict__ a, const unsigned char* __restrict__ m,
+                                     float* __restrict__ ao, unsigned char* __restrict__ mo,
+                                     const long long n, const int ny, const int nx, const int periodic) {
+    long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const long long plane = (long long)ny * nx;
+    const long long k = t / plane;
+    const int j = (int)((t / nx) % ny);
+    const int i = (int)(t % nx);
+    if (!m[t]) { ao[t] = a[t]; mo[t] = 0; return; }
+    float s = 0.0f, c = 0.0f;
+    // the order of the old loop: dj = -1, 0, 1 then di = -1, 0, 1; neighbour (j - dj, i - di); absent or missing
+    // neighbours add 0 to both sums, exactly as its shifted zero-filled arrays did
+    for (int dj = -1; dj <= 1; ++dj) {
+        for (int di = -1; di <= 1; ++di) {
+            if (dj == 0 && di == 0) continue;
+            int jj = j - dj, ii = i - di;
+            float v = 0.0f, w = 0.0f;
+            if (jj >= 0 && jj < ny) {
+                if (periodic) { ii = (ii % nx + nx) % nx; }
+                if (ii >= 0 && ii < nx) {
+                    long long q = k * plane + (long long)jj * nx + ii;
+                    if (!m[q]) { v = a[q]; w = 1.0f; }
+                }
+            }
+            s = __fadd_rn(s, v);
+            c = __fadd_rn(c, w);
+        }
+    }
+    if (c > 0.0f) { ao[t] = __fdiv_rn(s, fmaxf(c, 1.0f)); mo[t] = 0; }
+    else { ao[t] = a[t]; mo[t] = 1; }
+}
+"""
+_RING_KERNEL = None
+RING_CHECK_EVERY = 16          # rings between the host checks (a ring after the fill is done changes nothing)
+
+
+def _ring_fill_many(arrs, missing, rings=2000, lon_periodic=True):
+    """_ring_fill of several [ny, nx] fields at once, one kernel per ring for all of them, the host checking every
+    RING_CHECK_EVERY rings. Bitwise the per-field loop: the same neighbour order and float32 sums, and a ring after
+    a field is complete (or stuck) leaves it unchanged. Breakage it prevents: the per-field loop launched ~40 small
+    kernels and synced the host twice per ring; a HRRR start (1799 x 1059 Lambert grid, ocean corners ~500 rings
+    from land) spent ~20 s of init on one host thread for its 9 soil fields (single-core sentinel,
+    2026-11-09 01:07Z). Returns [(filled, still-missing mask)] in input order."""
+    import cupy as cp
+    global _RING_KERNEL
+    if _RING_KERNEL is None:
+        _RING_KERNEL = cp.RawKernel(_RING_STEP, "ring_step")
+    a = cp.ascontiguousarray(cp.stack([cp.asarray(x, dtype=cp.float32) for x in arrs]))
+    m = cp.ascontiguousarray(cp.stack([cp.asarray(x) for x in missing]).astype(cp.uint8))
+    nk, ny, nx = a.shape
+    n = a.size
+    a2, m2 = cp.empty_like(a), cp.empty_like(m)
+    blk = 256
+    grid = ((n + blk - 1) // blk,)
+    done = 0
+    while done < rings:
+        prev = int(cp.count_nonzero(m))
+        if prev == 0:
+            break
+        for _ in range(min(RING_CHECK_EVERY, rings - done)):
+            _RING_KERNEL(grid, (blk,), (a, m, a2, m2, cp.int64(n), cp.int32(ny), cp.int32(nx),
+                                        cp.int32(1 if lon_periodic else 0)))
+            a, a2 = a2, a
+            m, m2 = m2, m
+            done += 1
+        if int(cp.count_nonzero(m)) == prev:
+            break                                 # nothing connected to what is left
+    return [(a[k], m[k].astype(cp.bool_)) for k in range(nk)]
+
+
 def _ring_fill(a, missing, rings=2000, lon_periodic=True):
     """Fill missing points from the mean of present 8-neighbours, ring by ring (device), until none is left.
     Was 12 rings (~3 deg): a NAM land cell whose nearest source land is further (Jan Mayen, 71.07N 8.15W, ~18 rings
@@ -487,11 +705,12 @@ def ensure_vcoord(ctx):
         ctx.tables.pop(k, None)
 
 
-def model_state(ctx, path, tmpdir, sfc_keys=None, rec=None, decoded=None, host=None):
+def model_state(ctx, path, tmpdir, sfc_keys=None, rec=None, decoded=None, host=None, keep_columns=False):
     """Decode, interpolate and vertically interpolate one isobaric file onto the model grid; the
     result is in ctx.st (PD, PINT, T, Q, CW, U, V grid-relative, FIS, PSFC_OUT, P3D_OUT).
     ctx.st must carry HGT_M (model terrain) and GLAT/GLON/VLAT/VLON. decoded: decode_source's result for
-    this file when the caller decoded it ahead (init-gfs-bocos prefetch); else it is decoded here."""
+    this file when the caller decoded it ahead (init-gfs-bocos prefetch); else it is decoded here.
+    keep_columns: also return the model-grid columns (the warm start reads the condensate species from them)."""
     import cupy as cp
     from namgpu.init import init_gfs_vinterp as vin
 
@@ -511,7 +730,61 @@ def model_state(ctx, path, tmpdir, sfc_keys=None, rec=None, decoded=None, host=N
         ctx.first_step = first
         ctx.tables.pop("gfs_hinterp", None)
     rotate_winds(ctx, st["U"], st["V"])
+    if keep_columns:
+        return sfc, grid, gi
     return sfc, grid
+
+
+Q2_FLOOR = 0.02            # NMMB EPSQ2 (module_INIT_READ_BIN.F90:237-240), the native warm start's floor
+
+
+def warm_state(ctx, gi):
+    """The source's own condensate and TKE on the model levels, for a record table with "warm" (RAP).
+
+    Each species column (CLWMR_IN, RWMR_IN, CICE_IN, SNMR_IN: cloud water, rain, cloud ice, snow + graupel) goes onto
+    P3D_OUT with init-gfs-vinterp's own log-p kernel and its 1e-11 floor (as parent_start.species does). The Ferrier
+    state is one total condensate CWM with fractions: CW = qc + qr + qi + qs, F_ICE = (qi + qs) / CW, F_RAIN =
+    qr / (qc + qr), F_RIMEF = 1 (no rime factor in the source; graupel counts as ice mass). TKE (pl_extra) goes the
+    same way: Q2 = max(2 TKE, 0.02), as the native warm start. Returns {CW, Q2, F_ICE, F_RAIN} [LM, JM, IM]."""
+    import cupy as cp
+    from namgpu import kernels
+    from namgpu.init import init_gfs_hinterp as hin
+    st, g, cfg = ctx.st, ctx.grid, ctx.cfg
+    im, jm, lm = int(g.im), int(g.jm), int(g.lm)
+    pres, p3d = gi["PRES_IN"], st["P3D_OUT"]
+    nlev = int(pres.shape[0])
+    k = kernels.get("init_gfs_vinterp", "init_gfs_vinterp_log")
+    i32 = np.int32
+
+    def vert(col):
+        out = cp.empty((lm, jm, im), dtype=cp.float32)
+        with _scope(ctx):
+            k(kernels.grid_cols(im, jm), kernels.BLOCK_COL, (
+                pres, p3d, col, out, i32(im), i32(jm), i32(nlev), i32(lm),
+                i32(0), i32(1), i32(0), i32(int(cfg.lnsh)), i32(im + 1), i32(jm + 1)))
+        return cp.where(out < cp.float32(1.0e-11), cp.float32(0.0), out)
+    qc, qr = vert(gi["CLWMR_IN"]), vert(gi["RWMR_IN"])
+    qs = vert(gi["CICE_IN"])
+    qs += vert(gi["SNMR_IN"])
+    liq = qc + qr
+    cw = liq + qs
+    out = {"CW": cw,
+           "F_ICE": cp.where(cw > 0, qs / cp.where(cw > 0, cw, 1.0), 0.0).astype(cp.float32),
+           "F_RAIN": cp.where(liq > 0, qr / cp.where(liq > 0, liq, 1.0), 0.0).astype(cp.float32)}
+    del qc, qr, qs, liq
+    ex = ctx.tables.pop("source_extra", None)
+    if ex is not None and "TKE" in ex["fields"]:
+        tke = ex["fields"]["TKE"]
+        col = cp.empty((nlev, jm, im), dtype=cp.float32)
+        h, _ = hin.interp_full(tke, cp.ones(tke.shape, dtype=cp.uint8), st["GLAT"], st["GLON"], grid=ex["grid"],
+                               stream=getattr(ctx, "stream", None))
+        col[0] = h[0]                    # the surface entry takes the lowest isobaric level's TKE
+        col[1:] = h
+        del h
+        out["Q2"] = cp.maximum(cp.float32(2.0) * vert(col), cp.float32(Q2_FLOOR))
+    else:
+        out["Q2"] = cp.full((lm, jm, im), Q2_FLOOR, dtype=cp.float32)
+    return out
 
 
 def check_valid(ctx, name, row):
@@ -578,8 +851,113 @@ def load_static(ctx):
     return {k: cp.asarray(z[k]) for k in STATIC_KEYS}, str(STATIC_NPZ)
 
 
+SOIL_FROM_ENV = "NAMGPU_SOIL_FROM"
+# raw_sfc entries that are the land-surface soil state (--soil-from picks their source); the static entries are the
+# NAM grid's own in every start and are not merged
+SOIL_RAW = ("TSOIL", "SOILW", "CNWAT", "TSOIL_3M")
+# --soil-from gfs-moisture: the source's soil temperature (TSOIL, TSOIL_3M) with the fallback's soil moisture and canopy
+# water. A HRRR start's RUC soil moisture read at Noah depths is drier than Noah's (RUC and Noah soil tables differ):
+# 2 m dewpoint bias -3.7 F at +12 h against -2.2 F with GFS soil, while its soil temperature gave the best 2 m
+# temperature (MAE 2.9 F against 3.9 F with GFS soil; 2026-01-23 12Z).
+SOIL_MOISTURE_RAW = ("SOILW", "CNWAT")
+STATIC_RAW = ("LAND", "ALBDO", "VEG", "SFCR", "VGTYP", "SOTYP")
+MERGE_3D_H = ("T", "Q")
+MERGE_3D_V = ("U", "V")
+MERGE_2D = ("PD", "PSFC_OUT", "PSFC", "SOILHGT", "PSHLTR", "TSHLTR", "QSHLTR", "U10", "V10", "TH10", "Q10")
+
+
+def soil_from(ctx, row) -> str:
+    """Where the start's soil state comes from: "source" (the row's own) or another SOURCES row the row lists (rap:
+    "gfs"). First set wins: ctx.soil_from (woof-nam run --soil-from), NAMGPU_SOIL_FROM, configfile soil_from."""
+    v = getattr(ctx, "soil_from", None) or os.environ.get(SOIL_FROM_ENV) or \
+        (ctx.cfg.raw.get("soil_from") if getattr(ctx, "cfg", None) is not None else None) or         row.get("soil_default", "source")
+    v = str(v).strip().lower()
+    allowed = tuple(row.get("soil_from", ("source",)))
+    if v not in allowed:
+        raise ValueError(f"{UNIT}: soil from {v!r}: this start source offers {list(allowed)}")
+    return v
+
+
+def _blend(src, fb, w):
+    """w src + (1 - w) fb, exactly src where w = 1 and exactly fb where w = 0 (src may be anything there: the
+    source's extrapolation above its top or its edge values off its grid)."""
+    import cupy as cp
+    mid = w * src + (cp.float32(1.0) - w) * fb
+    return cp.where(w >= 1.0, src, cp.where(w <= 0.0, fb, mid)).astype(cp.float32)
+
+
 def stage(ctx, name, row):
-    """Chain stage for an isobaric init source (sources.stage -> here)."""
+    """Chain stage for an isobaric init source (sources.stage -> here).
+
+    A row with a "fallback" (rap: a regional source) is staged twice: first the fallback (the same cycle's GFS
+    analysis, the whole start as a GFS start makes it), then the row's own source, and the two are merged on the model
+    grid. The source holds wherever it covers: inside its grid (blended to the fallback over edge_cells source cells at
+    its edge) and below its top (blended over top_blend_pa above its highest isobaric level; the model levels there are
+    pure pressure, so both starts put them at the same pressure). PD, PINT and every 2-D field merge with the
+    horizontal weight only (PINT and P3D are linear in PD, so the merged columns stay consistent). --soil-from gfs takes
+    the fallback's soil state everywhere. The source's warm condensate and TKE carry the same weight (none outside).
+    So outside the source and above its top this start is exactly the GFS start."""
+    fb = row.get("fallback")
+    sf = soil_from(ctx, row)
+    if not fb:
+        return _stage_one(ctx, name, row)
+    import cupy as cp
+    from namgpu.init import sources as srcmod
+    st = ctx.st
+    fname = fb["source"]
+    base = _stage_one(ctx, fname, srcmod.SOURCES[fname])
+    keep = {n: st[n].copy() for n in MERGE_3D_H + MERGE_3D_V + MERGE_2D + ("PINT", "P3D_OUT")}
+    keep_raw = {k: v.copy() for k, v in ctx.tables["raw_sfc"].items()}
+    info = _stage_one(ctx, name, row)
+    proj = ctx.tables.pop("source_proj")
+    top = float(ctx.tables["source_grid"]["top_pa"])
+    blend = float(fb.get("edge_cells", 8))
+    fyh, fxh = proj.place(st["GLAT"], st["GLON"], xp=cp)
+    wh = proj.edge_weight(fyh, fxh, blend, xp=cp)
+    fyv, fxv = proj.place(st["VLAT"], st["VLON"], xp=cp)
+    wv = proj.edge_weight(fyv, fxv, blend, xp=cp)
+    del fyh, fxh, fyv, fxv
+    # vertical weight from the source start's own mid-layer pressure (taken before P3D_OUT is merged)
+    wz = cp.clip((st["P3D_OUT"] - cp.float32(top)) / cp.float32(fb.get("top_blend_pa", 2000.0)), 0.0, 1.0)
+    w3h = (wz * wh[None]).astype(cp.float32)
+    w3v = (wz * wv[None]).astype(cp.float32)
+    del wz
+    with _scope(ctx):
+        for n in MERGE_3D_H:
+            st[n][...] = _blend(st[n], keep[n], w3h)
+        for n in MERGE_3D_V:
+            st[n][...] = _blend(st[n], keep[n], w3v)
+        for n in MERGE_2D + ("PINT", "P3D_OUT"):
+            st[n][...] = _blend(st[n], keep[n], wh if st[n].ndim == 2 else wh[None])
+        raw = ctx.tables["raw_sfc"]
+        for k, a in raw.items():
+            if k in STATIC_RAW:
+                continue
+            if k in SOIL_RAW and (sf == "gfs" or (sf == "gfs-moisture" and k in SOIL_MOISTURE_RAW)):
+                raw[k] = keep_raw[k]
+            else:
+                raw[k] = _blend(a, keep_raw[k], wh if a.ndim == 2 else wh[None]).astype(a.dtype)
+        sw = ctx.tables.get("source_warm")
+        if sw is not None:
+            sw["CW"] *= w3h
+            sw["Q2"] = _blend(sw["Q2"], cp.full_like(sw["Q2"], Q2_FLOOR), w3h)
+    del keep, keep_raw, w3h, w3v
+    cover = float(cp.mean(wh))
+    full = float(cp.mean(wh >= 1.0))
+    info.update(fallback={"source": fname, "file": base.get("file"), "edge_cells": blend, "top_pa": top,
+                          "top_blend_pa": float(fb.get("top_blend_pa", 2000.0)),
+                          "h_points_from_source_mean_weight": round(cover, 4),
+                          "h_points_fully_source": round(full, 4)},
+                soil_from=(f"{name} temperature, {fname} moisture" if sf == "gfs-moisture"
+                           else sf if sf != "source" else name))
+    print(f"{UNIT}: {name} start merged with the {fname} start: {100 * full:.1f} % of H points wholly {name}, "
+          f"{name} below {top / 100:g} hPa (blend {fb.get('top_blend_pa', 2000.0) / 100:g} hPa), soil from "
+          f"{info['soil_from']}", flush=True)
+    return info
+
+
+def _stage_one(ctx, name, row):
+    """One isobaric source staged as the whole start (stage() merges two of these for a row with a fallback)."""
     import cupy as cp
     from namgpu.init import init_grid_geo, sources as srcmod
 
@@ -596,7 +974,14 @@ def stage(ctx, name, row):
     init_grid_geo.run(ctx)                 # the interpolation needs GLAT/GLON/VLAT/VLON first
     static, static_from = load_static(ctx)
     st.add("HGT_M", (jm, im))[...] = static["HGT_SFC"]
-    sfc, grid = model_state(ctx, path, tmpdir, rec=rec)
+    warm = bool(rec.get("warm"))
+    if warm:
+        sfc, grid, gi = model_state(ctx, path, tmpdir, rec=rec, keep_columns=True)
+        ctx.tables["source_warm"] = warm_state(ctx, gi)
+        del gi
+    else:
+        sfc, grid = model_state(ctx, path, tmpdir, rec=rec)
+        ctx.tables.pop("source_warm", None)
     donor_grid = {}
     for k, spec in rec["donors"].items():        # fields the source does not publish (source_records donors)
         sfc[k], donor_grid[k] = decode_donor(ctx, spec, tmpdir)
@@ -622,10 +1007,11 @@ def stage(ctx, name, row):
     land_src = sfc["LANDSRC"] > 0.5
     soil = {}
     left = {}
-    for k in SOIL_KEYS:
-        a = sfc[k]
-        miss = (a == MISSING) | ~land_src
-        a, m = _ring_fill(a, miss, lon_periodic=grid.lon_periodic)
+    # TDEEP: a source with a deep (3 m) soil temperature of its own (RAP's last RUC node) gives Noah's TG from it
+    soil_keys = SOIL_KEYS + (("TDEEP",) if "TDEEP" in sfc else ())
+    filled = _ring_fill_many([sfc[k] for k in soil_keys], [(sfc[k] == MISSING) | ~land_src for k in soil_keys],
+                             lon_periodic=grid.lon_periodic)
+    for k, (a, m) in zip(soil_keys, filled):
         soil[k] = a
         left[k] = m
     # Declared fill: a source window with no land at all (a small island the source grid does not resolve,
@@ -633,8 +1019,8 @@ def stage(ctx, name, row):
     # temperature (the sea surface there), moisture SOILW_NO_LAND, canopy water 0, and the count is printed.
     nleft = int(left["TSOIL1"].sum())
     if nleft:
-        for k in SOIL_KEYS:
-            fill = sfc["TSK"] if k.startswith("TSOIL") else (SOILW_NO_LAND if k.startswith("SOILW") else 0.0)
+        for k in soil_keys:
+            fill = sfc["TSK"] if k.startswith("TSOIL") or k == "TDEEP" else (SOILW_NO_LAND if k.startswith("SOILW") else 0.0)
             soil[k] = cp.where(left[k], fill, soil[k])
         print(f"{UNIT}: no source land in the window for {nleft} source points: soil T = skin T, "
               f"SOILW = {SOILW_NO_LAND}, CNWAT = 0 (declared fill)", flush=True)
@@ -655,7 +1041,7 @@ def stage(ctx, name, row):
                                                 for k in range(1, 5)])),
         "TMP_SFC": h2(sfc["TSK"]),
         "ICEC": cp.clip(h2(nonneg(sfc["ICEC"]), donor_grid.get("ICEC")), 0.0, 1.0),
-        "TSOIL_3M": h2(soil["TSOIL4"]),
+        "TSOIL_3M": h2(soil.get("TDEEP", soil["TSOIL4"])),
         "SNOD": h2(nonneg(sfc["SNOD"]), donor_grid.get("SNOD")),
         "WEASD": h2(nonneg(sfc["WEASD"]), donor_grid.get("WEASD")),
         "CNWAT": h2(nonneg(soil["CNWAT"])),
@@ -664,6 +1050,14 @@ def stage(ctx, name, row):
         "SOTYP": cp.rint(static["SOTYP"]).astype(cp.int32),
     }
     raw["WTMP"] = raw["TMP_SFC"]
+    # Ensemble soil perturbation (configfile key soil_moisture_scale, e.g. the SREF drier-soil members): the
+    # start's volumetric soil moisture times the factor on land, inside the same 0.02-0.6 bounds. 1 = unchanged.
+    sms = float(ctx.cfg.raw.get("soil_moisture_scale", 1.0)) if getattr(ctx, "cfg", None) is not None else 1.0
+    if sms <= 0.0:
+        raise ValueError(f"{UNIT}: soil_moisture_scale {sms} must be positive (zero would leave no soil water)")
+    if sms != 1.0:
+        raw["SOILW"] = cp.ascontiguousarray(cp.clip(raw["SOILW"] * cp.float32(sms), 0.02, 0.6))
+        print(f"{UNIT}: soil moisture of the start scaled by {sms} (configfile soil_moisture_scale)", flush=True)
 
     # Shelter / 10 m state (NMMB reads it from its input file; sources.shelter_state). Source 2 m T moved
     # from the source terrain to the NAM terrain with the standard lapse rate 6.5 K/km; source 2 m q kept;

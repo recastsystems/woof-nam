@@ -95,6 +95,14 @@ def warm_start(ctx):
     module_INIT_READ_BIN.F90:237-240). Sources without these records (GFS) keep the cold-start values.
     """
     from namgpu.init import sources  # noqa: PLC0415
+    sw = ctx.tables.get("source_warm")
+    if sw:
+        # An isobaric source with its own condensate and TKE (gfs_start.warm_state: RAP): CW and Q2 now, over the
+        # cold rule's CW = 0, Q2 = 0.02; its F_ICE / F_RAIN after drv-physics-initialize (apply_parent_warm), as for
+        # a one-way nest, because phys-fer-init's cold-start fill runs there.
+        ctx.st["CW"][...] = sw["CW"]
+        ctx.st["Q2"][...] = sw["Q2"]
+        return ["CW", "Q2"]
     if ctx.tables.get("parent_warm"):
         # One-way nest from our own history (parent_start.species): the parent's Ferrier fractions on the nest
         # levels; CW is the cold rule's species sum, which is the parent's CWM. Applied after drv-physics-initialize
@@ -110,7 +118,7 @@ def apply_parent_warm(ctx):
     (2026-11-04) had QSNOW = QRAIN = 0 and no echo at f00 where the parent had 48.8 dBZ, and 26 dBZ at f01.
     F_RIMEF stays at the fill's 1 (unrimed; the history has no rime field). One-way nests from our history only.
     """
-    pw = ctx.tables.pop("parent_warm", None)
+    pw = ctx.tables.pop("parent_warm", None) or ctx.tables.pop("source_warm", None)
     if not pw:
         return []
     st = ctx.st

@@ -44,7 +44,8 @@ def cldfra_flags(microphysics: str) -> tuple[bool, bool]:
     Unknown names raise: the Fortran writes 'Unknown microphysics' and STOPs, so this port
     refuses the same way rather than guessing flags.
     """
-    mp = str(microphysics).strip()
+    from namgpu.steps.drv_tracer_index import family
+    mp = family(microphysics)
     if mp not in _FLAGS:
         raise ValueError(
             f"phys-rad-cal-cldfra: unknown microphysics {mp!r}; module_SOLVER_INTERNAL_STATE.F90 "

@@ -49,7 +49,8 @@ extern "C" __global__ void drv_update_water(
     float* __restrict__ qr,
     float* __restrict__ qs,
     float* __restrict__ qi,
-    float* __restrict__ qg)
+    float* __restrict__ qg,
+    const int nbnd, const int joff, const int jmg)
 {
     POINT_IJL
     if (i0 >= im || j0 >= jm || l0 >= lm) return;
@@ -57,6 +58,14 @@ extern "C" __global__ void drv_update_water(
 
     const bool init = cld_init != 0;
     const bool spec = spec_adv != 0;
+    // Port addition (lane nam-3km, 2026-11-05), fer/fer_hires with spec_adv only: on the nbnd (= LNSH) outer rows and
+    // columns the species are rebuilt from the boundary-blended CWM (the spec_adv=F conversion, 11166-11180) instead
+    // of CWM from the species. A NAM nest takes its species from the parent there; a standalone domain on GFS
+    // boundaries has only CW in the bocos, and without this the species on the strips are never relaxed and pile up
+    // (4 km band smoke: QCLOUD 24.5 g/kg on the north row after 3 h). nbnd = 0 (spec_adv=F, the NAM parent) is the
+    // Fortran unchanged. joff/jmg: slab row offset and global JM (namgpu/slab.py kargs).
+    const int jg = j0 + joff;
+    const bool strip = spec && nbnd > 0 && (i0 < nbnd || i0 >= im - nbnd || jg < nbnd || jg >= jmg - nbnd);
 
     float& CWM     = cwm[p];
     float& F_ICE   = f_ice[p];
@@ -76,7 +85,7 @@ extern "C" __global__ void drv_update_water(
 
     // ---------------------------------------------------------------- fer / fer_hires (11161-11226)
     case UW_MODE_FER:
-        if (!spec || init) {
+        if (!spec || init || strip) {
             // lines 11166-11180: update WATER arrays when advecting only total condensate
             if (CWM > NMMB_EPSQ) {
                 LIQW = (1.f - F_ICE) * CWM;

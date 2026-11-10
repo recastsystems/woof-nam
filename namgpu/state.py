@@ -253,6 +253,9 @@ def resolve_memory_path(want: str, card: float) -> dict:
     if want in ("fit", "full"):
         path, how = want, "set"
         reason = f"NAMGPU_MEMORY_PATH={want}"
+        why = _os.environ.get("NAMGPU_MEMORY_PATH_WHY", "").strip()
+        if want == "fit" and why:          # the run door switched it (run_forecast.memory_check)
+            how, reason = "auto", why
     elif want in ("", "auto"):
         path, how = ("fit" if card < FIT_BELOW_GIB else "full"), "auto"
         reason = f"card {card:.1f} GiB {'<' if path == 'fit' else '>='} {FIT_BELOW_GIB:.0f} GiB"

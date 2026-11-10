@@ -30,6 +30,13 @@ PRODUCT_CARRIERS = (
     "T02MAX", "T02MIN", "RH02MAX", "RH02MIN", "SPD10MAX", "REFDMAX", "UPVVELMAX", "DNVVELMAX", "PRATEMAX",
     "UPHLMAX25", "UPHLMIN25", "UPHLMAX03", "UPHLMIN03", "CLDFRA", "TKE_PBL", "U10MAX", "V10MAX", "W_TOT", "PINT",
     "SMSTAV", "SMSTOT", "CZEN", "CZMEAN", "SIGT4", "CNVBOT", "CNVTOP", "DRAGCO",
+    # the NAM nest (hiresf) carriers (io_history_fields.PRODUCT_CARRIERS_2D/3D)
+    "ACSNOW", "ACSNOM", "SSROFF", "BGROFF", "SFCSHX", "SFCLHX", "SUBSHX", "SNOPCX", "ASRFC",
+    "ASWIN", "ASWOUT", "ASWTOA", "ALWIN", "ALWOUT", "ALWTOA", "ARDSW", "ARDLW",
+    "QSH", "TH10", "Q10", "PREC", "SR", "RLWTOA", "RSWTOA", "ALBASE", "MXSNAL", "AKHS_OUT", "SFCEXC", "CPRATE",
+    "REFDMAX263K", "FPRATEMAX", "F_RIMEF",
+    # the snow maps: grid-scale snowfall since the start
+    "SNOWNC",
 )
 PRESETS = {
     "full": None,

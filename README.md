@@ -5,7 +5,7 @@ WOOF-NAM is a GPU port of NOAA/NCEP's North American Mesoscale model (NAM, nam.v
 on one NVIDIA card or on several cards of one machine. NCEP retired the NAM on 2026-11-03 12Z; this
 package keeps the model running.
 
-Distribution name `recast-woof-nam` (on PyPI: `pip install recast-woof-nam`), import name `namgpu`, command `woof-nam`, version 0.1.1.
+Distribution name `recast-woof-nam` (on PyPI: `pip install recast-woof-nam`), import name `namgpu`, command `woof-nam`, version 0.2.0.
 
 ## What it looks like
 
@@ -72,9 +72,15 @@ woof-nam doctor                      # the card, CuPy/NVRTC, terrain data, write
 
 pip installs `recast-woof-nam` with everything a run reads inside the package: the NAM parm files, the
 NOAA radiation, CO2 and ozone fix files, the Noah tables and the CUDA kernels. It also installs
-`cupy-cuda13x[ctk]`, numpy, scipy, netCDF4, Pillow and `gpuwm` (2.9.11 or newer), which supplies the
-Rust GRIB2 decoder, the NetCDF writer and the map renderer `rw_wrfbatch`. The terrain for gravity-wave
-drag is read from `NAMGPU_GEOG` (default `~/WPS_GEOG`).
+`cupy-cuda13x[ctk]`, numpy, scipy, netCDF4, Pillow and `gpuwm` (2.9.13 or newer), which supplies the
+Rust GRIB2 decoder, the NetCDF writer, the map renderer `rw_wrfbatch` and the schemes the physics options run.
+The terrain for gravity-wave drag is read from `NAMGPU_GEOG` (default `~/WPS_GEOG`).
+
+**gpuwm-hex is optional.** The base install runs the NAM default physics, every grid and nest, `woof-nam suite`,
+the GRIB2 products, maps and scores, and every physics option but two: TEMPO microphysics and MYNN v6.1. Those two,
+and the suites that use TEMPO (`hrrrv5`, `rapv5`, `woof-nam-next-12km`, `woof-nam-next-7p6km`), need gpuwm-hex
+0.5.0 or newer: `pip install "recast-woof-nam[modern]"`. Without it, a run that asks for one stops before it starts,
+with one line that says so. `woof-nam doctor` shows whether gpuwm-hex is installed.
 
 Everything runs through one command, `woof-nam`; `woof-nam --help` lists the steps and every step has
 its own `--help`. Run them from one working folder: `cases/`, `static/` and `runs/` are made there
@@ -105,10 +111,16 @@ that says where the files are and which fields to read differs.
 | `--source` | analysis | start times | ready after the start time | boundaries (every 3 h) | licence | for |
 |---|---|---|---|---|---|---|
 | `native` | archived NAM native analysis | cycles before 2026-11-03 12Z | archive only | GFS cycle 6 h older | US Government | the NAM's own start |
-| `gfs` | GFS 0.25 degree (0.5 degree analyses before 2015-01-15) | from 2004-03-01 00Z | about 3.5 h | GFS cycle 6 h older (`--boco-age 0`: the start cycle's own forecast) | US Government | real time, recent dates and hindcasts |
+| `gfs` | GFS 0.25 degree | from 2021-01-01 00Z | about 3.5 h | GFS cycle 6 h older | US Government | real time and recent dates |
 | `ifs-0p25` | ECMWF open data IFS HRES 0.25 degree | from 2025-03-14 12Z | about 7.5 h (00/12Z), 6.4 h (06/18Z) | same IFS cycle | CC BY 4.0 | real time and recent dates |
 | `ifs` | ECMWF open data IFS HRES 0.1 degree | from 2026-10-20 12Z | about 9.6 h (00/12Z), 8.5 h (06/18Z) | same IFS cycle | CC BY 4.0 | real time and recent dates |
 | `era5` | ECMWF ERA5 reanalysis 0.25 degree, hourly | 00, 06, 12 or 18Z from 1940-01-01 00Z | about 6 days | ERA5 analyses | CC BY 4.0 (Copernicus) | hindcasts and case studies |
+| `rap` | NOAA RAP analysis, 13 km North America (radar-cycled) | from 2021-02-22 12Z | real time and archive | GFS cycle 6 h older; GFS outside RAP's grid and above 50 hPa | US Government | a radar-cycled start with its own clouds |
+| `hrrr` | NOAA HRRR analysis, 3 km CONUS (radar-cycled) | from 2014-07-30 18Z | real time and archive | GFS cycle 6 h older; GFS outside CONUS and above 50 hPa | US Government | CONUS starts; soil: HRRR temperature, GFS moisture by default |
+| `rrfs` | NOAA RRFS v1 analysis, 3 km | from 2026-08-12 00Z | real time and archive | as `hrrr` | US Government | as `hrrr` |
+| `aifs` | ECMWF AIFS Single forecast (start: the IFS open-data analysis) | from 2025-03-14 12Z | real time and archive | AIFS forecast, every 6 h | CC BY 4.0 | AI-forecast boundaries |
+| `aigfs` | NOAA AIGFS forecast (start: the GFS analysis) | from 2025-12-01 00Z | real time and archive | AIGFS forecast, every 6 h | US Government | AI-forecast boundaries |
+| `gefs` | NOAA GEFS v12 member, 0.5 degree (`--member c00`, `p01`-`p30`) | from 2020-09-23 12Z | real time and archive | the same member, every 3 h | US Government | ensembles (`woof-nam ensemble`, the `sref16` domain) |
 
 ERA5 is read without an account from Google's public ARCO-ERA5 copy, through gpuwm's own ERA5 reader.
 The store publishes its last day itself, and `woof-nam fetch` refuses a run that ends past it and names
@@ -118,17 +130,6 @@ has no forecast leads: the start and every boundary time are analyses, so the bo
 the reanalysis at every hour of the run. A 24 h case fetches 9 hours, about 11.5 GB (1.3 GB per hour for
 the NAM 12 km grid's latitude band, every longitude), in about 1.5 min on a fast link. The fields read and how
 they are mapped to the NAM's: `namgpu/init/source_records.py` (`ERA5`).
-
-Past GFS cycles come from the archives, through the same `gfs` row: NOAA's bucket from 2021-01-01 00Z, NCAR's GDEX
-copy of the GFS 0.25 degree forecasts (d084001, no account) from 2015-01-15 00Z, and NCEI's GFS 0.5 degree analyses
-from 2004-03-01 00Z. NCEI keeps no GFS forecast files online for the years before 2015, so a start before
-2015-01-15 takes its boundaries from the GFS analyses (and 3 h first guesses) at each boundary time. For a hindcast,
-`--boco-age 0` takes the boundaries from the start cycle itself:
-
-```
-woof-nam fetch --cycle 2016021512 --hours 48 --case-dir cases/2016-02-15_12z --source gfs --boco-age 0
-NAMGPU_BOCO_AGE_H=0 woof-nam run --case 2016-02-15_12z --source gfs --hours 48 --out runs/2016-02-15_12z
-```
 
 ## Get the input data
 
@@ -244,6 +245,42 @@ card, after the init, into `<out>/init`). The second run then starts with `--ini
 saves the init time: two runs of the same case on the same card are bit for bit the same with a fresh init too
 (12 km, GFS start, digital filter, all physics, 6 h: every history hour, 0 of 6,295,450,910 values differ).
 
+## Spin-up start
+
+A cold start from the GFS analysis has no cloud, rain or snow and no model-made boundary layer at hour 0. The
+operational NAM started each cycle 6 h earlier and caught up to it, so its hour 0 carried them. `--start spinup`
+does the same with public data:
+
+```
+woof-nam run --case 2024-08-25_18z --source gfs --hours 84 --out runs/x --start spinup                 # IAU
+woof-nam run --case 2024-08-25_18z --source gfs --hours 84 --out runs/x --start spinup --spinup-update nudge
+```
+
+- **What it does.**
+  1. Starts from the GFS analysis 6 h before the cycle (`--spinup-hours`, a multiple of 6).
+  2. Runs the model 6 h with physics on, using the boundaries of the same GFS cycle the forecast uses, so the
+     boundary has no seam at the cycle.
+  3. Brings PD, T, Q, U and V to the cycle's GFS analysis. The hydrometeors, W, TKE, soil and surface keep what
+     the 6 h made.
+     - `iau` (the default): the increment, analysis minus model at the cycle, goes in over a 6 h window centred
+       on the cycle. The run rewinds to the window's start once, through a restart set (it re-executes as
+       `woof-nam run --resume`).
+     - `nudge`: the state is relaxed toward the analysis over the last hour before the cycle, with a 1 h
+       relaxation time.
+  4. Forecasts from the cycle. Hour 0 is the cycle; accumulators start at zero.
+- **Inputs.** It needs three more GFS files: the analysis 6 h earlier and the 0 and 3 h leads of that cycle.
+  `woof-nam fetch --spinup-hours 6` fetches them, and `run` fetches them itself when they are missing.
+- **Cost** (12 km CONUS, one RTX PRO 6000, 2024-08-25 18Z):
+  - `iau` adds about 5.4 min to a cycle, `nudge` about 3.0 min.
+  - Hour 0 held cloud water up to 2.4 g/kg, snow up to 9.7 g/kg and composite reflectivity to 51 dBZ, with 4.6 % of
+    the grid over 20 dBZ. A cold start has none of these.
+- **Scope.**
+  - One card.
+  - Sources gfs, ifs, ifs-0p25 and era5. The native row is one analysis file per case, and a parent run starts at
+    its own hour 0.
+  - The default `--start cold` path is unchanged: from one saved initial state, the 3 h histories of the engine
+    before and after this change are bit for bit the same.
+
 ## Make maps
 
 Every map is drawn by gpuwm's Rust renderer `rw_wrfbatch`. Each map is titled "WOOF-NAM 12 km" with
@@ -290,8 +327,8 @@ woof-nam products --compare cases/2025-03-14_12z/raw/nam/awphys06.grib2 \
 - **How.** The history fields are regridded from the NMMB rotated lat-lon grid to grid 218 (bilinear; soil and
   vegetation classes and masks nearest), winds turned grid-relative as NCEP writes them, and handed to gpuwm's Rust
   GRIB2 exporter `rw_rrfs_upp`, which computes the post fields and encodes on every core. The post's column work
-  uses a GPU with room, else the CPU (`--post-device`). If a shared card runs out of memory, the hour is rerun
-  instead of lost, and `index.json` lists the rerun.
+  runs on the GPU (`--post-device gpu`, the default). If a shared card runs out of memory, the hour waits for room
+  and is rerun on the GPU instead of lost, and `index.json` lists the rerun.
 - **The exporter.** The GRIB2 writer is `rw_rrfs_upp` (gpuwm's Rust field-set writer with the NAM awphys profile),
   a 13 MB Linux x86-64 binary attached to the woof-nam GitHub release (glibc 2.28 or later). The first
   `woof-nam products` (or `woof-nam run --products`) downloads it into `~/.woof-nam/bridges/` and checks its size
@@ -301,8 +338,12 @@ woof-nam products --compare cases/2025-03-14_12z/raw/nam/awphys06.grib2 \
 - **Speed.** About 25 s of products per forecast hour (2 hours in flight) against about 56 s of model per forecast
   hour on one RTX 5090, so `--products` keeps up with the forecast. f00-f06 took 2 min 35 s on 24 cores.
 
-**Checked against NOAA.** 2025-03-14 12Z, a 6 h native start, f00-f06, each file against NOAA's archived
-`nam.t12z.awphysFF.tm00.grib2` of the same hour:
+**How many records.** A 0.2.0 file holds 450 records at f06 (442 at f00, 448 at f03), of NOAA's 454; the 4 left out
+are named under "Not in the files" below. The four precipitation types are new in 0.2.0, so files from earlier versions
+hold at most 446 at f06. The first check below was made with an earlier version and counts fewer.
+
+**First check against NOAA (an earlier version).** 2025-03-14 12Z, a 6 h native start, f00-f06, each file against
+NOAA's archived `nam.t12z.awphysFF.tm00.grib2` of the same hour:
 
 | hour | records | match NOAA's inventory line and order | MB (NOAA's file) |
 |---|---|---|---|
@@ -325,10 +366,77 @@ woof-nam products --compare cases/2025-03-14_12z/raw/nam/awphys06.grib2 \
   term, so VVEL and DZDT have NAM's structures at about 0.7 of its amplitude. A run of this version writes W_TOT, and
   the products use it.
 
-**Not in the files.** 8 of NOAA's 454 records: visibility at cloud top, the Blackadar mixing length (NOAA's file holds
-zero there), the accumulated snowfall (WEASD), the four dominant precipitation types (CSNOW, CICEP, CFRZR, CRAIN) and
-lightning (LTNG). A record that is missing is left out of the file, never written as zeros or under another record's
+**Checked again for 0.2.0.** 2026-01-23 12Z, GFS start, each file against NOAA's archived file of the same hour: f00
+442 of 442, f03 448 of 448 and f06 450 of 450 records present at that hour match NOAA's inventory line and order
+(MAXUW and MAXVW are written). `woof-nam inventory` against NOAA's 2026-11-03 06Z f01: 448 of NOAA's 452 records
+written, the 4 below named, none unexplained. At f06, 408 of the 450 records also carry NOAA's decimal and binary scale
+factors exactly and 42 differ in one or both (16 TKE, 13 HGT, 4 VVEL, 3 UGRD/VGRD pairs, DPT at 2 m, SNOD, LHTFL;
+`docs/COMPATIBILITY-TABLE.md` gives each).
+
+**Not in the files.** 4 of NOAA's 454 records: visibility at cloud top, the Blackadar mixing length (NOAA's file holds
+zero there), the accumulated snowfall (WEASD) and lightning (LTNG). The four dominant precipitation types (CSNOW, CICEP,
+CFRZR, CRAIN) are written from 0.2.0. A record that is missing is left out of the file, never written as zeros or under another record's
 name. `docs/COMPATIBILITY.md` lists what a site changes, and `docs/COMPATIBILITY-TABLE.md` gives every record.
+
+## Nest GRIB2 products (hiresf)
+
+For a nest, `woof-nam products` writes NOAA's NAM nest files instead: one GRIB2 file per forecast hour named like
+NOAA's (`woof-nam.tHHz.<nest>.hiresfFF.tm00.grib2` + `.idx`), on that nest's NOAA output grid, with NOAA's record list
+and order.
+
+```
+woof-nam nest --center 32N,96W --size-km 1000 --res-km 3 --source gfs --start 2026110306 --hours 4 \
+    --out runs/tx --products conusnest                         # write each hour while the nest runs
+woof-nam products --run runs/tx/run --set conusnest            # or afterwards
+woof-nam products --compare nam.t06z.conusnest.hiresf01.tm00.grib2 \
+    runs/tx/run/products/woof-nam.t06z.conusnest.hiresf01.tm00.grib2   # grid and inventory against NOAA's file
+```
+
+| set (`--set`) | NOAA file | grid (byte-identical section 3 to NOAA's) |
+|---|---|---|
+| conusnest | nam.tHHz.conusnest.hiresfFF | Lambert 1799 x 1059, 3000 m (the HRRR grid) |
+| alaskanest | nam.tHHz.alaskanest.hiresfFF | polar stereographic 1649 x 1105, 2976 m |
+| hawaiinest | nam.tHHz.hawaiinest.hiresfFF | Mercator 321 x 225, 2500 m |
+| priconest | nam.tHHz.priconest.hiresfFF | Mercator 544 x 310, 2500 m |
+| firewxnest | nam.tHHz.firewxnest.hiresfFF | a Lambert box of NCEP's 1.27 km master grid around the nest (NCEP's rule; NOAA's own boxes for its two production points) |
+| hiresf | (any other nest) | a Lambert box around the nest at its own spacing |
+
+- **Which set.** `--set auto` (the default) writes awphys for the 12 km CONUS parent, and for a nest the NCEP nest its
+  run names (`ncep_nest` in nest-receipt.json, or the nest's name in its domain), else `hiresf`.
+- **Records.** The tables `namgpu/products/hiresf-conusnest.tsv` (876 records at f01-f60) and `hiresf.tsv` (871, the
+  other four nests), made from NOAA's 2026-11-03 06Z files by `tools/hiresf_tables.py`. f00 is the same list without
+  the hour's maxima and minima, with the bucket accumulations and averages as "0-0 day" windows, as NOAA's.
+  U/V and USTM/VSTM are two-field messages (`N.1`/`N.2` in the `.idx`), as NOAA's 66 pairs per file.
+- **Windows.** NCEP's nest windows: accumulations and averages over the 3 h bucket (0-1, 0-2, 0-3, 3-4, ...), from
+  NMMB's own 3 h accumulators; hourly maxima and minima over the last hour. The fire-weather nest empties its
+  accumulators every hour, as NCEP's did, so its files carry 0-1, 1-2, 2-3, ... (`hiresf-firewxnest.tsv`).
+- **How.** As NCEP did for its nests (nearest-neighbour regrid of the nest's own columns; budget for APCP, WEASD and
+  SNOD; winds grid-relative), but before the post, so each record is made from the nest column at that point. Points
+  of the grid outside the nest are missing (bitmap). The writer computes only the window of the grid the nest covers,
+  so a nest smaller than NOAA's grid costs its own size.
+- **Packing.** Complex packing (DRT 5.3) for every nest, at NOAA's per-record scale. NOAA's Hawaii, Puerto Rico and
+  fire-weather files use JPEG2000 (DRT 5.40); the records are the same, only the packing template differs.
+- **Writer.** The nest files need a `rw_rrfs_upp` built from gpuwm `woof/nam-hiresf` (two-field messages, the
+  off-grid bitmap, polar stereographic and Mercator vorticity): `rw_rrfs_upp --capabilities` lists `pair_next
+  mask_carrier`. Set `WOOF_NAM_RW_RRFS_UPP` to it; an older writer is refused in one line.
+
+**Checked against NOAA** (3 h nests from GFS 2026-11-03 06Z on all five grids against NOAA's 06Z files of the same
+hours): every record we write has NOAA's inventory text and GRIB2 keys and comes in NOAA's order at f00-f03 (CONUS
+799 of 876 at f01 and 783 of 860 at f00; the other nests 794 of 871 and 782 of 859; Hawaii's flight levels lack
+NOAA's bitmap, below), and the grid section is identical to NOAA's on all five grids. Two things a reader of NOAA's files changes: record numbers count the records in the file,
+so after the first record we leave out (CICE on the lowest model level) ours run behind NOAA's (select by inventory
+text, as `wgrib2 -match` does); and on the flight levels (305-3658 m above sea level) NOAA marks the points below the
+ground missing, where ours carry a value. [docs/nests/COMPATIBILITY.md](docs/nests/COMPATIBILITY.md) has every record
+of every nest.
+
+**Not in the files** (71 records, the same in every hour and cycle, each named in `index.json` with its reason; the four
+precipitation types, cloud-top temperature and the LCL pressure are written from 0.2.0):
+cloud ice (CICE on 40 levels and the lowest level, TCOLI: the history keeps Ferrier-Aligo's ice whole in SNMR),
+lightning, the Noah canopy resistances (CCOND, RSMIN, RCS, RCT, RCQ, RCSOL), moisture
+divergence (MDIV), stream function, brightness temperature, the column heating rates, the melting-ice column, cloud-top
+visibility, the grid-scale cloud base and top pressures, the supercooled liquid layer heights,
+instantaneous 2-5 km updraft helicity, tropopause wind shear, momentum fluxes, clear-sky downward shortwave,
+instantaneous ground heat flux and the Blackadar mixing length.
 
 ## Output size
 
@@ -352,15 +460,21 @@ For the 12 km grid, per forecast hour:
 
 ## Scope
 
-- **Domain:** the NAM 12 km CONUS parent (rotated lat-lon B grid, 954 x 835 x 60, 25 s step).
+- **Domains** (`--domain`, rows of `namgpu/parm/domains.json`): the NAM 12 km CONUS parent (`conus12`, rotated lat-lon
+  B grid, 954 x 835 x 60, 25 s step, the default); the NAM North America footprint at 7.6 km (`na7p6`, 1506 x 1318 x 60,
+  15 s step); 7.6 km CONUS (`conus7p6`); 5 km and 4 km CONUS (`conus5`, `conus4`); a 16 km SREF-shape North America grid
+  (`sref16`); 3 km nests anywhere (`woof-nam nest`, below).
 - **Dynamics:** NMMB, ported from the NAM source to CUDA kernels.
-- **Physics:** the NAM's suite, all on the GPU:
+- **Physics:** by default the NAM's suite as NCEP ran it, all on the GPU:
   - Ferrier-Aligo microphysics;
   - Betts-Miller-Janjic convection;
   - MYJ boundary layer and the Janjic surface layer;
   - Noah land surface;
   - RRTM longwave and shortwave (NCEP's RRTMG, hourly);
   - Janjic gravity-wave drag (GMTED2010 terrain).
+
+  Newer schemes are selectable, one slot at a time or as a whole suite ("Physics suites and options" below). The
+  default run is unchanged by them, bit for bit.
 - **Start sources:** the archived NAM native analysis (`bgrd3d00`, for cycles before the
   retirement), GFS 0.25 degree for any date from 2021, ECMWF open data IFS (0.25 degree from 2025-03-14 12Z,
   0.1 degree from 2026-10-20 12Z) or the ERA5 reanalysis (from 1940). On the NAM and GFS starts the lateral
@@ -368,6 +482,68 @@ For the 12 km grid, per forecast hour:
   from the same IFS cycle; on an ERA5 start they are ERA5 analyses ("Start sources" above).
 - **Not bitwise with the NAM.** The port runs in single precision with fast numerics. It is judged
   by whole wet forecasts beside the archived NAM forecast of the same cycle and MRMS reflectivity.
+
+## Physics suites and options
+
+The NAM suite (`nam`) is the default. Every other scheme is an option, selected one slot at a time (below) or as a whole with `--physics-suite` (rows of `namgpu/parm/physics_suites.json`):
+
+| `--physics-suite` | what runs |
+|---|---|
+| `nam` (default) | the NAM v4.2.11 physics above |
+| `hrrrv5` | the RRFS v2 hrrrv5 suite on the NMMB dycore: TEMPO, MYNN-EDMF, MYNN surface layer, RUC, RRTMG, GSL drag, no deep convection. Needs gpuwm-hex (TEMPO). |
+| `rapv5` | NOAA RAP v5 pairing on the NMMB dycore: aerosol-aware Thompson (mp28), Grell-Freitas deep convection, MYNN-EDMF, MYNN surface layer, RUC, RRTMG, GSL drag. (gpuwm pairs Grell-Freitas with Thompson, not with TEMPO, so the convection-on suite uses mp28.) Needs gpuwm-hex: it keeps TEMPO's tracer table and tables. |
+| `woof-nam-next-12km` | a preset on the NAM 12 km grid: the NAM's MYJ PBL, surface layer and BMJ convection kept; RUC land (9 levels) from HRRR's soil analysis where HRRR covers the grid and the CDF soil start elsewhere; TEMPO microphysics with melting-layer reflectivity; RTE+RRTMGP radiation; UGWP drag. Needs gpuwm-hex (TEMPO). The first run fetches the soil table of its start month and the HRRR soil classes. |
+| `woof-nam-next-7p6km` | the same preset on the NAM North America footprint at 7.6 km (`na7p6`, 1506 x 1318), with New Tiedtke convection (shallow on) in place of BMJ. On a 96 GB card the run takes the fit memory path by itself. Needs gpuwm-hex (TEMPO). |
+
+Single slots, each beside the NAM's other schemes:
+
+| slot | option | select with |
+|---|---|---|
+| land surface | RUC (WRF v4.6.1), HRRR soil analysis start | `NAMGPU_LSM=ruc` (`NAMGPU_RUC_HRRR_SOIL=auto`, `NAMGPU_RUC_SOIL_STATIC=auto`) |
+| land surface | Noah-MP (WRF-lineage v4.x) | `NAMGPU_LSM=noahmp` |
+| soil start | CDF match to the NAM soil climate | `NAMGPU_SOIL_START=cdf NAMGPU_SOIL_CDF=auto` (a run fetches its month's table; `woof-nam fetch-soil-cdf` fetches all) |
+| microphysics | TEMPO v3.2.5 (default for this option); v3.0.3 | `NAMGPU_MP=tempo`; add `NAMGPU_TEMPO_VERSION=v3.0.3` for the older version. Melting-layer reflectivity is on. |
+| microphysics | Thompson, aerosol-aware Thompson, P3 | `--domain conus12-mp8`, `conus12-mp28`, `conus12-p3` |
+| radiation | RTE+RRTMGP; WRF RRTMG | `NAMGPU_RADIATION=rrtmgp`; `NAMGPU_RADIATION=rrtmg` |
+| boundary layer | YSU with the revised MM5 surface layer | `--pbl ysu` (`--topo-wind 1` adds the Jimenez-Dudhia subgrid terrain drag) |
+| boundary layer | MYNN-EDMF with the MYNN surface layer | `NAMGPU_PBL=mynn-edmf` (BMJ shallow convection steps aside beside the EDMF mass flux) |
+| boundary layer | MYNN-EDMF v6.1.1 with MYNN-SFC v6.1.0 (NCAR single-source repositories) | `NAMGPU_PBL=mynn-v61` |
+| convection | Grell-Freitas (scale-aware); New Tiedtke | `NAMGPU_CONVECTION=gf`; `NAMGPU_CONVECTION=ntiedtke` |
+| drag | NOAA-GSL UGWP drag suite | `--gwd ugwp` (`nam` default, `off`) |
+
+The options and suites were measured on one card (`--cards 1`).
+
+What each option needs beyond the base install:
+
+- TEMPO in the NMMB microphysics slot (`NAMGPU_MP=tempo`): `pip install "recast-woof-nam[modern]"` (gpuwm-hex >= 0.5.0) and its tables,
+  `gpuwm-hex physics-resources fetch`. The four TEMPO lookup files come from gpuwm-hex on the first TEMPO run
+  (`NAMGPU_TEMPO_LOOKUP=<dir>` names a folder that holds them instead).
+  The configfile key `tempo_version: v3.0.3` also selects the older version; `NAMGPU_TEMPO_VERSION` takes precedence.
+  Both versions use the installed hex physics-resource packet's TEMPO maths header and shared lookup tables.
+  `NAMGPU_TEMPO_REFL_MELT=0` explicitly selects the older reflectivity diagnostic. The frozen `nam` default does not run TEMPO.
+- MYNN v6.1 (`NAMGPU_PBL=mynn-v61`): gpuwm-hex 0.5.0 or newer (its MYNN v6.1 port).
+- RUC with HRRR static soil classes: the BNU soil set in the geog folder. A run fetches it (8 MB) into the first geog
+  root if it is missing; to stage it ahead, `gpuwm fetch-geog --datasets bnu_soiltype_top --root ~/WPS_GEOG`.
+- CDF soil start: the 12 monthly tables (about 268 MB each). A run fetches the table of its start month if it is
+  missing; `woof-nam fetch-soil-cdf` installs all twelve ahead (`--months` for fewer).
+- UGWP: the drag statistics are built from the geog terrain by `rw_hex_ugwp_oro` (`tools/ugwp-oro`, Rust, every core),
+  once per grid and month; `woof-nam fetch-bridges` stages the prebuilt program, and the first run that needs it
+  downloads it.
+
+Each option was run as one scored 12 h arm beside the frozen NAM (2026-01-23 12Z, GFS start, CONUS ASOS, MRMS and Stage IV); with every option off the forecast is the frozen NAM's, bit for bit. `woof-nam score` (below) scores any run the same way.
+
+## Score against observations
+
+`woof-nam score` scores one or more runs of a case beside the observations and draws obs | control | run sheets:
+
+```
+woof-nam score --cycle 2026012312 --case-dir cases/2026-01-23_12z --run control=runs/control --run modern=runs/modern --out score
+```
+
+ASOS 2 m temperature, dewpoint and 10 m wind (bias, MAE, RMSE at each lead), MRMS composite reflectivity (FSS at 20 and
+35 dBZ), Stage IV 6 h precipitation (ETS, FSS), and the archived NAM at the same stations as a reference column. The
+observation readers `rw_asos` and `rw_stage4` are release assets: `woof-nam fetch-bridges` stages them, and the first
+score that needs one downloads it, checked against the pins in the package. Sheets are drawn by gpuwm's Rust renderer.
 
 ## Speed and memory
 
@@ -490,6 +666,21 @@ wall, 25-26 GB per card; from a checkout through `tools/run_nam_domain.sh`, whic
 
 Needs: one machine with N NVIDIA cards and the NCCL 2 library (`libnccl.so.2`) where CuPy can load it; about
 14 GB of disk for the saved 12 km init; room in `/dev/shm` for one or two hours of history in flight.
+
+## NOAA's NAM nests and the whole suite
+
+NOAA's NAM ran five nests beside its 12 km run: CONUS, Alaska, Hawaii and Puerto Rico at 3 km to 60 h, and a 1.5 km
+fire-weather nest to 36 h. Each is a row of `namgpu/nest/ncep_nests.py` with NCEP's own grid, step and keys, and the
+whole suite is the table `namgpu/parm/nam_suite.json`:
+
+```
+woof-nam nest --ncep-nest hawaiinest --source gfs --start 2026110306 --out runs/hawaii --products   # one nest
+woof-nam suite --cycle 2026110306 --out runs/suite-2026110306                                       # parent + all five
+```
+
+Each nest writes NOAA's nest files (`woof-nam.tHHz.<nest>.hiresfFF.tm00.grib2`) on NOAA's grid for it.
+[docs/nests/RUNNING.md](docs/nests/RUNNING.md) covers every nest, the fire-weather point, card layouts and the output
+folders; [docs/nests/COMPATIBILITY.md](docs/nests/COMPATIBILITY.md) compares the files with NOAA's record by record.
 
 ## 3 km nests anywhere
 
@@ -675,9 +866,11 @@ CONTRACT.md        array layout, step order, kernel convention, done rule
 
 ## Known gaps
 
-- **Nests:** the NAM's own fixed nests (CONUS 3 km, Alaska, Hawaii, Puerto Rico, fire weather) are not
-  ported as such; `woof-nam nest` ("3 km nests anywhere" above) runs a 3 km domain of your choice instead.
-  Its `--cards N` path and its sheets on several cards have not run on two physical cards yet.
+- **NOAA's nests:** the five NAM nests run as NCEP's rows (`woof-nam nest --ncep-nest`, and `woof-nam suite`
+  for a whole cycle; [docs/nests/RUNNING.md](docs/nests/RUNNING.md)). Each nest takes its start and boundaries from
+  the 12 km run's hourly history, not from NCEP's in-executable coupling, and the fire-weather nest from the 12 km run
+  rather than from the 3 km nest. In the nest files, flight-level records carry values below the ground where NOAA's
+  are missing, and cloud ice is not written (71 records in all, docs/nests/COMPATIBILITY.md).
 - **Moving nests:** for the first 1-3 h after a move, the new strip holds the source's smooth rain, with a
   visible join along the old edge. The strip starts from GFS or IFS, not from the model's own state.
 - **Multi-card:** one machine only (no multi-node runs). The 5 km and band configfiles are not rows of
@@ -685,7 +878,8 @@ CONTRACT.md        array layout, step order, kernel convention, done rule
 - **Memory fit on several cards:** measured on the 954 x 279 band (2 cards, same bits as 1 card). The full
   12 km grid on several cards is measured on the full memory path only.
 - **Restarts:** one card ("Restarts" above); the NAM's own restart files are not read.
-- **GRIB2 products:** 8 of NOAA's 454 awphys records are not produced ("GRIB2 products" above). The prebuilt
+- **GRIB2 products:** 4 of NOAA's 454 awphys records and 71 of NOAA's 876 conusnest (871 other nests) records are
+  not produced ("GRIB2 products" and "Nest GRIB2 products" above). The prebuilt
   writer is for Linux x86-64; elsewhere, build `rw_rrfs_upp` from gpuwm and set `WOOF_NAM_RW_RRFS_UPP`.
 - **Noah vegetation table:** the NAM's own VEGPARM.TBL was never published. A stand-in built from
   WRF's public-domain table is used (namgpu/data/fix/noah/PROVENANCE.txt).

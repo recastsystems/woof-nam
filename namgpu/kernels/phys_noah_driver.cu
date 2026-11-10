@@ -143,7 +143,8 @@ extern "C" __global__ void phys_noah_driver(
     const float* __restrict__ qtz, const float* __restrict__ slope_data,
     float sbeta_data, float fxexp_data, float csoil_data, float salp_data, float refdk_data,
     float refkdt_data, float frzk_data, float zbot_data, float czil_data, float topt_data,
-    float cmcmax_data, float cfactr_data, float rsmax_data, int bare)
+    float cmcmax_data, float cfactr_data, float rsmax_data, int bare,
+    int skip_land)                         // 1: land points without sea ice are the RUC LSM's (phys-ruc-driver)
 {
     NoahTbl tb;
     tb.albtbl = albtbl; tb.z0tbl = z0tbl; tb.shdtbl = shdtbl; tb.rstbl = rstbl; tb.rgltbl = rgltbl;
@@ -165,6 +166,11 @@ extern "C" __global__ void phys_noah_driver(
     const int j0 = (jts - 1) + col / ni;
 
     const size_t h = IDX2(i0, j0, im);             // 2-D index
+    // skip_land 1: every land point without sea ice is the RUC LSM's; 2: the same except urban (IW, 31-33), which stays on
+    // NAM Noah's urban treatment (SHDFAC 0.05, SMCWLT 0.40): the RUC port has no urban physics but snow cover
+    if (skip_land && (XLAND[h] - 1.5f) < 0.f && SICE[h] <= 0.5f
+        && !(skip_land == 2 && (IVGTYP[h] == ((ivegsrc == 1) ? 13 : 1) || IVGTYP[h] == 31 || IVGTYP[h] == 32
+                                || IVGTYP[h] == 33))) return;   // RUC LSM point
     const int kl = lm - 1;                         // Fortran KTE (lowest layer), zero-based
     const int ks = lm;                             // Fortran KTE+1 (surface interface), zero-based
     const float fdtliw = dt / (NOAH_ROW * NOAH_XLF);       // FDTLIW = DT/ROWLIW

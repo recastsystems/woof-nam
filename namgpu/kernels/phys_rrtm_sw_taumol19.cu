@@ -111,7 +111,9 @@ extern "C" __global__ void rrtm_sw_taumol19(
     const long long ca_c, const long long ca_k, const long long ca_m,  // colamt
     const long long tg_c, const long long tg_k, const long long tg_g,  // taug, taur
     float* __restrict__ taug,
-    float* __restrict__ taur)
+    float* __restrict__ taur,
+    const int* __restrict__ kmin_col,  // [ncols] MINVAL(laytrop) of this column's CHK group, read when use_kcol
+    const int use_kcol)                // 1: batched rrtm-call windows (rrtm_sw_kmin_windows), groups built per window
 {
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= ncols) return;
@@ -123,8 +125,14 @@ extern "C" __global__ void rrtm_sw_taumol19(
     const int g0 = (t / TAUMOL19_CHK) * TAUMOL19_CHK;
     const int g1 = min(g0 + TAUMOL19_CHK, ncols);
     int kmin = lt;
-    for (int s = g0; s < g1; ++s) {
-        if (cstart + s < live) kmin = min(kmin, laytrop[s]);
+    if (use_kcol) {
+        // the group was formed over the day columns of this column's own rrtm-call row window, exactly as
+        // a launch of that window alone forms it (namgpu/physics/rrtm/sw_seam.window_kmins)
+        kmin = kmin_col[t];
+    } else {
+        for (int s = g0; s < g1; ++s) {
+            if (cstart + s < live) kmin = min(kmin, laytrop[s]);
+        }
     }
 
     for (int k1 = 1; k1 <= nlay; ++k1) {

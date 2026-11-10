@@ -17,7 +17,7 @@ Writes: the R-flagged physics fields in ctx.st (2-D [JM, IM]; 3-D [LDIM, JM, IM]
 Launches: two (all 2-D fields, then all 3-D fields).  Device pointer tables are built once and cached
         in ctx.tables; no host sync, no per-step allocation.
 Missing save arrays are an error, never a silent zero restore.
-After the restore, the run-total accumulators ACPREC_TOT and CUPREC_TOT are zeroed (the filter's rain is not
+After the restore, the run-total accumulators ACPREC_TOT, CUPREC_TOT and SNOWNC_TOT are zeroed (the filter's rain is not
 forecast rain; see the end of run()).
 Dtype and levels are checked on the host before any launch: every target and save array must be
 float32 (the kernel reads raw float32), and every 3-D field's LDIM must be 1..lm, because the save
@@ -140,6 +140,6 @@ def run(ctx):
         # the Fortran zeroes ACPREC_TOT with ACPREC at a timestep-0 start, module_SOLVER_GRID_COMP.F90:10307-10318),
         # so the filter's rain stayed in the 0 h totals (RAINNC up to 16 mm at f00, smoke24 11:25Z). Zero them
         # with the buckets.
-        for name in ("ACPREC_TOT", "CUPREC_TOT"):
+        for name in ("ACPREC_TOT", "CUPREC_TOT", "SNOWNC_TOT"):
             if name in st.fields:
                 st.fields[name].fill(0)

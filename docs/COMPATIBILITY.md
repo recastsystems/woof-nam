@@ -27,8 +27,9 @@ We read 2 m temperature, the 10 m winds, composite reflectivity, both sea-level 
   line is NOAA's, apart from the date. So `-match` patterns written for NAM find the same records.
 - **The .idx.** The `.idx` is exactly what `wgrib2 -s` prints, the same as NOAA's index files. Tools that download
   byte ranges from the index work with the same search strings.
-- **Precision.** Each record is packed with NOAA's own decimal and binary scale factors and the same complex packing.
-  So values carry the same precision as NOAA's, and records are within 15 % of NOAA's size.
+- **Precision.** Each record is packed with NOAA's decimal and binary scale factors for that record and the same
+  complex packing: all 444 records of the 2025-03-14 f06 check, and 408 of the 450 of the 2026-01-23 f06 check (the
+  other 42 differ in a scale factor; see "Not in the files" and the table). Records are within 15 % of NOAA's size.
 - **Accumulations.** Precipitation buckets match NOAA's. APCP and ACPCP run from the last 12 h reset, and the 3 h
   bucket appears in the 3-hourly files, with NOAA's time-range template.
 - **Python.** pygrib `select` and cfgrib `filter_by_keys` return the same variable names, units, level types and
@@ -43,13 +44,14 @@ We read 2 m temperature, the 10 m winds, composite reflectivity, both sea-level 
 
 ## Not in the files
 
-The table in `COMPATIBILITY-TABLE.md` gives the state of each of NOAA's 454 records: at f06, 444 are present with
-NOAA's keys, 0 differ, and 10 are not in the checked file.
+The table in `COMPATIBILITY-TABLE.md` gives the state of each of NOAA's 454 records, from a 0.2.0 run (2026-01-23 12Z,
+f06): 450 are present with NOAA's name, level and time keys, and 4 are not produced. Of the 450, 408 also carry NOAA's
+decimal and binary scale factors exactly; 42 differ in one or both (16 TKE, 13 HGT, 4 VVEL, 3 UGRD/VGRD pairs, DPT at
+2 m, SNOD, LHTFL), and the table gives NOAA's value and ours for each.
 
-- **Records we do not produce (8).** Lightning (LTNG), visibility at cloud top, the Blackadar mixing length (NOAA's
-  file holds zero there), the dominant precipitation type (CSNOW, CICEP, CFRZR, CRAIN) and the snowfall accumulation
-  (WEASD). The precipitation type and the snowfall accumulation need model fields that are not written yet.
-- **MAXUW and MAXVW (2).** The hourly 10 m maximum wind. The history the check was made from predates the model's
-  hourly 10 m maximum wind output; a run of this version writes it, and the two records follow.
+- **Records we do not produce (4).** Lightning (LTNG), visibility at cloud top, the Blackadar mixing length (NOAA's
+  file holds zero there) and the snowfall accumulation (WEASD), which needs a model field that is not written yet.
+- **Written from 0.2.0.** The dominant precipitation type (CSNOW, CICEP, CFRZR, CRAIN), and MAXUW and MAXVW (the
+  hourly 10 m maximum wind).
 
 A record that is missing is left out of the file. It is never written as zeros or under another record's name.

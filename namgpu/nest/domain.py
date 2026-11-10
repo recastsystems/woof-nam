@@ -42,6 +42,9 @@ RES_TABLE = {
     # a parent a --source parent nest can start from (fix round 2)
     12: {"dt": (25, 0, 3), "filt": (8, 0, 3), "nrads": 48, "physics": "parent", "handoff": True,
          "src": "parm/nam_configfile (NAM 12 km parent)"},
+    # 7.6 km (lane mesh-7p6km 2026-11-08): NAM 12 km physics (BMJ, GWD) at dt 15 s, 20 min radiation
+    7.6: {"dt": (15, 0, 3), "filt": (5, 0, 3), "nrads": 80, "physics": "parent",
+          "src": "tools/make_domain_configs.py 7p6km row (parent physics, dt 15 s)"},
     5:  {"dt": (10, 0, 3), "filt": (3, 1, 3), "nrads": 120, "physics": "conusnest",
          "src": "tools/make_domain_configs.py 5km row (dt 10 s, 20 min radiation)"},
     4:  {"dt": (8, 1, 3), "filt": (2, 7, 9), "nrads": 144, "physics": "conusnest",
@@ -50,6 +53,9 @@ RES_TABLE = {
     # window: drv-dfi-tdfi-driver refused every 3 km nest with TDFI on, maxq/door-tdfi 2026-11-04 23:25Z)
     3:  {"dt": (6, 1, 4), "filt": (2, 0, 4), "nrads": 192, "physics": "conusnest",
          "src": "NAM parm/nam_configfile_conusnest (dt 6+1/4, filt_dt 2+0/4, nrads 192)"},
+    # NAM's fire-weather nest (ratio 2 inside the 3 km nest): dt 2+1/12 s, filt_dt 1+0/3 s, nrads 288 (10 min)
+    1.5: {"dt": (2, 1, 12), "filt": (1, 0, 3), "nrads": 288, "physics": "conusnest",
+          "src": "NAM parm/nam_configfile_firewxnest_conus (dt 2+1/12, filt_dt 1+0/3, nrads 288)"},
 }
 
 # Default init/boundary source by region and date: the first row whose box holds the centre, then the first of its
@@ -104,6 +110,7 @@ SOURCE_BY_REGION = [
 # 378 x 377 rows 16 (MEASURED_PEAK_GIB, tests/test_small_card.py), and the door keeps margin_gib (0.75 GiB) free
 # beyond it. The full path keeps its own larger terms (cards of 64 GiB and more).
 VRAM = {"lmem_bytes_per_thread": 10016, "margin_gib": 0.75}
+INIT_POOL_GIB = 3.5          # init pool beyond the state (GFS + boundary decode); see vram_estimate
 # Per memory path (state.resolve_memory_path: the 32 GB fit below FIT_BELOW_GIB = 64 GiB of card, the full path at and
 # above it; NAMGPU_MEMORY_PATH / NAMGPU_SCRATCH_ARENA override), the pool part that does not scale with the slab.
 # The door resolves the path exactly as the forecast will (memory_path below) and caps the pool with that path's row.
@@ -126,6 +133,18 @@ MEASURED_PEAK_GIB = {"nest-286x333-fit-r32": 7.11, "nest-286x333-fit-r4": 5.21, 
                      "3060ti-99x100-r32": 2011 / 1024, "3060ti-328x330-r8": 4104 / 1024,
                      "3060ti-360x359-r4": 4178 / 1024, "3060ti-378x377-r16": 5008 / 1024}
 MEASURED_POOL_GIB = {"milton-parent-full-r32": 12.67, "milton-parent-fit-r32": 7.84}
+# `woof-nam run` on a card of 64 GiB or more: the whole-run peak of the full path on a whole parent grid, measured on
+# 96 GB cards. The 12 km parent (954 x 835, 796,590 columns) peaks at 58-76 GB, up to about 100 KB per column. The
+# 7.6 km North America grid (1506 x 1318, 1,984,908 columns) cannot be held: on 2026-11-09 the bare door
+# (`woof-nam run --physics-suite woof-nam-next-7p6km`, and the same grid with BMJ) took the full path by card size
+# alone and stopped in the start filter with OutOfMemoryError at 99 GB, while the fit path holds the same run
+# (identical history). So the run door asks this figure before it lets the card size pick the full path.
+FULL_RUN_KB_PER_COLUMN = 100.0
+
+
+def full_run_gib(g: dict, cards: int = 1) -> float:
+    """GiB one card needs for the full memory path of a `woof-nam run` on grid g (im, jm) split over `cards`."""
+    return g["im"] * g["jm"] / max(1, cards) * FULL_RUN_KB_PER_COLUMN * 1024 / 2**30
 # 4 is the floor: rrtm_chunk.windows needs 3 or more rows, and rows 2 hung radiation (0.1.2 on an 8 GB card); 3 owns
 # one row per chunk and is not measured
 RRTM_ROW_CHOICES = (32, 16, 8, 4)
@@ -302,7 +321,8 @@ def render(base: str, repl: dict, tag: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def config_keys(g: dict, name: str, static_npz: Path, spec_adv: bool = False, handoff: bool = False) -> dict:
+def config_keys(g: dict, name: str, static_npz: Path, spec_adv: bool = False, handoff: bool = False,
+                extra: dict | None = None) -> dict:
     row = RES_TABLE[g["res_km"]]
     keys = {"im": str(g["im"]), "jm": str(g["jm"]), "tph0d": _num(g["tph0d"]), "tlm0d": _num(g["tlm0d"]),
             "wbd": f"{g['wbd']:.6f}", "sbd": f"{g['sbd']:.6f}"}
@@ -324,12 +344,14 @@ def config_keys(g: dict, name: str, static_npz: Path, spec_adv: bool = False, ha
     keys["domain_name"] = name
     if handoff:
         keys["history_handoff"] = "true"       # io_history_fields.HANDOFF_KEY
+    if extra:
+        keys.update(extra)                      # a nest's own NAM keys (ncep_nests row "keys": lnsh, filter_method, ...)
     return keys
 
 
 def write_configfile(path: Path, g: dict, name: str, static_npz: Path, spec_adv: bool = False,
-                     handoff: bool = False) -> dict:
-    keys = config_keys(g, name, static_npz, spec_adv, handoff)
+                     handoff: bool = False, extra: dict | None = None) -> dict:
+    keys = config_keys(g, name, static_npz, spec_adv, handoff, extra)
     Path(path).write_text(render((PARM / "nam_configfile").read_text(), keys, name))
     from namgpu import config
     c = config.load(Path(path))
@@ -338,6 +360,7 @@ def write_configfile(path: Path, g: dict, name: str, static_npz: Path, spec_adv:
     chk = {"im": c.im, "jm": c.jm, "dlmd": round(c.dlmd, 9), "dphd": round(c.dphd, 9), "dt": float(dt),
            "filt_dt": c.filt_dt, "nrads": c.nrads, "nradl": c.nradl, "lnsh": c.lnsh, "lnsv": c.lnsv,
            "convection": c.convection, "gwdflg": c.gwdflg, "spec_adv": r.get("spec_adv"),
+           "filter_method": int(c.filter_method), "nodeep": r.get("nodeep"),
            "steps_per_hour": float(3600 / dt), "res_row": RES_TABLE[g["res_km"]]["src"],
            "history_handoff": r.get("history_handoff", "false")}
     if abs(chk["dlmd"] - g["dlmd"]) > 1e-7 or abs(chk["dphd"] - g["dphd"]) > 1e-7:
@@ -378,9 +401,38 @@ def sm_threads(index: str | None = None) -> int:
 
 
 def free_gib(index: str | None = None) -> float:
-    out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i",
-                          index or _visible_index()], capture_output=True, text=True, timeout=20).stdout
-    return float(out.strip().splitlines()[0]) / 1024.0
+    """The card's free memory in GiB from nvidia-smi (no CUDA context). On a heavily loaded host nvidia-smi can take
+    longer than 20 s to answer; the nest door then died with an uncaught TimeoutExpired (0.2.0 release pass,
+    2026-11-09). A timeout is retried once with a 120 s wait. If the number still cannot be read the door stops with
+    one line: without it the pre-flight cannot size the run, and a forecast started on a full card dies out of memory
+    in its init.
+
+    NAMGPU_CARD_SHARE_GIB (set by `woof-nam suite` on each nest it starts on a shared card) caps the number: the share
+    is what the suite reserved for this run. Five nests started together on one 95 GiB card each read 94.4 GiB free,
+    each sized itself to the whole card (226.6 GiB of estimates in all) and three ran out of memory (release check
+    2026-11-10, suite-1h-d)."""
+    idx = index or _visible_index()
+    for wait in (20, 120):
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits", "-i", idx],
+                                 capture_output=True, text=True, timeout=wait).stdout
+        except subprocess.TimeoutExpired:
+            continue
+        free = float(out.strip().splitlines()[0]) / 1024.0
+        share = card_share_gib()
+        return free if share is None else min(free, share)
+    raise SystemExit(f"woof-nam: cannot read the free memory of card {idx}: nvidia-smi did not answer in 20 s, then "
+                     f"120 s (is the host overloaded?). The pre-flight needs that number to size the run; starting "
+                     f"without it could put the forecast on a full card, where it dies out of memory.")
+
+
+def card_share_gib() -> float | None:
+    """The card memory `woof-nam suite` reserved for this run (NAMGPU_CARD_SHARE_GIB), or None when none was set."""
+    v = os.environ.get("NAMGPU_CARD_SHARE_GIB", "").strip()
+    try:
+        return float(v) if v else None
+    except ValueError:
+        return None
 
 
 def card_total_gib(index: str | None = None) -> float:
@@ -426,6 +478,12 @@ def vram_estimate(g: dict, rows: int, cards: int = 1, index: str | None = None, 
     if mp["path"] != "fit":
         tot += row["pool_headroom_gib"]          # the full path's terms as they were (cards of 64 GiB and more)
     capped = mp["path"] is not None
+    # The cap must also hold the init, whose GFS decode and boundary decode keep whole-globe records (1440 x 721
+    # float64, 8.3 MB each) in the pool however small the domain is. A 12 km 250 x 250 parent at 65 N 173 W (cap 3.10
+    # GiB from the per-column model) died in init-gfs-bocos at the cap, 3.33 GB in use; uncapped, its init held
+    # 4.0 GiB of pool for 0.83 GiB of state (2026-11-06). So the cap is never below state + INIT_POOL_GIB. Only the
+    # cap moves: the peak estimate (total_gib) is the measured whole-run one.
+    pool = max(pool, state + INIT_POOL_GIB)
     return {"columns_per_card": int(cols), "state_gib": round(state, 2), "rrtm_gib": round(rrtm, 2),
             "lmem_gib": round(lmem, 2), "fixed_gib": row["fixed_gib"], "memory_path": mp["path"],
             "path_fixed_gib": row["fixed_pool_gib"], "pool_limit_gib": round(pool, 2) if capped else None,
@@ -438,12 +496,32 @@ def preflight(g: dict, cards: int = 1, rows: int | None = None, free: float | No
     """Pick NAMGPU_RRTM_ROWS (largest that fits) against the measured free memory, or refuse with the numbers."""
     free = free_gib(index) if free is None else free
     tried = []
-    for r in ((rows,) if rows else RRTM_ROW_CHOICES):
-        e = vram_estimate(g, r, cards, index)
-        tried.append(e)
-        if e["total_gib"] + VRAM["margin_gib"] <= free:
-            return {"ok": True, "free_gib": round(free, 2), "pick": e, "tried": tried, "card": card_name(index)}
+    for path in _paths_to_try(index):
+        for r in ((rows,) if rows else RRTM_ROW_CHOICES):
+            e = vram_estimate(g, r, cards, index, path=path)
+            tried.append(e)
+            if e["total_gib"] + VRAM["margin_gib"] <= free:
+                _mark_switch(e, path)
+                return {"ok": True, "free_gib": round(free, 2), "pick": e, "tried": tried, "card": card_name(index)}
     return {"ok": False, "free_gib": round(free, 2), "tried": tried, "card": card_name(index)}
+
+
+# A card of 64 GiB and more takes the full memory path by itself (state.resolve_memory_path). Its model holds ~150 KB per
+# column, so an NCEP 3 km nest split over 2-4 such cards (Alaska 1189 x 1249 on 2 cards: 742,530 columns, ~110 GiB) was
+# refused while the fit path (~23 KB per column, identical history: VRAM program 2026-11-05) holds it in ~29 GiB. When the
+# path was picked automatically and no RRTM row count fits on it, the pre-flight tries the fit path and the door runs
+# the forecast with NAMGPU_MEMORY_PATH=fit (cli._pool_cap). A path set by the caller is never changed.
+def _paths_to_try(index: str | None = None) -> list:
+    mp = memory_path(index)
+    if mp.get("how") == "auto" and mp.get("path") == "full":
+        return ["auto", "fit"]
+    return ["auto"]
+
+
+def _mark_switch(e: dict, path: str) -> None:
+    if path == "fit":
+        e["memory_path_switched"] = ("fit: the card took the full path by itself and the run does not fit it; the "
+                                     "fit path holds the same run (identical history) in less memory")
 
 
 def preflight_cards(g: dict, cards: list[str], rows: int | None = None) -> dict:
@@ -457,11 +535,12 @@ def preflight_cards(g: dict, cards: list[str], rows: int | None = None) -> dict:
         return pf
     free = {c: free_gib(c) for c in cards}
     tried = []
-    for r in ((rows,) if rows else RRTM_ROW_CHOICES):
-        es = {c: vram_estimate(g, r, len(cards), c) for c in cards}
+    for path, r in [(pa, r) for pa in _paths_to_try(cards[0]) for r in ((rows,) if rows else RRTM_ROW_CHOICES)]:
+        es = {c: vram_estimate(g, r, len(cards), c, path=path) for c in cards}
         e = max(es.values(), key=lambda x: x["total_gib"])
         tried.append(e)
         if all(es[c]["total_gib"] + VRAM["margin_gib"] <= free[c] for c in cards):
+            _mark_switch(e, path)
             return {"ok": True, "free_gib": round(min(free.values()), 2), "free_by_card": {c: round(v, 2) for c, v in
                     free.items()}, "pick": e, "tried": tried, "card": card_name(cards[0]), "cards": cards}
     return {"ok": False, "free_gib": round(min(free.values()), 2), "free_by_card": {c: round(v, 2) for c, v in

@@ -67,7 +67,7 @@ from namgpu import kernels
 
 UNIT = "init_grib2_decode"
 KERNEL = "init_grib2_gather"
-SUPPORTED_GDT = (0, 32769)
+SUPPORTED_GDT = (0, 32769, 30)   # 30: Lambert conformal (HRRR), placed by source_grids.LambertGrid
 REFUSED_SCAN_BITS = 0x10
 GDT_NAM_ROTATED = 32769
 GDT32769_SHAPE_OF_EARTH = 6      # WMO Code Table 3.2 code 6: sphere of radius 6371229.0 m

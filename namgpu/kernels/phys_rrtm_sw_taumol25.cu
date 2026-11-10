@@ -81,12 +81,13 @@ extern "C" __global__ void rrtm_sw_taumol25(
     const float* __restrict__ rayl,
     const int nlay, const int im, const int jm,
     float* __restrict__ taug,      // [NG25, nlay, JM, IM]: output plane g = Fortran g-point NS25+1+g
-    float* __restrict__ taur)      // [NG25, nlay, JM, IM]
+    float* __restrict__ taur,
+    const int kmin_percol)         // 1: kmin_p is per column ([JM*IM], batched rrtm-call windows); 0: kmin_p[0]      // [NG25, nlay, JM, IM]
 {
     COLUMN_IJ(im, jm)                         // i0, j0; returns early past the last column
     const int ij = IDX2(i0, j0, im);
     const int L = laytrop[ij];
-    const int kmin = kmin_p[0];
+    const int kmin = kmin_p[kmin_percol ? ij : 0];
 
     for (int k0 = 0; k0 < nlay; ++k0) {
         const size_t lij = IDX3(i0, j0, k0, im, jm);

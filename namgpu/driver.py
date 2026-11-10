@@ -24,6 +24,15 @@ from .state import UNIT_SCRATCH as _UNIT_SCRATCH, STEP_SCRATCH_TABLE_PREFIXES as
 from .state import STEP_SCRATCH_TABLE_KEEP as _TKEEP
 
 from . import paths
+import os as _os
+
+# The host stays at most STEP_LAG steps ahead of the GPU: at the end of each step it waits (blocking, devmem.blocking_sync,
+# no spin) on the event of the step STEP_LAG back. Why: the non-radiation steps are GPU-bound (105 launches, ~10-45 ms of
+# host work against ~95 ms of GPU work), so the host ran ahead until the launch queue was full and then spun in the
+# driver inside cuLaunchKernel: one core at 90-100 % for the whole step loop even with blocking sync (2026-11-09:
+# 47 launches per step blocked, 188 ms/step of spinning). Two steps queued keep the GPU fed; values and launch order do
+# not change. NAMGPU_STEP_LAG=0 turns it off.
+STEP_LAG = int(_os.environ.get("NAMGPU_STEP_LAG", "2") or 0)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,13 +102,16 @@ DYNAMICS = [                        # not_firststep block 3546-4228, then 4245-4
     # SOLVER_RUN 4321-4392: KSS=INDX_Q, KSE1=INDX_Q (1..1) in the q_tracer block.
     ("dyn-updates", "q_tracer", {"kss": "INDX_Q", "kse": "INDX_Q"}),
     ("drv-halo-exch", "q_tracer", {"x": "X10"}),
-    ("dyn-adv2-q2-mid", "tracers", {"kss": "INDX_CW", "kse": "INDX_Q2"}),
+    # ADV2 (module_DYNAMICS_ROUTINES.F90:4238) floors and square-roots the WHOLE group kss..kse (do ks=kss,kse,
+    # lines 151/179 of the subroutine) and MONO back-interpolates Q2 inside the same group, so both take KSE1:
+    # INDX_Q2 when spec_adv=F (unchanged), NUM_TRACERS_TOTAL when spec_adv=T (the NAM CONUS nest).
+    ("dyn-adv2-q2-mid", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS"}),
     ("dyn-adv2-vert", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS", "idtadt": "IDTADT"}),
     ("dyn-adv2-horiz", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS", "idtadt": "IDTADT"}),
     ("dyn-adv2-bndry", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS", "idtadt": "IDTADT"}),
     ("dyn-mono-fix", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS", "idtadt": "IDTADT"}),
     ("dyn-mono-global-sum", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS"}),
-    ("dyn-mono-q2-back", "tracers", {"kss": "INDX_CW", "kse": "INDX_Q2"}),
+    ("dyn-mono-q2-back", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS"}),
     # SOLVER_RUN 4459-4461 and 4540 (UPDATES): SPEC_ADV=.false. KSE1=INDX_Q2 (4456-4462);
     # SPEC_ADV=.true. KSE1=NUM_TRACERS_TOTAL (4442-4443). KSE_TRACERS picks the branch from cfg spec_adv.
     ("dyn-updates", "tracers", {"kss": "INDX_CW", "kse": "KSE_TRACERS"}),
@@ -141,6 +153,7 @@ PHYSICS = [                         # SOLVER_RUN 4929-6077 (INTEGER_DT>0, non-GF
     ("drv-h-to-v-tend", "nprecip", {"branch": "bmj"}),  # wind block 5813-5830, NSTEPS=NPRECIP
     ("drv-halo-exch", "nprecip", {"x": "X20"}),
     ("phys-fer-driver", "nprecip"),                  # GSMDRIVE, 5880
+    ("phys-ntiedtke-snap", "nprecip"),               # port addition: New Tiedtke forcing reference (T, Q after GSMDRIVE)
     ("drv-cltend", "cltend_post", {"icltend": 0}),   # CLTEND 2 of 3, 5925-5934
     ("drv-cltend", "cltend_inc", {"icltend": 1}),    # CLTEND 3 of 3, 6005-6014 (before TQADJUST 6022)
     ("drv-tqadjust", "every"),
@@ -150,9 +163,22 @@ PHYSICS = [                         # SOLVER_RUN 4929-6077 (INTEGER_DT>0, non-GF
     # (5418-5467). Running them here emptied CUPREC/ACPREC and the flux buckets right after the
     # physics that filled them (CUPREC stayed 0 at step 0 while CPRATE > 0).
 ]
+# GSMDRIVE unit per column microphysics (config.MP_COLUMNS): the modernised scheme takes the Ferrier call's place.
+MP_DRIVER_UNITS = {"tempo": "phys-tempo-driver"}
+
+
+def physics_plan(cfg) -> list:
+    """PHYSICS with GSMDRIVE's unit swapped for cfg.mp_column's (unchanged when the configfile names a NAM scheme)."""
+    unit = MP_DRIVER_UNITS.get(str(getattr(cfg, "mp_column", "") or ""))
+    if unit is None:
+        return PHYSICS
+    return [((unit,) + tuple(e[1:])) if e[0] == "phys-fer-driver" else e for e in PHYSICS]
+
+
 # Plan entries the configfile switches off, as the Fortran IF around the call does.
 CONFIG_GATES = {
     "phys-bmj-driver": lambda cfg: str(cfg.convection).strip() != "none",   # SOLVER_RUN 5722
+    "phys-ntiedtke-snap": lambda cfg: str(cfg.convection).strip() == "ntiedtke",
 }
 DIAGNOSTICS = []                    # io-max-fields moved to the head of PHYSICS (Fortran 5000 < 5173)
 # History is not a plan entry. Fortran NMM_INTEGRATE writes it after the clock advance on the
@@ -236,10 +262,12 @@ class Driver:
         self.ctx = ctx
         self.units = load_units()
         self._mods = {}
-        self.groups = (("first", FIRST_STEP), ("dyn", DYNAMICS), ("phys", PHYSICS), ("diag", DIAGNOSTICS))
+        from .physics import suites  # noqa: PLC0415
+        self.physics = suites.physics_plan(ctx.cfg, physics_plan(ctx.cfg))   # the run's suite (base plan for nam)
+        self.groups = (("first", FIRST_STEP), ("dyn", DYNAMICS), ("phys", self.physics), ("diag", DIAGNOSTICS))
         self._last_use = None
         self._phys_lu = None
-        self.plan = FIRST_STEP + DYNAMICS + PHYSICS + DIAGNOSTICS
+        self.plan = FIRST_STEP + DYNAMICS + self.physics + DIAGNOSTICS
         missing = [e[0] for e in self.plan + [(u, "") for u in HISTORY_UNITS]
                    if e[0] not in self.units]
         if missing:
@@ -284,11 +312,18 @@ class Driver:
         owner = {"physics/driver/phys_turbl_driver.py": "phys-turbl-driver", "physics/myj/": "phys-turbl-driver",
                  "physics/jsfc/": "phys-turbl-driver", "physics/noah/": "phys-turbl-driver",
                  "physics/gwd/": "phys-turbl-driver", "physics/driver/phys_bmj_driver.py": "phys-bmj-driver",
-                 "physics/bmj/": "phys-bmj-driver", "physics/driver/phys_fer_driver.py": "phys-fer-driver",
-                 "physics/fer_hires/": "phys-fer-driver", "steps/drv_h_to_v_tend.py": "drv-h-to-v-tend"}
+                 "physics/bmj/": "phys-bmj-driver", "physics/gf/": "phys-bmj-driver", "physics/ntiedtke/": "phys-bmj-driver", "physics/driver/phys_fer_driver.py": "phys-fer-driver",
+                 "physics/fer_hires/": "phys-fer-driver", "physics/arwen_mp/": "phys-fer-driver",
+                 "steps/drv_h_to_v_tend.py": "drv-h-to-v-tend",
+                 "physics/driver/phys_tempo_driver.py": "phys-tempo-driver", "physics/tempo/": "phys-tempo-driver",
+                 # the TURBL-slot options run inside phys-turbl-driver (MYNN, YSU/revised MM5, RUC, Noah-MP). Without
+                 # them here every name they mention (DZ, PHMID, U_PHY, TH, the BL tendencies...) was kept to the end of
+                 # the physics group on the fit path, about 2 GB more on the 12 km frozen run (release 0.2.0 run leg)
+                 "physics/mynn/": "phys-turbl-driver", "physics/ysu/": "phys-turbl-driver",
+                 "physics/ruc/": "phys-turbl-driver", "physics/noahmp/": "phys-turbl-driver"}
         files = {str(f.relative_to(root)): f.read_text() for f in root.rglob("*.py")
                  if f.name not in ("state.py", "driver.py")}
-        phys = [e[0] for e in PHYSICS]
+        phys = [e[0] for e in self.physics]
         out = {}
         for n in PHYS_SCRATCH:
             pat = re.compile(r"[\x27\x22.]" + re.escape(n) + r"\b")
@@ -304,8 +339,10 @@ class Driver:
                 users.add(u)
             if not ok or not users:
                 continue
-            last = max(i for i, u in enumerate(phys) if u in users)
-            out.setdefault(last, []).append(n)
+            pos = [i for i, u in enumerate(phys) if u in users]
+            if not pos:                      # its users are not on this suite's plan (phys-column-suite runs instead)
+                continue
+            out.setdefault(max(pos), []).append(n)
         return out
 
     def _release_dyn(self, pos):
@@ -358,7 +395,8 @@ class Driver:
             nr = self.ctx.ntimestep_rad
             return nr % c.nrads == 0 or nr % c.nradl == 0
         if key == "update_water":             # SOLVER_RUN 5188-5199
-            if str(c.microphysics).strip() not in ("fer", "fer_hires", "gfs", "wsm6", "thompson"):
+            from .steps.drv_tracer_index import family  # noqa: PLC0415
+            if family(c.microphysics) not in ("fer", "fer_hires", "gfs", "wsm6", "thompson"):
                 return False
             nr = self.ctx.ntimestep_rad
             return (nr % c.nrads == 0 or nr % c.nradl == 0 or n % c.nphs == 0
@@ -476,8 +514,27 @@ class Driver:
                 ctx.st.release_scratch("dyn")    # dynamics locals back to the pool before physics (state.py)
                 for _k in [k for k in ctx.tables if k.startswith(_TPFX) and not k.startswith(_TKEEP)]:
                     del ctx.tables[_k]
+        if (ctx.physics_on and str(ctx.cfg.convection).strip() == "gf"
+                and ctx.ntimestep % ctx.cfg.nprecip == 0):
+            from .physics.gf import phys_gf_gfdrv  # noqa: PLC0415
+            phys_gf_gfdrv.snapshot(ctx)        # GF forcing: T, Q after this convection step's physics
         ctx.first_step = False
         ctx.ntimestep += 1
+        if STEP_LAG > 0 and ctx.stream is not None:
+            self._throttle()
+
+    def _throttle(self):
+        """Record this step's end on ctx.stream; wait for the step STEP_LAG back (see STEP_LAG)."""
+        import cupy as cp  # noqa: PLC0415
+        ring = self.__dict__.get("_lag_ring")
+        if ring is None:
+            ring = self.__dict__["_lag_ring"] = {"ev": [cp.cuda.Event(block=True, disable_timing=True)
+                                                         for _ in range(STEP_LAG + 1)], "n": 0}
+        k = ring["n"]
+        ring["ev"][k % (STEP_LAG + 1)].record(self.ctx.stream)
+        ring["n"] = k + 1
+        if k >= STEP_LAG:
+            ring["ev"][(k - STEP_LAG) % (STEP_LAG + 1)].synchronize()
 
     def write_history(self):
         """One history output: io-wind-rotate, io-history-fields (sets ctx.history_fields), io-history.
@@ -507,6 +564,8 @@ class Driver:
         ctx = self.ctx
         if ctx.filter_active or ctx.wrote_first_hist or ctx.ntimestep != 0:
             return
+        if getattr(ctx, "history_off", False):
+            return                                   # spin-up window (namgpu/spinup.py): no history before T0
         ctx.wrote_first_hist = True
         self.write_history()
 
@@ -545,11 +604,17 @@ class Driver:
         n0 = int(ctx.ntimestep)
         rw = getattr(ctx, "restart_writer", None)
         mons = list(getattr(ctx, "move_monitors", None) or ())   # namgpu/nest/move.py Monitor (moving nests only)
+        # --start spinup (namgpu/spinup.py): the analysis update after each step (IAU or nudging) and no history
+        # before T0. A cold start has neither attribute.
+        hook = getattr(ctx, "step_hook", None)
+        hist_off = bool(getattr(ctx, "history_off", False))
         for _ in range(max(0, nsteps - n0)):
             self.step()
+            if hook is not None:
+                hook(ctx)
             # Fortran: the clock is advanced inside the step, then history is written on the
             # post-advance count (NMM_INTEGRATE.F90:1153+).  step() has already incremented ntimestep.
-            if not ctx.filter_active and self._due("history"):
+            if not ctx.filter_active and not hist_off and self._due("history"):
                 self.write_history()
             if rw is not None and not ctx.filter_active and rw.due(ctx.ntimestep):
                 timing.stamp(ctx, "restart/stage")
@@ -561,6 +626,8 @@ class Driver:
                 if ctx.stream is not None:
                     ctx.stream.synchronize()
                 timing.drain(ctx)                    # timing stamps, read at the sync we already pay
+                for led in getattr(ctx, "health_ledgers", None) or ():
+                    led.drain()                      # deferred scheme refusals (MYNN), read at the same sync
                 for mon in mons:
                     mon.drain()
                 devmem.release(ctx.stream)           # unused pool blocks back to the driver once an hour
@@ -578,6 +645,8 @@ class Driver:
                         break
         if ctx.stream is not None:
             ctx.stream.synchronize()
+        for led in getattr(ctx, "health_ledgers", None) or ():
+            led.drain()                              # no deferred refusal goes unread at the end of the run
         from .io import io_history
         io_history.drain(ctx)                        # last history file is on disk before the receipt
         if rw is not None:

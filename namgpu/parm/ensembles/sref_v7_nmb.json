@@ -1,0 +1,394 @@
+{
+ "schema": "woof-nam-roster.v1",
+ "name": "sref_v7_nmb",
+ "domain": "sref16",
+ "source": "gefs",
+ "about": "The 13 NMMB members of NCEP's SREF v7.1 (retired 2026-11-03 12Z, SCN 26-47) on WOOF-NAM: the configuration of record is the EMC SREFv7 implementation briefing, pages 4-5. Each member is the sref16 domain with the member's physics keys, its GWD amplitude (cleffamp) and, on the drier members, the start's soil moisture x 0.9, started from and bounded by its GEFS v12 member. BMJ old shallow = newall/newswap/newupup/nodeep all .false.; new shallow = NAM's own (newswap .true.). Members selecting SAS, the GFS PBL, WSM6 or GFDL radiation are refused until those are ported (woof-nam ensemble --runnable-only runs the rest).",
+ "members": [
+  {
+   "name": "ctl",
+   "source_member": "c00",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".false.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 1.0
+   },
+   "recipe": {
+    "sref": {
+     "ic": "NDAS",
+     "lbc": "GFS",
+     "cumulus": "BMJ-old-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "Fer_hires",
+     "radiation": "RRTM",
+     "cleffamp": 1.0,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS c00 (SREF ctl reads GFS; GEFS c00 is the GEFS control, the GFS model at C384: the GFS row of this port has no forecast-lead start)"
+   }
+  },
+  {
+   "name": "n1",
+   "source_member": "p02",
+   "configfile": {
+    "convection": "sas",
+    "turbulence": "gfs",
+    "sfc_layer": "myj",
+    "microphysics": "wsm6",
+    "shortwave": "gfdl",
+    "longwave": "gfdl",
+    "cleffamp": 0.5
+   },
+   "recipe": {
+    "sref": {
+     "ic": "NDAS",
+     "lbc": "GEFS2",
+     "cumulus": "SAS",
+     "pbl_sfc": "GFS",
+     "microphysics": "WSM6",
+     "radiation": "GFDL",
+     "cleffamp": 0.5,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS p02 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "p1",
+   "source_member": "p01",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".true.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 2.0
+   },
+   "recipe": {
+    "sref": {
+     "ic": "NDAS",
+     "lbc": "GEFS1",
+     "cumulus": "BMJ-new-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "Fer_hires",
+     "radiation": "RRTM",
+     "cleffamp": 2.0,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS p01 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "n2",
+   "source_member": "p04",
+   "configfile": {
+    "convection": "sas",
+    "turbulence": "gfs",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "gfdl",
+    "longwave": "gfdl",
+    "cleffamp": 1.0,
+    "soil_moisture_scale": 0.9
+   },
+   "recipe": {
+    "sref": {
+     "ic": "NDAS",
+     "lbc": "GEFS4",
+     "cumulus": "SAS",
+     "pbl_sfc": "GFS",
+     "microphysics": "Fer_hires",
+     "radiation": "GFDL",
+     "cleffamp": 1.0,
+     "lsm": "Noah",
+     "soil": "drier"
+    },
+    "start": "GEFS p04 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "p2",
+   "source_member": "p03",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".false.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "wsm6",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 0.5,
+    "soil_moisture_scale": 0.9
+   },
+   "recipe": {
+    "sref": {
+     "ic": "NDAS",
+     "lbc": "GEFS3",
+     "cumulus": "BMJ-old-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "WSM6",
+     "radiation": "RRTM",
+     "cleffamp": 0.5,
+     "lsm": "Noah",
+     "soil": "drier"
+    },
+    "start": "GEFS p03 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "n3",
+   "source_member": "p06",
+   "configfile": {
+    "convection": "sas",
+    "turbulence": "gfs",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "gfdl",
+    "longwave": "gfdl",
+    "cleffamp": 2.0,
+    "soil_moisture_scale": 0.9
+   },
+   "recipe": {
+    "sref": {
+     "ic": "GFS",
+     "lbc": "GEFS6",
+     "cumulus": "SAS",
+     "pbl_sfc": "GFS",
+     "microphysics": "Fer_hires",
+     "radiation": "GFDL",
+     "cleffamp": 2.0,
+     "lsm": "Noah",
+     "soil": "drier"
+    },
+    "start": "GEFS p06 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "p3",
+   "source_member": "p05",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".true.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "wsm6",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 1.0,
+    "soil_moisture_scale": 0.9
+   },
+   "recipe": {
+    "sref": {
+     "ic": "GFS",
+     "lbc": "GEFS5",
+     "cumulus": "BMJ-new-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "WSM6",
+     "radiation": "RRTM",
+     "cleffamp": 1.0,
+     "lsm": "Noah",
+     "soil": "drier"
+    },
+    "start": "GEFS p05 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "n4",
+   "source_member": "p08",
+   "configfile": {
+    "convection": "sas",
+    "turbulence": "gfs",
+    "sfc_layer": "myj",
+    "microphysics": "wsm6",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 0.5
+   },
+   "recipe": {
+    "sref": {
+     "ic": "GFS",
+     "lbc": "GEFS8",
+     "cumulus": "SAS",
+     "pbl_sfc": "GFS",
+     "microphysics": "WSM6",
+     "radiation": "RRTM",
+     "cleffamp": 0.5,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS p08 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "p4",
+   "source_member": "p07",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".false.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "gfdl",
+    "longwave": "gfdl",
+    "cleffamp": 2.0
+   },
+   "recipe": {
+    "sref": {
+     "ic": "GFS",
+     "lbc": "GEFS7",
+     "cumulus": "BMJ-old-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "Fer_hires",
+     "radiation": "GFDL",
+     "cleffamp": 2.0,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS p07 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "n5",
+   "source_member": "p10",
+   "configfile": {
+    "convection": "sas",
+    "turbulence": "gfs",
+    "sfc_layer": "myj",
+    "microphysics": "wsm6",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 1.0,
+    "soil_moisture_scale": 0.9
+   },
+   "recipe": {
+    "sref": {
+     "ic": "RAP",
+     "lbc": "GEFS10",
+     "cumulus": "SAS",
+     "pbl_sfc": "GFS",
+     "microphysics": "WSM6",
+     "radiation": "RRTM",
+     "cleffamp": 1.0,
+     "lsm": "Noah",
+     "soil": "drier"
+    },
+    "start": "GEFS p10 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "p5",
+   "source_member": "p09",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".true.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "rrtm",
+    "longwave": "rrtm",
+    "cleffamp": 0.5,
+    "soil_moisture_scale": 0.9
+   },
+   "recipe": {
+    "sref": {
+     "ic": "RAP",
+     "lbc": "GEFS9",
+     "cumulus": "BMJ-new-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "Fer_hires",
+     "radiation": "RRTM",
+     "cleffamp": 0.5,
+     "lsm": "Noah",
+     "soil": "drier"
+    },
+    "start": "GEFS p09 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "n6",
+   "source_member": "p12",
+   "configfile": {
+    "convection": "sas",
+    "turbulence": "gfs",
+    "sfc_layer": "myj",
+    "microphysics": "fer_hires",
+    "shortwave": "gfdl",
+    "longwave": "gfdl",
+    "cleffamp": 2.0
+   },
+   "recipe": {
+    "sref": {
+     "ic": "RAP",
+     "lbc": "GEFS12",
+     "cumulus": "SAS",
+     "pbl_sfc": "GFS",
+     "microphysics": "Fer_hires",
+     "radiation": "GFDL",
+     "cleffamp": 2.0,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS p12 state at the start lead, its leads as boundaries"
+   }
+  },
+  {
+   "name": "p6",
+   "source_member": "p11",
+   "configfile": {
+    "convection": "bmj",
+    "newall": ".false.",
+    "newswap": ".false.",
+    "newupup": ".false.",
+    "nodeep": ".false.",
+    "turbulence": "myj",
+    "sfc_layer": "myj",
+    "microphysics": "wsm6",
+    "shortwave": "gfdl",
+    "longwave": "gfdl",
+    "cleffamp": 1.0
+   },
+   "recipe": {
+    "sref": {
+     "ic": "RAP",
+     "lbc": "GEFS11",
+     "cumulus": "BMJ-old-shallow",
+     "pbl_sfc": "MYJ",
+     "microphysics": "WSM6",
+     "radiation": "GFDL",
+     "cleffamp": 1.0,
+     "lsm": "Noah",
+     "soil": "normal"
+    },
+    "start": "GEFS p11 state at the start lead, its leads as boundaries"
+   }
+  }
+ ]
+}

@@ -91,6 +91,18 @@ def run(ctx):
     return out
 
 
+def host_status(ctx):
+    """llyr and iovr on the host, read from the device once per cld-init run and kept beside its outputs
+    (they are init constants). progcld2 reads them every radiation chunk: through check_status that was a
+    blocking device-to-host read per chunk, 139 per radiation call on the 12 km fit path (profile)."""
+    t = ctx.tables[KEY]
+    h = t.get("host")
+    if h is None:
+        h = check_status(ctx)
+        t["host"] = h
+    return h
+
+
 def check_status(ctx):
     """Host read of the device outputs for tests only (not on the step path)."""
     out = ctx.tables[KEY]["out"].get()

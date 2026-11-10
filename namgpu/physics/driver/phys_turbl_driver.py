@@ -58,6 +58,25 @@ NOAH = "namgpu.physics.noah.phys_noah_driver"
 SFCDIAGS = "namgpu.physics.noah.phys_noah_sfcdiags"
 MYJ = "namgpu.physics.myj.phys_myj_myjpbl"
 GWD = "namgpu.physics.gwd.phys_gwd_driver"
+RUC = "namgpu.physics.ruc.phys_ruc_driver"   # NAMGPU_LSM=ruc: RUC LSM on land points, Noah keeps water/ice
+UGWP = "namgpu.physics.gwd.phys_ugwp_driver"   # --gwd ugwp: NOAA-GSL UGWP drag suite in GWD's slot
+SFCLAYREV = "namgpu.physics.ysu.phys_sfclayrev"
+YSU = "namgpu.physics.ysu.phys_ysu"
+
+# Selectable boundary layer (modernisation): the NAM pair myj/myj, or WRF's YSU with the revised MM5
+# surface layer. The pairs are fixed because each PBL reads what only its own surface layer writes: MYJPBL's
+# surface boundary is THZ0/QZ0/UZ0/VZ0 and AKHS/AKMS from JSFC, YSU needs FM/FH/BR/WSPD from SFCLAY.
+BL_PAIRS = {"myj": "myj", "ysu": "sfclayrev"}
+
+
+def bl_choice(cfg):
+    turb = str(getattr(cfg, "turbulence", "myj")).strip()
+    sfcl = str(getattr(cfg, "sfc_layer", "myj")).strip()
+    if BL_PAIRS.get(turb) != sfcl:
+        raise RuntimeError(
+            f"phys-turbl-driver: turbulence={turb!r} with sfc_layer={sfcl!r} is refused: the pairs are "
+            f"{BL_PAIRS} (MYJPBL reads JSFC's THZ0/QZ0/AKHS surface boundary; YSU reads SFCLAY's FM/FH/BR/WSPD)")
+    return turb, sfcl
 
 NSOIL = 4
 SNO_FACTR_NOAH = np.float32(0.001)     # SNOWH = SI * 0.001 at prep (SURFACE_PHYSICS noah)
@@ -141,6 +160,7 @@ def _setup(ctx):
     one-time MAVAIL = 1 are state writes, so they are done on the whole State, never per band."""
     st = ctx.st
     g = ctx.grid
+    bl_choice(ctx.cfg)
     _bind_args(st)
     _need(st, REQUIRED_STATE)
     if "MAVAIL_SET" not in ctx.tables:
@@ -154,7 +174,14 @@ def run(ctx):
     PHMID, DZ, U_PHY, V_PHY, Z, the BL and GWD tendencies) exist for one band at a time. Same result bit for
     bit; one band (the whole domain) when the domain fits the band budget."""
     from namgpu.physics import band
+    from namgpu.physics.mynn import phys_mynn_edmf
     from namgpu.state import PHYS_SCRATCH, UNIT_SCRATCH
+    if bool(ctx.cfg.gwdflg) and getattr(ctx.cfg, "gwd_scheme", "nam") == "ugwp":
+        _dep(UGWP).prepare(ctx)                    # statistics loaded whole, before any row band
+    if phys_mynn_edmf.selected():
+        # MYNN arm: whole domain, no row bands (its carried state is whole-domain; one card)
+        _setup(ctx)
+        return _run(ctx)
     return band.run(ctx, UNIT_ID, _run, setup=_setup,
                     scratch=PHYS_SCRATCH | UNIT_SCRATCH.get(UNIT_ID, frozenset()),
                     keep_whole=("DUDT", "DVDT"), drop=UNIT_SCRATCH.get(UNIT_ID, ()))
@@ -168,10 +195,13 @@ def _run(ctx):
     dtphs = np.float32(nphs) * np.float32(ctx.dt)   # Fortran DTPHS = NPHS*DT, single precision
     ntsd = int(ctx.ntimestep)
     sfc_gate = (ntsd == 1) or (ntsd % nphs == 0)   # Fortran: NTSD==1 .OR. MOD(NTSD,NPHS)==0
+    from namgpu.physics.mynn import phys_mynn_edmf
+    mynn = phys_mynn_edmf.selected()               # NAMGPU_PBL=mynn-edmf: MYNN sfc layer + MYNN-EDMF PBL
     ntsd0 = 1 if ntsd == 0 else 0                  # Fortran: IF(NTSD==0)
     pcpflg = 0                                     # parm/nam_configfile pcpflg off
     gwdflg = bool(ctx.cfg.gwdflg)                  # configfile gwdflg (12 km true; CONUS nest false)
     one_from_mavail = 1                            # LAND_SURFACE noah (not 'nmm')
+    turbulence, sfc_layer = bl_choice(ctx.cfg)
 
     s2, s3, sp = (jm, im), (lm, jm, im), (lm + 1, jm, im)
     _bind_args(st)
@@ -228,12 +258,31 @@ def _run(ctx):
     if sfc_gate:
         _k("turbl_sfc_save")(cols, blk, (
             st["PHINT"], st["PSFC_OUT"], i32(im), i32(jm), i32(lm)))
-        _dep(JSFC).run(ctx)
-        _dep(NOAH).run(ctx)
+        if mynn:
+            phys_mynn_edmf.run_sfc(ctx)
+        elif sfc_layer == "sfclayrev":
+            _dep(SFCLAYREV).run(ctx)
+        else:
+            _dep(JSFC).run(ctx)
+        ruc = _dep(RUC)
+        from namgpu.physics.noahmp import phys_noahmp_driver as _nmp
+        if ruc.selected():
+            _dep(NOAH).run(ctx, skip_land=ruc.noah_skip_mode())
+            ruc.run(ctx)
+        elif _nmp.selected(ctx):                      # NAMGPU_LSM=noahmp: WRF-lineage Noah-MP (ArWen port)
+            _nmp.run(ctx)
+        else:
+            _dep(NOAH).run(ctx)
         _k("turbl_noah_post")(cols, blk, (
             st["QWBS"], st["CHS"], st["STC"], st["SFCEVPX"], st["SFCEXC"], st["SOILTB"],
             f32(dtphs), i32(NSOIL), i32(im), i32(jm)))
         _dep(SFCDIAGS).run(ctx)
+        if mynn:
+            phys_mynn_edmf.post_sfcdiags(ctx)
+        elif sfc_layer == "sfclayrev":
+            _dep(SFCLAYREV).diag(ctx)
+        if _nmp.selected(ctx):                      # Noah-MP owns land T2/TH2X/Q2X (WRF NOAHMPSCHEME)
+            _nmp.post_sfcdiags(ctx)
         _k("turbl_rainbl_reset")(cols, blk, (st["RAINBL"], i32(im), i32(jm)))
 
     # ---- (5) AKHS_OUT / AKMS_OUT ----
@@ -243,7 +292,12 @@ def _run(ctx):
 
     # ---- (6) PBL block: MYJPBL on the same gate as the surface block ----
     if sfc_gate:
-        _dep(MYJ).run(ctx)
+        if mynn:
+            phys_mynn_edmf.run_pbl(ctx, dtphs)
+        elif turbulence == "ysu":
+            _dep(YSU).run(ctx, dtphs)
+        else:
+            _dep(MYJ).run(ctx)
 
     # ---- (7) uncomputed-edge fills, Fortran order W, E, S, N ----
     for side in (0, 1, 2, 3):
@@ -252,7 +306,6 @@ def _run(ctx):
             i32(side), i32(im), i32(jm)))
 
     # ---- (8) LPBL when turbulence /= myj (not selected by NAM; ported in full, gated) ----
-    turbulence = "myj"
     if turbulence != "myj":
         _k("turbl_lpbl")(cols, blk, (
             st[ZT], st["SFCZ"], st["PBLH"], st["LPBL"], i32(im), i32(jm), i32(lm)))
@@ -268,15 +321,18 @@ def _run(ctx):
 
     # ---- (10) gravity wave drag; its tendencies join the PBL tendencies ----
     if gwdflg:
-        _dep(GWD).run(ctx)
+        _dep(UGWP if getattr(ctx.cfg, "gwd_scheme", "nam") == "ugwp" else GWD).run(ctx)
         _k("turbl_dudt_add")(cols, blk, (
             st["DUDT_GWD"], st["DVDT_GWD"], st["DUDT"], st["DVDT"], i32(im), i32(jm), i32(lm)))
 
     # ---- (11) T, Q, QC, CWM, F_ICE, F_RAIN (fer_hires: f_qr 1, f_qi 0, f_qs 1, f_qg 1, fer 1) ----
+    from namgpu.steps.drv_tracer_index import family
+    _thom = family(ctx.cfg.microphysics) == "thompson"
+    _fqi, _fer = (1, 0) if _thom else (0, 1)
     _k("turbl_tq_update")(cols, blk, (
         st["T"], st["Q"], st["QC"], st["QI"], st["QR"], st["QS"], st["QG"], st["CW"],
         st["F_ICE"], st["F_RAIN"], st["EXNER"], st["RTHBLTEN"], st["RQBLTEN"], st["RQCBLTEN"],
-        st["RQIBLTEN"], f32(dtphs), i32(1), i32(0), i32(1), i32(1), i32(1),
+        st["RQIBLTEN"], f32(dtphs), i32(1), i32(_fqi), i32(1), i32(1), i32(_fer),
         i32(im), i32(jm), i32(lm)))
 
     # ---- (12) surface flux accumulation and counters ----

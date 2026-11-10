@@ -39,8 +39,9 @@ PER_RANK_TABLES = ("NMMB_LIMITS", "NMMB_LIMITS_LOCAL", "NMMB_LIMITS_HOST", "DIVC
                    "HALO_BUFS", "HALO_MISSING", "UNIT_HASH")
 CTX_SKIP = {"cfg", "grid", "st", "stream", "driver", "bc", "tables", "timings", "slab", "halo",
             "out_dir", "forecast_hours", "comm", "decomp", "hist_geo_global",
-            "restart_writer", "history_future", "history_select",
-            "move_monitors", "move_landing"}   # the forecast process keeps its own (moving nests: namgpu/nest/move.py)
+            "restart_writer", "history_future", "history_files", "history_select",
+            "move_monitors", "move_landing",   # the forecast process keeps its own (moving nests: namgpu/nest/move.py)
+            "step_hook", "history_off", "boco_tag"}   # (spin-up: namgpu/spinup.py)
 FORMAT = 1
 
 

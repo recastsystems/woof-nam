@@ -1,6 +1,88 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (candidate)
+
+- gpuwm-hex is optional. Only TEMPO microphysics, MYNN v6.1 and the suites that use TEMPO (`hrrrv5`, `rapv5`,
+  `woof-nam-next-12km`, `woof-nam-next-7p6km`) need it (`pip install "recast-woof-nam[modern]"`, gpuwm-hex 0.5.0 or
+  newer). Without it, a run that asks for one of them stops before it starts, with one line, where it used to stop at
+  the physics start with a traceback. `woof-nam doctor` says whether it is installed.
+- The CDF soil start and RUC with HRRR soil classes (both presets use them) fetch what they need on first use: the
+  soil table of the start month (268 MB, pinned) and the BNU soil set (8 MB, through `gpuwm fetch-geog`). From a
+  fresh install the run used to build its start and then stop with a traceback.
+- `woof-nam suite --no-products` passes when every forecast completes and keeps each nest's history; it returned 1 after
+  a clean forecast, counting the GRIB2 hours it had been told not to write.
+- `woof-nam suite` on 4 cards runs the CONUS nest on all four (63-68 s per forecast hour measured on 4 x RTX PRO 6000;
+  it had two cards) and keeps the other nests off card 0, which holds the parent and the CONUS GRIB2 writer.
+- `woof-nam run` takes the fit memory path by itself when the card cannot hold the grid on the full path (the 7.6 km
+  North America grid on a 96 GB card).
+- `woof-nam run` no longer leaves its history writer processes behind after a run with maps.
+- `woof-nam nest` no longer dies with a traceback when `nvidia-smi` is slow to answer on a loaded host: it waits longer
+  once, then stops with one line.
+- The RUC land option with the HRRR soil start runs from a plain install (it looked for `grib2_dump` only in
+  `~/.gpuwm/bridges`).
+- The awphys and nest GRIB2 files carry the four precipitation types (CSNOW, CICEP, CFRZR, CRAIN); the compatibility pages
+  are rechecked on a 0.2.0 run.
+- `woof-nam fetch-bridges` also stages `rw_asos`, `rw_stage4` (for `woof-nam score`) and `rw_hex_ugwp_oro` (for the
+  UGWP option), pinned by size and SHA-256; a door that needs one downloads it on first use.
+
+- Pin the matching manylinux GRIB2 writer for the inventory additions and nest output.
+
+- TEMPO defaults to v3.2.5 when selected; v3.0.3 remains available by name.
+- `woof-nam inventory` checks every archived record, including explicit omissions and unchanged baseline messages.
+- Dominant precipitation-type products use the physics-step trace-rate mask. The classification is shared by all
+  four flags in the main process, and `woof-nam run` records the resolved physics step for product generation.
+
+- New physics, each a selectable option, with the NAM suite still the default and unchanged bit for bit:
+  - `--physics-suite hrrrv5`: the RRFS v2 hrrrv5 suite on the NMMB dycore; `rapv5`: NOAA RAP v5 pairing (aerosol-aware
+    Thompson, Grell-Freitas, MYNN, RUC, RRTMG, GSL drag).
+  - Two presets, neither a default: `--physics-suite woof-nam-next-12km` (the NAM 12 km grid with RUC land from the HRRR
+    soil analysis, TEMPO, RTE+RRTMGP and UGWP drag; MYJ and BMJ kept) and `woof-nam-next-7p6km` (the same on the NAM North
+    America footprint at 7.6 km, with New Tiedtke convection).
+  - Single slots: RUC land surface (HRRR soil analysis start, HRRR static soil classes) and Noah-MP; a CDF soil-moisture
+    start matched to the NAM soil climate by month; TEMPO (with melting-layer reflectivity), Thompson, aerosol-aware Thompson and P3 microphysics;
+    RTE+RRTMGP and WRF RRTMG radiation; YSU with the revised MM5 surface layer, and MYNN-EDMF with the MYNN surface layer (also MYNN v6.1 through gpuwm-hex);
+    Grell-Freitas and New Tiedtke convection; UGWP drag.
+- New domains: the NAM North America footprint at 7.6 km (`na7p6`), 7.6 km CONUS (`conus7p6`) and a 16 km SREF-shape grid
+  (`sref16`).
+- New start sources: NOAA RAP, HRRR, RRFS v1 and GEFS v12 members (`--member`), and the ECMWF AIFS and NOAA AIGFS forecasts as
+  boundaries.
+- `woof-nam suite`: one cycle of the NAM suite, the 12 km parent and the CONUS, Alaska, Hawaii, Puerto Rico and fire-weather
+  nests NCEP ran beside it, with NCEP-shaped hiresf GRIB2 files, on the cards of one machine (`woof-nam nest --ncep-nest` for one nest).
+- `woof-nam run --start spinup`: a 6 h spin-up before the cycle, brought to the cycle analysis by centred IAU or nudging.
+- `woof-nam ensemble`: a named member roster, one forecast per member; `parm/ensembles/sref_v7_nmb.json` is NCEP's SREF v7.1
+  NMMB members on the 16 km `sref16` grid, each from its GEFS v12 member (`--source gefs --member`). The RAP analysis as a
+  start (`--source rap`).
+- `woof-nam score`: scores runs against ASOS, MRMS and Stage IV, with sheets.
+- `woof-nam fetch-soil-cdf`: the monthly tables the CDF soil start reads.
+- History: `SNOWNC` (grid-scale snowfall since the start) under the NAM microphysics.
+- Faster step loop: the host waits on a step event instead of spinning a core, history is written by separate processes,
+  and the radiation windows are batched.
+- MRMS truth: the fetch takes the nearest complete mosaic, not a partial granule written during a radar dropout.
+- Two runs of different months started together no longer write over one shared static file.
+- Docs: NOAA's NAM nests and the whole suite (`docs/nests/`); the fire-weather nest uses NCEP's 1 h accumulation bucket.
+
+### Details
+
+- `woof-nam run --start spinup`: the forecast starts spun up. It begins 6 h before the cycle from that cycle's GFS
+  analysis and runs the model to the cycle. The state is then brought to the cycle's analysis by a centred IAU
+  (`--spinup-update iau`, the default) or by 1 h of nudging (`nudge`), so hour 0 holds clouds and precipitation.
+  `woof-nam fetch --spinup-hours 6` fetches its inputs. `--start cold` (the default) is unchanged, bit for bit.
+
+- History: `SNOWNC`, the grid-scale snowfall since the start (mm of water, the microphysics' surface precipitation times
+  its frozen fraction each call, summed as WRF's SNOWNC; written when the NAM's Ferrier microphysics runs), and `SR`, the frozen fraction of the last call's surface
+  precipitation. Both are in the default `products` history preset. Nothing in the forecast reads them; the forecast's
+  own fields are unchanged.
+
+- `woof-nam fetch/run --source rap`: start from NOAA's RAP analysis (13 km, North America, radar-cycled, AWS NODD
+  noaa-rap-pds from 2021-02-22), the wrfprsf00 file on RAP's own rotated lat-lon grid. Table work on the shared
+  isobaric path: a SOURCES row, a record table (`source_records.RAP`) and a fetch row. New in the path, for any
+  source on NCEP grid template 3.32769: the grid geometry read from the file (`source_grids.py`), point placement in
+  the source's rotated coordinates inside init-gfs-hinterp, and grid-relative winds turned to earth-relative. The start
+  carries RAP's condensate (cloud water, rain, cloud ice, snow + graupel as Ferrier CWM, F_ICE, F_RAIN; F_RIMEF 1) and
+  TKE (Q2). Outside RAP's grid (about 17 columns at the NAM grid's west and east edges) and above its 50 hPa top the
+  start is the same cycle's GFS analysis (row `fallback`, blended over 8 RAP cells and 20 hPa). Boundaries are GFS's,
+  6 h older, as the native start. Soil: RAP's nine RUC nodes read at Noah's layer midpoints (gpuwm's own RAP/HRRR
+  rule, no rescaling between the RUC and Noah soil tables); `--soil-from gfs` takes GFS's Noah soil instead.
 
 - Two runs of the same case now give the same forecast, bit for bit. The terrain statistics the gravity-wave drag
   reads (standard deviation, convexity, slope, anisotropy and angle of the sub-grid orography) were summed with

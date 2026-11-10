@@ -15,6 +15,7 @@ Returns: dict  name -> (device array, dims) for io-history (history.write_histor
          PSFC, HGT, T (theta-300), PRES (full mid-layer pressure, Pa; NOT WRF's perturbation P, and
          there is no PB, so no reader may add a base state), PH (g*Z, m2 s-2, interfaces), QVAPOR,
          QCLOUD, QRAIN, QICE, QSNOW (mixing ratios), U10, V10 (earth-relative), RAINNC, RAINC (mm),
+         SNOWNC (grid-scale snowfall since start, mm water, RAINNCV*SR summed as WRF's SNOWNC; phys-fer-driver),
          U, V (earth-relative at mass points, LM levels, not WRF's staggered U/V), W (LM levels),
          T2 (2 m temperature from TSHLTR theta and PSHLTR), Q2 (QSHLTR), MSLP (MEMBRANE_MSLP, Pa, when
          io-quasipost-driver ran for this output; it sets ctx.quasipost_done), and REFL_10CM and
@@ -59,7 +60,7 @@ DIMS2 = ("south_north", "west_east")
 DIMS3 = ("bottom_top", "south_north", "west_east")
 DIMS3S = ("bottom_top_stag", "south_north", "west_east")
 
-MICROPHYSICS_PORTED = ("fer", "fer_hires")
+MICROPHYSICS_PORTED = ("fer", "fer_hires", "thompson", "tempo")   # tempo: phys-column-suite keeps CW/F_ICE/F_RAIN
 
 # The physics fields NAM's awphys GRIB2 reads (woof-nam products, namgpu/products/awphys.tsv), written under their
 # NMMB state names (parm/nam_phy_state.txt) when the state holds them, H points, [JM,IM]: fluxes, surface layer,
@@ -76,12 +77,22 @@ PRODUCT_CARRIERS_2D = (
     # soil moisture availability and total (Noah), the radiation time factors the post applies to RSWIN/RSWOUT/
     # RLWIN (CZEN, CZMEAN, SIGT4), and the BMJ convective cloud bottom/top between outputs (cloud base)
     "SMSTAV", "SMSTOT", "CZEN", "CZMEAN", "SIGT4", "CNVBOT", "CNVTOP",
+    # the NAM nest (hiresf) records: the accumulators NMMB empties every nhrs_* hours (drv_bucket_reset: NCEP's 3 h
+    # bucket) with their counters, surface and 10 m humidity and theta, the step precipitation and its snow ratio,
+    # top-of-atmosphere longwave, base and maximum snow albedo, the exchange coefficients
+    "ACSNOW", "ACSNOM", "SSROFF", "BGROFF", "SFCSHX", "SFCLHX", "SUBSHX", "SNOPCX", "ASRFC",
+    "ASWIN", "ASWOUT", "ASWTOA", "ALWIN", "ALWOUT", "ALWTOA", "ARDSW", "ARDLW",
+    "QSH", "TH10", "Q10", "PREC", "SR", "RLWTOA", "RSWTOA", "ALBASE", "MXSNAL", "AKHS_OUT", "SFCEXC", "CPRATE",
+    # io-max-fields' hourly maximum -10 C reflectivity and frozen precipitation rate (the nests' REFD 263 K and
+    # SRWEQ maxima)
+    "REFDMAX263K", "FPRATEMAX",
 )
 # [LM,JM,IM] carriers: cloud fraction, and the MYJ turbulent kinetic energy (Q2 holds 2 TKE).
-PRODUCT_CARRIERS_3D = ("CLDFRA",)
+PRODUCT_CARRIERS_3D = ("CLDFRA", "F_RIMEF")
 # Noah soil layers, wrfout names, on soil_layers_stag with layer 1 at the top (0-10/10-40/40-100/100-200 cm):
-# the history writer flips only bottom_top fields. One card only: the several-card merge writer has no soil
-# dimension and flips every 3-D field, so on several cards these records are left out (named in the run index).
+# the history writer flips only bottom_top fields, on one card and on several (io_history._write_slab; until
+# 2026-11-06 the several-card writer flipped every 3-D field, so these records were left out there and the 8-card
+# CONUS nest had no TSOIL/SOILW/SOILL for its hiresf files).
 DIMS_SOIL = ("soil_layers_stag", "south_north", "west_east")
 SOIL_CARRIERS = {"TSLB": "STC", "SMOIS": "SMC", "SH2O": "SH2O"}
 
@@ -90,10 +101,12 @@ def _dragco(ctx, scope):
     """The post's surface drag coefficient on the NMMB B grid (UPP CALDRG.f, gridtype B, MODELNAME NMM): the mean
     of the four V-point winds of the lowest layer around each H point, averaged with the z0 wind (UZ0, VZ0, H
     points), CD = USTAR^2 / that speed squared where it is over 1e-6, 0 elsewhere and on the outermost rows and
-    columns (the post loops JSTA_M..JEND_M, ISTA_M..IEND_M). None when the state lacks an input or on several cards
-    (the slab edge rows have no neighbour row here)."""
+    columns (the post loops JSTA_M..JEND_M, ISTA_M..IEND_M). None when the state lacks an input. Several cards: the
+    same arithmetic on the rank's memory rows; an owned row reads the row below it, which is a halo row at a slab
+    edge (U and V are exchanged in the step, so it holds the neighbour's value: 1 vs 2 ranks bitwise, 2026-11-06), and
+    the zero rows land on the global outermost rows only on the edge ranks (elsewhere on halo rows, never written)."""
     st = ctx.st
-    if getattr(ctx, "slab", None) is not None or any(n not in st.fields for n in ("U", "V", "UZ0", "VZ0", "USTAR")):
+    if any(n not in st.fields for n in ("U", "V", "UZ0", "VZ0", "USTAR")):
         return None
     jm, im = int(ctx.grid.jm), int(ctx.grid.im)
     d = st.add("H_DRAGCO", (jm, im))
@@ -129,7 +142,18 @@ def _spec_adv_condensate(ctx, s3):
     """
     import cupy as cp
     st = ctx.st
-    qc, qr, qs = st["QC"], st["QR"], st["QS"]
+    from namgpu.steps.drv_tracer_index import family, host_index
+    if family(ctx.cfg.microphysics) == "thompson":
+        # UPDATE_WATER thompson ELSE branch: CWM = QC+QR+QI+QS+QG, every ice species in F_ICE. The ArWen schemes
+        # (modernise/mp-thompson-p3) keep their species in the TRACERS water slots; a slot the scheme does not
+        # carry (P3: no snow, no graupel) counts as zero.
+        tab = ctx.tables.get("indx") or host_index(ctx.cfg.microphysics, ctx.cfg.raw.get("num_tracers_chem", 0))
+        tr = st["TRACERS"]
+        sl = lambda k: tr[int(tab[k]) - 1] if int(tab.get(k, 0) or 0) > 0 else None  # noqa: E731
+        qc, qr = sl("INDX_QC"), sl("INDX_QR")
+        qs = sum(a for a in (sl("INDX_QI"), sl("INDX_QS"), sl("INDX_QG")) if a is not None)
+    else:
+        qc, qr, qs = st["QC"], st["QR"], st["QS"]
     cw = st.add("H_CW_SPEC", s3)
     f_ice = st.add("H_FICE_SPEC", s3)
     f_rain = st.add("H_FRAIN_SPEC", s3)
@@ -174,7 +198,8 @@ def run(ctx):
     g = ctx.grid
     im, jm, lm = int(g.im), int(g.jm), int(g.lm)
 
-    mp = str(ctx.cfg.microphysics).strip()
+    from namgpu.steps.drv_tracer_index import family
+    mp = family(ctx.cfg.microphysics)          # thompson_aero, p3: the NMMB thompson branch (modernise)
     if mp not in MICROPHYSICS_PORTED:
         raise RuntimeError(
             f"io-history-fields: microphysics {mp!r} has no CWM/F_ICE/F_RAIN couple ported; "
@@ -187,13 +212,16 @@ def run(ctx):
         raise RuntimeError("io-history-fields: ACPREC_TOT missing (state table ACPREC_TOT)")
     # CUPREC_TOT is zero until a convection scheme writes it; zero is the correct value with no convection.
     cup_tot = st.add("CUPREC_TOT", (jm, im))
+    # SNOWNC_TOT (phys-fer-driver step 5): grid-scale snowfall since the start, mm, zero before the first
+    # microphysics call
+    snow_tot = st.add("SNOWNC_TOT", (jm, im))
 
     s3 = (lm, jm, im)
     s3s = (lm + 1, jm, im)
     s2 = (jm, im)
 
-    spec_adv = bool(ctx.cfg.raw.get("spec_adv", False))
-    if spec_adv and int(ctx.ntimestep) > 0:
+    spec_adv = str(ctx.cfg.raw.get("spec_adv", False)).strip().lower() in ("true", ".true.", "t", "yes", "1")
+    if spec_adv and int(ctx.ntimestep) > 0 and mp != "tempo":
         cw, f_ice, f_rain = _spec_adv_condensate(ctx, s3)
     else:
         cw, f_ice, f_rain = st["CW"], st["F_ICE"], st["F_RAIN"]
@@ -266,6 +294,8 @@ def run(ctx):
         "T2": (t2, DIMS2),
         "Q2": (st["QSHLTR"], DIMS2),
     }
+    if mp in ("fer", "fer_hires"):   # SNOWNC_TOT is summed by phys-fer-driver; other microphysics leave it unwritten
+        out["SNOWNC"] = (snow_tot, DIMS2)
     if "MEMBRANE_MSLP" in st.fields and getattr(ctx, "quasipost_done", False):
         out["MSLP"] = (st["MEMBRANE_MSLP"], DIMS2)
     for name in PRODUCT_CARRIERS_2D:
@@ -274,10 +304,9 @@ def run(ctx):
     for name in PRODUCT_CARRIERS_3D:
         if name in st.fields and tuple(st[name].shape) == s3:
             out.setdefault(name, (st[name], DIMS3))
-    if getattr(ctx, "slab", None) is None:
-        for name, src in SOIL_CARRIERS.items():
-            if src in st.fields and st[src].ndim == 3 and tuple(st[src].shape[1:]) == s2:
-                out.setdefault(name, (st[src], DIMS_SOIL))
+    for name, src in SOIL_CARRIERS.items():
+        if src in st.fields and st[src].ndim == 3 and tuple(st[src].shape[1:]) == s2:
+            out.setdefault(name, (st[src], DIMS_SOIL))
     drag = _dragco(ctx, scope)
     if drag is not None:
         out["DRAGCO"] = (drag, DIMS2)

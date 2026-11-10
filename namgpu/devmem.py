@@ -100,9 +100,10 @@ def setup() -> dict:
                                     if pool.total_bytes() + _round(n) <= pool.get_limit():
                                         raise
                                     continue
-                            if ceiling and need > ceiling:
+                            top = _STATE.get("ceiling", ceiling)   # lowered to the forecast's at forecast_start
+                            if top and need > top:
                                 raise                # past CUPY_GPU_MEMORY_LIMIT: CuPy's own out-of-memory
-                            pool.set_limit(size=need + step if not ceiling else min(need + step, ceiling))
+                            pool.set_limit(size=need + step if not top else min(need + step, top))
                     hits[1] += clock() - t0
                 return p
 
@@ -125,9 +126,17 @@ def forecast_start(stream=None) -> None:
     _STATE["lifted"] = True
     release(stream)
     _STATE["init_reserved_high_gib"] = round(_STATE["pool"].get_limit() / 2**30, 3)
+    # The nest door gives init its own ceiling (CUPY_GPU_MEMORY_LIMIT: the card's free memory) and the step loop the
+    # pre-flight's (NAMGPU_FORECAST_POOL_LIMIT): a nest started from a parent's history builds its boundaries in init,
+    # past the forecast's estimate (the CONUS 3 km nest on one card stopped in init-gfs-bocos at 66.4 GiB against a
+    # 66.6 GiB forecast cap; WOOF-NAM suite proof 2026-11-06)
+    fl = os.environ.get("NAMGPU_FORECAST_POOL_LIMIT", "").strip()
+    if fl.isdigit() and int(fl) > 0:
+        _STATE["ceiling"] = int(fl) if not _STATE.get("ceiling") else min(int(fl), _STATE["ceiling"])
     if _STATE["cap"] == "all":
         p = _STATE["pool"]
-        p.set_limit(size=max(p.total_bytes(), 1 << 20))
+        top = _STATE.get("ceiling", 0)
+        p.set_limit(size=max(p.total_bytes(), 1 << 20) if not top else min(max(p.total_bytes(), 1 << 20), top))
         return
     _STATE["pool"].set_limit(size=_STATE.get("ceiling", 0))   # CuPy's own limit again (0 = none)
     if cp.cuda.get_allocator() is _STATE["capped"]:  # not wrapped by someone else (tools/vram_audit.py hooks it)
@@ -137,6 +146,42 @@ def forecast_start(stream=None) -> None:
 def pool():
     setup()
     return _STATE["pool"]
+
+
+CUDA_WAIT = "spin (not set)"
+
+
+def blocking_sync() -> str:
+    """Make every CUDA primary context of this process wait for the GPU by blocking on an OS event
+    (CU_CTX_SCHED_BLOCKING_SYNC) instead of the default spin. Returns the mode, also kept in CUDA_WAIT.
+
+    Why: with the default, the main thread held one core at 90-100 % for the whole step loop while it waited in
+    the driver (sched_yield / clock_gettime polling inside blocking copies and full-queue launches): one spinning
+    core per forecast, three per 3-way shared card (profile, 2026-11-09). Blocking
+    changes no value and no launch order. Measured on an RTX 5090 (400 matmuls then one read): spin 0.32 s of CPU
+    in a 0.37 s wait, blocking 0.01 s in 0.38 s; full-queue launches 1.18 -> 0.80 s CPU over 1.5 s. Set after the
+    context exists too (cuDevicePrimaryCtxSetFlags_v2, CUDA 11+). NAMGPU_CUDA_SPIN=1 keeps the spin."""
+    global CUDA_WAIT
+    if os.environ.get("NAMGPU_CUDA_SPIN", "").strip() == "1":
+        CUDA_WAIT = "spin (NAMGPU_CUDA_SPIN=1)"
+        return CUDA_WAIT
+    import ctypes
+    import sys
+    try:
+        lib = ctypes.CDLL("nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1")
+        rc = lib.cuInit(0)
+        n = ctypes.c_int(0)
+        if rc == 0:
+            rc = lib.cuDeviceGetCount(ctypes.byref(n))
+        for i in range(n.value if rc == 0 else 0):
+            d = ctypes.c_int(0)
+            rc = lib.cuDeviceGet(ctypes.byref(d), i) or lib.cuDevicePrimaryCtxSetFlags_v2(d, 0x04)
+            if rc != 0:
+                break
+        CUDA_WAIT = "blocking" if rc == 0 else f"spin (CUDA driver rc {rc})"
+    except (OSError, AttributeError) as e:
+        CUDA_WAIT = f"spin ({type(e).__name__}: {e})"
+    return CUDA_WAIT
 
 
 def release(stream=None) -> int:

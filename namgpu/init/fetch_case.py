@@ -19,6 +19,9 @@ Rows today:
 - nam-*      NAM native B-grid analysis bgrd3d00 (the native start), native surface bgrdsfFF and the grid 218
              awphysFF picture referee: only where the domain overlaps the NAM 12 km grid, only for cycles
              before the NAM retirement (2026-11-03 12Z).
+- rap-wrfprs RAP 13 km analysis wrfprsf00 (the rap start), subset by .idx to the records source_records.RAP reads,
+             only where the domain overlaps RAP's rotated grid, from 2021-02-22. A rap start also needs gfs-f000 (its
+             fallback outside RAP's grid and above 50 hPa) and gfs-boco (its boundaries).
 - mrms       MRMS MergedReflectivityQCComposite_00.50 (truth), the file nearest each hour, only where the
              domain overlaps MRMS CONUS (20-55 N, 130-60 W).
 All requests run in a thread pool (I/O bound); nothing here is a single-core stage.
@@ -60,7 +63,25 @@ import numpy as np
 NAM = "https://noaa-nam-pds.s3.amazonaws.com"
 GFS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 MRMS = "https://noaa-mrms-pds.s3.amazonaws.com"
+RAP = "https://noaa-rap-pds.s3.amazonaws.com"
+HRRR = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
+RRFS = "https://noaa-rrfs-ops-pds.s3.amazonaws.com"
 MRMS_MAX_OFFSET_S = 600       # MRMS writes every 2 min; a file more than 10 min off is not that hour
+# A composite written while radars drop out of the mosaic is a partial field: much of CONUS turns to -999 (no radar
+# coverage) and storms vanish. Defect (MRMS partial granule, 2023-04-01 00Z): the nearest granule, 00:00:35, had 67.6 %
+# of its pixels at -999 against 34.7 % in a full mosaic that night; the 2023-03-31 squall line was missing and FSS scored
+# 0.03. A full mosaic's no-coverage fraction depends on the era's radar set (34.7 % in 2023, 38.2-38.9 % in 2021-22),
+# so a granule is judged against that day's own full mosaics: the lowest fraction among the granules nearest the valid
+# time and valid +/- 1, 2, 3 h, plus a tolerance of about two radars.
+MRMS_NOCOVER = -500.0         # MRMS -999 = no radar coverage (-99 = covered, no echo)
+MRMS_REF_HOURS = 3
+MRMS_NOCOVER_TOL = 0.01
+# Radars that stay down for hours (Hurricane Ian, 2022-09-27 14-19Z: 0.359-0.364 against 0.347 that day) leave the archive
+# with no better mosaic in the window; that best-available field is the truth there. A mosaic dropout sits far above it
+# (0.426-0.676 at 2023-04-01 00Z, 0.59-0.80 at 11Z, against 0.347). So when no granule in the window comes within
+# MRMS_NOCOVER_TOL of the day's full mosaic, the window's own best is taken if it is within MRMS_OUTAGE_TOL (about
+# eight radars) of it; beyond that the hour is an outage and gets no file.
+MRMS_OUTAGE_TOL = 0.05
 ROOT = Path(__file__).resolve().parents[2]
 
 GFS_VARS = re.compile(
@@ -83,7 +104,24 @@ GFS_INIT_VARS = re.compile(GFS_VARS.pattern + r"|:CNWAT:surface:")
 NAM_HOURLY = re.compile(
     r":(REFC):entire atmosphere|:APCP:surface:|:TMP:2 m above ground:|:DPT:2 m above ground:"
     r"|:(UGRD|VGRD):10 m above ground:|:PRMSL:mean sea level:|:MSLET:mean sea level:")
-PATTERNS = {"gfs_init": GFS_INIT_VARS, "gfs_boco": GFS_BOCO_VARS, "nam_hourly": NAM_HOURLY}
+# RAP wrfprsf00: what the rap start reads (source_records.RAP): the isobaric ladder of its slots, graupel and TKE, the
+# surface, 2 m, 10 m, sea ice, land, snow and the nine RUC soil nodes.
+RAP_INIT_VARS = re.compile(
+    r":(HGT|TMP|SPFH|UGRD|VGRD|CLWMR|CIMIXR|RWMR|SNMR|GRLE|TKE):(\d+(\.\d+)?) mb:"
+    r"|:(PRES|HGT|TMP|LAND|ICEC|WEASD|SNOD):surface:"
+    r"|:(TSOIL|SOILW):\d+(\.\d+)?-\d+(\.\d+)? m below ground:"
+    r"|:(TMP|SPFH):2 m above ground:|:(UGRD|VGRD):10 m above ground:")
+# HRRR wrfprsf00: the same record set (source_records.HRRR) plus canopy water; HRRR's .idx names cloud water CLMR
+# (0-1-22), where RAP's says CLWMR, so without the CLMR term the start would have no cloud water record
+HRRR_INIT_VARS = re.compile(RAP_INIT_VARS.pattern + r"|:CLMR:(\d+(\.\d+)?) mb:|:CNWAT:surface:")
+# RRFS v1: the isobaric records from prslev, the surface and soil records from 2dfld (source_records.RRFS)
+RRFS_PRS_VARS = re.compile(r":(HGT|TMP|SPFH|UGRD|VGRD|CLMR|ICMR|RWMR|SNMR|GRLE):(\d+(\.\d+)?) mb:")
+RRFS_SFC_VARS = re.compile(
+    r":(PRES|HGT|TMP|LAND|ICEC|WEASD|SNOD|CNWAT):surface:"
+    r"|:(TSOIL|SOILW):\d+(\.\d+)?-\d+(\.\d+)? m below ground:"
+    r"|:(TMP|SPFH):2 m above ground:|:(UGRD|VGRD):10 m above ground:")
+PATTERNS = {"gfs_init": GFS_INIT_VARS, "gfs_boco": GFS_BOCO_VARS, "nam_hourly": NAM_HOURLY, "rap_init": RAP_INIT_VARS,
+            "hrrr_init": HRRR_INIT_VARS, "rrfs_prs": RRFS_PRS_VARS, "rrfs_sfc": RRFS_SFC_VARS}
 
 # Regions a row covers. "global": everywhere. "bbox": geographic lat/lon box (degrees, lon -180..180).
 # "rotated": a rotated lat-lon grid given by its centre (tph0d, tlm0d) and wbd/sbd, tested in its own rotated
@@ -98,6 +136,11 @@ REGIONS = {
     # NCEP grid 218 (Lambert, 614 x 428, 12.19 N 133.46 W .. 57.29 N 49.39 W corners): its lat/lon hull.
     "grid218": {"kind": "bbox", "lat": (12.0, 61.5), "lon": (-153.0, -49.0)},
     "mrms_conus": {"kind": "bbox", "lat": (20.0, 55.0), "lon": (-130.0, -60.0)},
+    # RAP's 13 km rotated grid (wrfprsf00, 953 x 834, centre 54 N 106 W; source_grids.py measured its first point at
+    # rotated -50.743, -57.993 deg)
+    # HRRR's 3 km Lambert grid (1799 x 1059): the lat/lon hull of its corners (21.14-47.84 N, 134.10-60.92 W)
+    "hrrr3": {"kind": "bbox", "lat": (21.1, 47.9), "lon": (-134.1, -60.9)},
+    "rap13": {"kind": "rotated", "tph0d": 54.0, "tlm0d": -106.0, "wbd": -57.99, "sbd": -50.74},
 }
 
 # Path eras: the GFS bucket moved files under atmos/ with GFS v16 (first cycle 2021-03-22 12Z); before it the
@@ -123,8 +166,24 @@ GFS_ERAS = (("2004-03-01T00", "{vym}/{vymd}/gfsanl_4_{vymd}_{vhh}00_{vofs:03d}.g
               "licence": "NOAA/NCEP GFS 0.25, US government work (public domain), NCAR GDEX d084001 over OSDF"}),
             ("2021-01-01T00", "gfs.{ymd}/{hh}/gfs.t{hh}z.pgrb2.0p25.f{lead:03d}"),
             ("2021-03-22T12", "gfs.{ymd}/{hh}/atmos/gfs.t{hh}z.pgrb2.0p25.f{lead:03d}"))
-NAM_ERAS = (("2017-01-01T00", "nam.{ymd}/nam.t{hh}z.{stem}{lead:02d}.tm00.grib2"),)
+# NAM eras. AWS NODD noaa-nam-pds begins with nam.20210916 (checked 2026-11-09: no keys for 20210214, 20210301,
+# 20210601). Before it, the awphys (grid 218) family is NCEI THREDDS model-nam218, the same CONUS 12 km grid-218
+# product (whole files, no .idx), online from 2020-05-18 (catalog 2026-11-09). Breakage it prevents: the
+# texas-freeze-2021-02 case staged with no archived NAM (19 x 404), so its scores lost the archived-NAM column.
+# The bgrd and hourly-subset families have no archive before NODD and are skipped with that reason.
+NAM_ERAS = (("2021-09-16T00", "nam.{ymd}/nam.t{hh}z.{stem}{lead:02d}.tm00.grib2"),)
+NAM_NCEI_218 = "https://www.ncei.noaa.gov/thredds/fileServer/model-nam218"
+NAM_AWPHYS_ERAS = (("2020-05-18T00", "{yyyy}{mm}/{ymd}/nam_218_{ymd}_{hh}00_{lead:03d}.grb2",
+                    {"host": NAM_NCEI_218, "kind": "whole",
+                     "licence": "NOAA/NCEP NAM grid 218, US government work (public domain), NCEI THREDDS model-nam218"}),
+                   ) + NAM_ERAS
 NAM_RETIRED = "2026-11-03T12"
+# RAP on AWS NODD: the archive begins 2021-02-22 (some early days hold only some cycles' wrfprs; a missing file is a
+# failed required request, named by the fetch)
+RAP_ERAS = (("2021-02-22T00", "rap.{ymd}/rap.t{hh}z.wrfprsf{lead:02d}.grib2"),)
+HRRR_ERAS = (("2014-07-30T18", "hrrr.{ymd}/conus/hrrr.t{hh}z.wrfprsf{lead:02d}.grib2"),)
+RRFS_PRS_ERAS = (("2026-08-12T00", "rrfs.{ymd}/{hh}/rrfs.t{hh}z.prslev.3km.f{lead:03d}.conus.grib2"),)
+RRFS_SFC_ERAS = (("2026-08-12T00", "rrfs.{ymd}/{hh}/rrfs.t{hh}z.2dfld.3km.f{lead:03d}.conus.grib2"),)
 
 # One row per file family. cycle: "start" or "boco" (the boundary cycle, boco_age_h older). leads: "f000",
 # "boco" (boco_interval_h steps covering the run), "every3" (0..hours by 3), "hourly36" (1..min(hours, 36),
@@ -155,27 +214,58 @@ FETCH_ROWS = (
      "stem": "bgrdsf", "cycle": "start", "leads": "every3", "kind": "whole", "region": "nam12",
      "until": NAM_RETIRED, "dest": "nam/bgrdsf{lead:02d}.grib2"},
     {"name": "nam-awphys", "licence": "NOAA/NCEP NAM, US government work (public domain), AWS NODD noaa-nam-pds",
-     "source": "native", "role": "referee", "host": NAM, "eras": NAM_ERAS,
+     "source": "native", "role": "referee", "host": NAM, "eras": NAM_AWPHYS_ERAS,
      "stem": "awphys", "cycle": "start", "leads": "every3", "kind": "whole", "region": "grid218",
      "until": NAM_RETIRED, "dest": "nam/awphys{lead:02d}.grib2"},
     {"name": "nam-awphys-hourly", "licence": "NOAA/NCEP NAM, US government work (public domain), AWS NODD noaa-nam-pds",
      "source": "native", "role": "referee", "host": NAM, "eras": NAM_ERAS,
      "stem": "awphys", "cycle": "start", "leads": "hourly36", "kind": "subset", "records": "nam_hourly",
      "region": "grid218", "until": NAM_RETIRED, "dest": "nam/awphys{lead:02d}.sub.grib2"},
+    {"name": "rap-wrfprs", "licence": "NOAA/NCEP RAP, US government work (public domain), AWS NODD noaa-rap-pds",
+     "source": "rap", "role": "init", "host": RAP, "eras": RAP_ERAS, "cycle": "start", "leads": "f000",
+     "kind": "subset", "records": "rap_init", "region": "rap13", "since": "2021-02-22T00",
+     "dest": "rap/rap.t{hh}z.wrfprsf00.grib2"},
+    {"name": "hrrr-wrfprs", "licence": "NOAA/NCEP HRRR, US government work (public domain), AWS NODD noaa-hrrr-bdp-pds",
+     "source": "hrrr", "role": "init", "host": HRRR, "eras": HRRR_ERAS, "cycle": "start", "leads": "f000",
+     "kind": "subset", "records": "hrrr_init", "region": "hrrr3", "since": "2014-07-30T18",
+     "dest": "hrrr/hrrr.t{hh}z.wrfprsf00.grib2"},
+    {"name": "rrfs-prslev", "licence": "NOAA/NCEP RRFS, US government work (public domain), AWS NODD noaa-rrfs-ops-pds",
+     "source": "rrfs", "role": "init", "host": RRFS, "eras": RRFS_PRS_ERAS, "cycle": "start", "leads": "f000",
+     "kind": "subset", "records": "rrfs_prs", "region": "hrrr3", "since": "2026-08-12T00",
+     "dest": "rrfs/rrfs.t{hh}z.prslev.3km.f000.conus.grib2"},
+    {"name": "rrfs-2dfld", "licence": "NOAA/NCEP RRFS, US government work (public domain), AWS NODD noaa-rrfs-ops-pds",
+     "source": "rrfs", "role": "init", "host": RRFS, "eras": RRFS_SFC_ERAS, "cycle": "start", "leads": "f000",
+     "kind": "subset", "records": "rrfs_sfc", "region": "hrrr3", "since": "2026-08-12T00",
+     "dest": "rrfs/rrfs.t{hh}z.2dfld.3km.f000.conus.grib2"},
     {"name": "mrms", "licence": "NOAA MRMS, US government work (public domain), AWS NODD noaa-mrms-pds",
      "source": "mrms", "role": "truth", "host": MRMS, "cycle": "start", "leads": "hourly",
      "kind": "mrms", "region": "mrms_conus", "since": "2020-10-14T00", "dest": "mrms"},
 )
 
 
-def _retry(fn, tries=5):
-    for k in range(tries):
+def _retry(fn, tries=5, slow_tries=10):
+    """Retry a request. A throttle answer (HTTP 503 SlowDown / 429) backs off exponentially with jitter, up to
+    slow_tries: the ECMWF open-data S3 bucket answered 16 parallel ranged GETs with SlowDown and the old 2-8 s steps
+    (20 s in all) failed 4 of 7 files of an AIFS case fetch (2026-11-08). Other errors keep the short linear steps."""
+    import random
+    k = slow = 0
+    while True:
         try:
             return fn()
-        except (OSError, urllib.error.URLError):
-            if k == tries - 1:
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and slow < slow_tries - 1:
+                time.sleep(min(60.0, 2.0 ** slow) * random.uniform(0.5, 1.5))
+                slow += 1
+                continue
+            if k >= tries - 1 or e.code in (429, 503):
                 raise
             time.sleep(2.0 * (k + 1))
+            k += 1
+        except (OSError, urllib.error.URLError):
+            if k >= tries - 1:
+                raise
+            time.sleep(2.0 * (k + 1))
+            k += 1
 
 
 def _get(url: str, rng: str | None = None, timeout=120) -> bytes:
@@ -275,33 +365,108 @@ def _list_mrms_day(day: str) -> tuple[str, ...]:
         token = m.group(1)
 
 
-def _mrms_hour(valid: datetime, dest_dir: Path) -> str:
-    # The nearest file can sit in the previous or next UTC day's prefix (valid times near 00Z),
-    # so list valid-1d, valid and valid+1d and pick the nearest across all three.
-    dest = dest_dir / f"mrms_refc_{valid:%Y%m%d%H}.grib2"
-    if dest.exists():
-        return f"have {dest.name}"
+def _mrms_nocover_frac(grib: Path) -> float:
+    """Fraction of an MRMS composite's pixels at -999 (no radar coverage), decoded on the scorer's own path."""
+    import tempfile  # noqa: PLC0415
+
+    from namgpu.init.init_grib2_decode import inventory  # noqa: PLC0415
+    from namgpu.io.io_referee_panels import _grib_values  # noqa: PLC0415
+    row = inventory(grib)[0]
+    with tempfile.TemporaryDirectory(prefix="mrms-cov-", dir=grib.parent) as td:
+        v = _grib_values(grib, row, Path(td) / "m")
+    return float(np.count_nonzero(v < MRMS_NOCOVER)) / v.size
+
+
+@lru_cache(maxsize=None)
+def _mrms_key_frac(key: str, work: str) -> float:
+    """No-coverage fraction of one archive granule (downloaded to a scratch file, then removed). Cached: the reference
+    granules of one hour are the candidates of its neighbours."""
+    tmp = Path(work) / f".cov-{threading.get_ident()}-{key.rsplit('_', 1)[-1]}.grib2"
+    try:
+        tmp.write_bytes(gzip.decompress(_get(f"{MRMS}/{key}")))
+        return _mrms_nocover_frac(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _mrms_keys_near(valid: datetime) -> list[tuple[float, str]]:
+    """(seconds off, key) of every granule listed for valid's UTC day and both neighbours, nearest first."""
     keys = []
     for dd in (-1, 0, 1):
         keys += _list_mrms_day((valid + timedelta(days=dd)).strftime("%Y%m%d"))
-    best, bestdt = None, None
+    out = []
     for k in keys:
         m = re.search(r"_(\d{8})-(\d{6})\.grib2\.gz$", k)
-        if not m:
+        if m:
+            t = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+            out.append((abs((t - valid).total_seconds()), k))
+    return sorted(out)
+
+
+def _mrms_reference(valid: datetime, work: Path) -> float | None:
+    """Lowest no-coverage fraction among the granules nearest valid +/- 1..MRMS_REF_HOURS h: the day's full mosaic.
+    A radar outage rarely spans 6 h, so at least one of them is complete."""
+    fr = []
+    for h in range(-MRMS_REF_HOURS, MRMS_REF_HOURS + 1):
+        if h == 0:
             continue
-        t = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
-        d = abs((t - valid).total_seconds())
-        if bestdt is None or d < bestdt:
-            best, bestdt = k, d
-    if best is None:
+        near = _mrms_keys_near(valid + timedelta(hours=h))
+        if near and near[0][0] <= MRMS_MAX_OFFSET_S:
+            fr.append(_mrms_key_frac(near[0][1], str(work)))
+    return min(fr) if fr else None
+
+
+def _mrms_hour(valid: datetime, dest_dir: Path) -> str:
+    # The nearest file can sit in the previous or next UTC day's prefix (valid times near 00Z), so list valid-1d, valid
+    # and valid+1d, and take the nearest COMPLETE mosaic within MRMS_MAX_OFFSET_S (see MRMS_NOCOVER_TOL).
+    dest = dest_dir / f"mrms_refc_{valid:%Y%m%d%H}.grib2"
+    ok = dest.with_suffix(dest.suffix + ".ok")      # written with a checked file: granule, its fraction, the reference
+    if dest.exists() and ok.exists():
+        return f"have {dest.name}"
+    cands = _mrms_keys_near(valid)
+    if not cands:
         return f"MRMS none for {valid}"
-    if bestdt > MRMS_MAX_OFFSET_S:
+    if cands[0][0] > MRMS_MAX_OFFSET_S:
         # A live case asks for valid times that have not happened yet; the nearest key is then the newest file,
         # hours early, and writing it under this hour would show the wrong truth (live case 2026-11-04 12Z: 19Z-12Z
         # next day all got 18:36Z). No file, so a later fetch picks the real one up.
-        return f"MRMS none within {MRMS_MAX_OFFSET_S} s of {valid} (nearest {best.rsplit('_', 1)[-1]})"
-    dest.write_bytes(gzip.decompress(_get(f"{MRMS}/{best}")))
-    return f"got {dest.name} ({best.rsplit('_', 1)[-1]})"
+        return f"MRMS none within {MRMS_MAX_OFFSET_S} s of {valid} (nearest {cands[0][1].rsplit('_', 1)[-1]})"
+    cands = [(d, k) for d, k in cands if d <= MRMS_MAX_OFFSET_S]
+    ref = _mrms_reference(valid, dest_dir)
+    if dest.exists():
+        # cached before this check: kept if it is as complete as the day's full mosaic, else the window decides below
+        frac = _mrms_nocover_frac(dest)
+        if ref is None or frac <= ref + MRMS_NOCOVER_TOL:
+            ok.write_text(f"cached no-coverage {frac:.4f} reference {ref}\n")
+            return f"have {dest.name} (checked: no-coverage {frac:.3f}, reference {ref})"
+    fracs: list[tuple[str, float]] = []              # (key, no-coverage fraction), nearest first
+    pick = None
+    for _, k in cands:
+        fracs.append((k, _mrms_key_frac(k, str(dest_dir))))
+        if ref is not None and fracs[-1][1] <= ref + MRMS_NOCOVER_TOL:
+            pick = fracs[-1]
+            break
+    if pick is None:
+        # nothing as complete as the day's full mosaic: the window's best, unless even that is a dropout
+        local = min(f for _, f in fracs)
+        if ref is None or local <= ref + MRMS_OUTAGE_TOL:
+            pick = next((k, f) for k, f in fracs if f <= local + MRMS_NOCOVER_TOL)
+    rs = "none" if ref is None else f"{ref:.3f}"
+    seen = [f"{k.rsplit('_', 1)[-1]} {f:.3f}" for k, f in fracs]
+    if pick is None:
+        # A long radar outage: no file, so the hour is not scored against a partial field.
+        if dest.exists():
+            dest.unlink()
+        return f"MRMS none complete within {MRMS_MAX_OFFSET_S} s of {valid} (reference {rs}; {', '.join(seen)})"
+    k, frac = pick
+    name = k.rsplit("_", 1)[-1]
+    skipped = seen[:fracs.index(pick)]
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    tmp.write_bytes(gzip.decompress(_get(f"{MRMS}/{k}")))
+    tmp.rename(dest)
+    ok.write_text(f"{name} no-coverage {frac:.4f} reference {rs}\n")
+    why = f"; skipped partial {', '.join(skipped)}" if skipped else ""
+    return f"got {dest.name} ({name}, no-coverage {frac:.3f}, reference {rs}{why})"
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -367,7 +532,7 @@ def _era_path(row, cyc: datetime, lead: int) -> str:
     # chain "analyses": lead f of cycle cyc is the analysis/first guess of the GFS cycle at or before cyc + f
     v = cyc + timedelta(hours=lead)
     vc = v.replace(hour=v.hour - v.hour % 6)
-    return era["template"].format(ymd=f"{cyc:%Y%m%d}", hh=f"{cyc:%H}", yyyy=f"{cyc:%Y}", lead=lead,
+    return era["template"].format(ymd=f"{cyc:%Y%m%d}", hh=f"{cyc:%H}", yyyy=f"{cyc:%Y}", mm=f"{cyc:%m}", lead=lead,
                                   stem=row.get("stem", ""), vym=f"{vc:%Y%m}", vymd=f"{vc:%Y%m%d}", vhh=f"{vc:%H}",
                                   vofs=int((v - vc).total_seconds() // 3600))
 
@@ -395,6 +560,9 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
     follow: a storm-following run; rows with follow_dest fetch each lead's start record set (see FETCH_ROWS)."""
     from namgpu.init import sources as srcmod
     srow = srcmod.SOURCES["gfs"]
+    own = srcmod.SOURCES.get(source, {})
+    bsrc = source if "boundary" in own else "gfs"
+    fsrc = (own.get("fallback") or {}).get("source")
     age = srcmod.boco_age_h(srow, cfg, age_h)
     interval = int(srow.get("boco_interval_h", 3))
     lat, lon = domain_points(cfg)
@@ -409,14 +577,20 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
         if not overlaps(row["region"], lat, lon):
             skipped.append((row["name"], f"domain outside region {row['region']}"))
             continue
-        # a native (NAM analysis) start takes the GFS boundaries, as operational NAM (CONTRACT section 5)
-        required = (row["role"] == "init" and row["source"] == source) or \
-                   (row["role"] == "boco" and (row["source"] == source or (source == "native" and row["source"] == "gfs")))
+        # a start whose row has no boundary entry (native NAM analysis, rap) takes the GFS boundaries, as operational
+        # NAM (CONTRACT section 5); a row with a fallback (rap) also needs the fallback's start file
+        required = (row["role"] == "init" and row["source"] in (source, fsrc)) or \
+                   (row["role"] == "boco" and row["source"] in (source, bsrc))
+        # A regional analysis (a SOURCES row with a fallback: rap, hrrr) is read only by its own start. Fetched as an
+        # optional extra it added 101 MB (RAP) + 193 MB (HRRR) to every CONUS fetch, gfs and native starts included.
+        if row["role"] == "init" and not required and (srcmod.SOURCES.get(row["source"]) or {}).get("fallback"):
+            skipped.append((row["name"], f"start source is {source}, not {row['source']}"))
+            continue
         cyc = cycle - timedelta(hours=age) if row["cycle"] == "boco" else cycle
         try:
             era = era_of(row, cyc) if "eras" in row else {}
         except ValueError as e:
-            # a cycle before the row's first archived era (the NAM S3 archive from 2017): skipped, named
+            # a cycle before the row's first archived era (NAM: NODD from 2021-09-16, NCEI grid 218 from 2020-05-18): skipped, named
             skipped.append((row["name"], str(e).replace("fetch-case: ", "")))
             continue
         # an analysis-chain era (chain "analyses") names its files by the boundary cycle and lead like any era, and
@@ -489,6 +663,34 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = 48, workers: int = 16, c
                 log(f"FAILED{'' if futs[fu] else ' (optional)'} {type(e).__name__}: {e}")
     log(f"fetch-case: {len(jobs)} requests in {time.perf_counter() - t0:.0f} s, {bad} required failed, "
         f"{soft} optional failed")
+    return bad
+
+
+def fetch_spinup(cycle: datetime, case_dir: Path, spinup_hours: int, workers: int = 16, cfg=None,
+                 source: str = "gfs", age_h: int | None = None, log=print) -> int:
+    """The inputs a spin-up start (woof-nam run --start spinup, namgpu/spinup.py) reads beyond the cycle's own: the
+    source analysis spinup_hours before the cycle and the boundary leads over that window, from the cycle the
+    forecast takes its boundaries from when it is valid there (GFS age 6 and a 6 h spin-up: the T0-6 cycle, leads
+    0, 3, 6; the forecast reads 6..90 of the same cycle), else the spin-up start cycle. Plus the cycle's own analysis
+    if it is not there yet (the update reads it). Returns the number of failed required requests."""
+    from namgpu import spinup
+    from namgpu.init import sources as srcmod
+    row = srcmod.SOURCES[source]
+    main_age = srcmod.boco_age_h(row, cfg, age_h)
+    s = cycle - timedelta(hours=int(spinup_hours))
+    bad = 0
+    if "fetch" in row:
+        # the row's own fetch entry (ifs, ifs-0p25, era5): its start and boundary leads of the T0-S cycle (age 0)
+        bad += fetch(s, case_dir, int(spinup_hours), workers, cfg, source, None, log)
+        if not (Path(case_dir) / row["file"].format(cyc=cycle.hour)).is_file():
+            bad += fetch(cycle, case_dir, 6, workers, cfg, source, None, log)
+        return bad
+    rows = tuple(r for r in FETCH_ROWS if r["source"] == source and r["role"] in ("init", "boco"))
+    bad += fetch(s, case_dir, int(spinup_hours), workers, cfg, source, spinup.spinup_age(main_age, spinup_hours),
+                 log, rows=rows)
+    if not (Path(case_dir) / row["file"].format(cyc=cycle.hour)).is_file():
+        bad += fetch(cycle, case_dir, 6, workers, cfg, source, main_age, log,
+                     rows=tuple(r for r in rows if r["role"] == "init"))
     return bad
 
 
@@ -631,6 +833,95 @@ def _arco_jobs(name: str, row: dict, cycle: datetime, hours: int, raw: Path, cfg
     return jobs
 
 
+def start_jobs(name: str, cycle: datetime, raw: Path, cfg=None):
+    """Jobs for the f000 start file of SOURCES row `name` only (a start_from row reads it; its boundaries are its own)."""
+    from namgpu.init.sources import SOURCES
+    row = SOURCES[name]
+    if "fetch" in row:
+        if row["fetch"]["kind"] != "ecmwf-jsonl":
+            raise ValueError(f"fetch_case: start_from {name!r}: only an ecmwf-jsonl or the gfs row can be a start")
+        dest = raw.parent / row["file"].format(cyc=cycle.hour)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        jobs = [(_jsonl_lead, row["fetch"], cycle, 0, dest)]
+        for d in row["fetch"].get("donors", []):
+            ddest = raw.parent / d["file"].format(hh=cycle.strftime("%H"))
+            url = d["url"].format(ymd=cycle.strftime("%Y%m%d"), hh=cycle.strftime("%H"))
+            jobs.append((_subset, url, ddest, re.compile(re.escape(d["idx_match"]))))
+        return jobs
+    if name != "gfs":
+        raise ValueError(f"fetch_case: start_from {name!r}: only an ecmwf-jsonl or the gfs row can be a start")
+    # the gfs analysis file, as plan() fetches it for a gfs start (FETCH_ROWS row gfs, role init)
+    jobs, _ = plan(cycle, 0, raw, cfg, "gfs", 0, rows=[r for r in FETCH_ROWS
+                                                         if r["source"] == "gfs" and r["role"] == "init"])
+    out = [(fn, *args[:-1]) for fn, *args in jobs]
+    for _, *args in out:          # plan() leaves the folders to fetch(); a start_from job writes on its own
+        for a in args:
+            if isinstance(a, Path):
+                a.parent.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _whole_lead(fetch: dict, cycle: datetime, lead: int, dest: Path) -> str:
+    """One lead of a "whole-files" fetch: every object of the era, whole, concatenated into dest (the AI forecasts
+    publish no record subsetting: aigfs has no grib filter and its .idx sidecars cover whole small files)."""
+    if dest.exists() and dest.stat().st_size > 0:
+        return f"have {dest.name} {dest.stat().st_size / 1e6:.0f} MB"
+    era = _era(fetch, cycle)
+    errors = []
+    for host in fetch["hosts"]:
+        try:
+            urls = [f"{host}/{_object_path(t, cycle, lead)}" for t in era["files"]]
+            with ThreadPoolExecutor(len(urls)) as ex:
+                parts = list(ex.map(lambda u: _get(u, timeout=600), urls))
+            tmp = dest.with_suffix(".part")
+            with open(tmp, "wb") as f:
+                for b in parts:
+                    f.write(b)
+            tmp.rename(dest)
+            return f"got {dest.name} {len(urls)} files {dest.stat().st_size / 1e6:.0f} MB from {host.split('/')[2]}"
+        except (OSError, urllib.error.URLError, ValueError) as e:
+            errors.append(f"{host.split('/')[2]}: {type(e).__name__} {e}")
+    raise OSError(f"{dest.name}: every host failed: {errors}")
+def _subset_pair(urls: list, dest: Path, pattern: re.Pattern) -> str:
+    """The records of several objects that `pattern` selects (by their .idx), written one after another into one
+    file (GEFS pgrb2a + pgrb2b of one member and lead: a lead's start record set lives in both halves)."""
+    if dest.exists() and dest.stat().st_size > 0:
+        return f"have {dest.parent.name}/{dest.name}"
+    parts = [dest.with_name(f"{dest.name}.half{k}") for k in range(len(urls))]
+    for url, part in zip(urls, parts):
+        _subset(url, part, pattern)
+    tmp = dest.with_suffix(".part")
+    with open(tmp, "wb") as f:
+        for part in parts:
+            f.write(part.read_bytes())
+    tmp.rename(dest)
+    for part in parts:
+        part.unlink()
+    return f"got {dest.parent.name}/{dest.name} {dest.stat().st_size / 1e6:.0f} MB"
+
+
+def _pair_jobs(name: str, row: dict, start: datetime, hours: int, raw: Path, cfg=None):
+    """A lead_start row (gefs): the start's lead of the boundary cycle and every boundary lead after it, for the
+    run's member (sources.source_member)."""
+    from namgpu.domains import bc_hours
+    from namgpu.init import sources as srcmod
+    fetch, b = row["fetch"], row["boundary"]
+    age = srcmod.boco_age_h(row, cfg, start=start)
+    cyc = start - timedelta(hours=age)
+    mem = srcmod.source_member(row, cfg)
+    last = max(s for s, _ in fetch["steps"])
+    if age + hours > last:
+        raise ValueError(f"fetch_case: source {name!r} publishes leads to {last} h; this run needs {age + hours} h")
+    jobs = []
+    for lead in range(age, age + bc_hours(hours) + 1, int(b["interval_h"])):
+        dest = raw.parent / b["file"].format(bcyc=cyc.hour, lead=lead, mem=mem)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        urls = [f"{fetch['host']}/" + f.format(ymd=f"{cyc:%Y%m%d}", hh=f"{cyc:%H}", mem=mem, lead=lead)
+                for f in fetch["files"]]
+        jobs.append((_subset_pair, urls, dest, PATTERNS[fetch["records"]]))
+    return jobs
+
+
 def plan_source(name: str, cycle: datetime, hours: int, raw: Path, cfg=None):
     """Jobs for an init source row with a "fetch" entry: its start and boundary leads plus its donor fields."""
     from namgpu.init.sources import SOURCES
@@ -638,16 +929,30 @@ def plan_source(name: str, cycle: datetime, hours: int, raw: Path, cfg=None):
     fetch = row["fetch"]
     if fetch["kind"] == "arco-zarr":
         return _arco_jobs(name, row, cycle, hours, raw, cfg)
-    if fetch["kind"] != "ecmwf-jsonl":
+    if fetch["kind"] == "ncep-idx-pair":
+        return _pair_jobs(name, row, cycle, hours, raw, cfg)
+    if fetch["kind"] not in ("ecmwf-jsonl", "whole-files"):
         raise ValueError(f"fetch_case: source {name!r} fetch kind {fetch['kind']!r} has no fetcher")
     last = max(s for s, _ in fetch["steps"])
     if hours > last:
-        raise ValueError(f"fetch_case: source {name!r} publishes 3-hourly leads to {last} h, not {hours} h")
+        raise ValueError(f"fetch_case: source {name!r} publishes leads to {last} h, not {hours} h")
     b = row["boundary"]
     jobs = []
+    if row.get("start_from"):
+        # a row whose start is another row's analysis (aifs: the IFS analysis it starts from; aigfs: the GFS
+        # analysis): that row's f000 file, by that row's own fetch route
+        jobs += start_jobs(row["start_from"], cycle, raw, cfg)
+        if row.get("start_fallback"):
+            jobs += start_jobs(row["start_fallback"]["source"], cycle, raw, cfg)
     from namgpu.domains import bc_hours
+    if fetch["kind"] == "whole-files":
+        for lead in range(0, min(bc_hours(hours, int(b["interval_h"])), last) + 1, int(b["interval_h"])):
+            dest = raw.parent / b["file"].format(bcyc=cycle.hour, lead=lead)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            jobs.append((_whole_lead, fetch, cycle, lead, dest))
+        return jobs
     # the boundary times a run of `hours` reads (boco.NNNN every 3 h needs the lead 3 h after it)
-    for lead in range(0, min(bc_hours(hours), last) + 1, int(b["interval_h"])):
+    for lead in range(0, min(bc_hours(hours, int(b["interval_h"])), last) + 1, int(b["interval_h"])):
         dest = raw.parent / b["file"].format(bcyc=cycle.hour, lead=lead)
         dest.parent.mkdir(parents=True, exist_ok=True)
         jobs.append((_jsonl_lead, fetch, cycle, lead, dest))

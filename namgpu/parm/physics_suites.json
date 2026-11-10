@@ -1,0 +1,207 @@
+{
+  "schema": "woof-nam.physics-suites/v1",
+  "default": "nam",
+  "suites": {
+    "nam": {
+      "label": "NAM v4.2.11 physics as NCEP ran it: Ferrier-Aligo, BMJ, MYJ, Janjic surface layer, Noah, NMMB RRTM, GWD",
+      "plan": "base"
+    },
+    "hrrrv5": {
+      "label": "RRFS v2 hrrrv5 suite on the NMMB dycore: TEMPO (aerosol-aware, hail-aware), MYNN-EDMF PBL, MYNN surface layer, RUC LSM (9 levels), RRTMG LW/SW with MYNN cloud fraction, GSL orographic drag, no deep convection; ArWen's GPU schemes through the NMMB column adapter",
+      "source_suite": "RRFSx/MPAS-Model hrrrv5 (mp_tempo, bl_mynnedmf, sf_mynnsfclay, sf_ruc, bl_ugwp_gwdo, rrtmg_lw/sw, cld_fraction_mynn, convection off)",
+      "nmmb": {
+        "microphysics": "tempo",
+        "convection": "none",
+        "spec_adv": true
+      },
+      "arwen_selection": {
+        "mp_physics": 900,
+        "bl_pbl_physics": 5,
+        "sf_sfclay_physics": 5,
+        "sf_surface_physics": 3,
+        "num_soil_layers": 9,
+        "ra_lw_physics": 4,
+        "ra_sw_physics": 4,
+        "ra_rrtmg_variant": "rrtmg_legacy",
+        "gwd_opt": 3,
+        "cu_physics": 0,
+        "icloud_bl": 1
+      },
+      "landuse_dataset": "MODIFIED_IGBP_MODIS_NOAH",
+      "extra_tracers": [
+        "nc",
+        "ng",
+        "volg",
+        "nwfa",
+        "nifa"
+      ],
+      "plan": [
+        [
+          "drv-bucket-reset",
+          "every",
+          {
+            "blocks": "nclod"
+          }
+        ],
+        [
+          "drv-bucket-reset",
+          "every",
+          {
+            "blocks": "post_rdtemp"
+          }
+        ],
+        [
+          "phys-column-suite",
+          "nphs"
+        ],
+        [
+          "drv-halo-exch",
+          "nphs",
+          {
+            "x": "X16"
+          }
+        ],
+        [
+          "drv-halo-exch",
+          "every",
+          {
+            "x": "X21"
+          }
+        ]
+      ],
+      "declared": [
+        "MYNN qke is held per column by the scheme and not advected (RRFS advects it)",
+        "the TDFI digital filter runs adiabatic for this suite (the column physics state is not rewound by the filter)",
+        "GSL drag statistics (large and small scale) come from init_ugwp_oro on this grid (rw_hex_ugwp_oro), as RRFS reads ugwp_oro_data"
+      ]
+    },
+    "rapv5": {
+      "label": "RAP v5 suite on the NMMB dycore (NOAA 13 km): Thompson aerosol-aware (mp28), Grell-Freitas scale-aware deep convection (MYNN-EDMF mass flux carries shallow, ishallow 0 as WRF requires), MYNN-EDMF PBL, MYNN surface layer, RUC LSM (9 levels), RRTMG with MYNN cloud fraction, GSL orographic drag; ArWen GPU schemes through the NMMB column adapter. GF is paired with mp28 because gpuwm refuses GF with TEMPO (no verified cumulus phase-output contract for mp_physics 900)",
+      "source_suite": "RAP v5 (mp_physics 28, cu_physics 3 GF, bl_pbl 5 MYNN-EDMF, sf_sfclay 5, sf_surface 3 RUC, gsl drag)",
+      "nmmb": {
+        "microphysics": "tempo",
+        "convection": "none",
+        "spec_adv": true
+      },
+      "arwen_selection": {
+        "mp_physics": 28,
+        "bl_pbl_physics": 5,
+        "sf_sfclay_physics": 5,
+        "sf_surface_physics": 3,
+        "num_soil_layers": 9,
+        "ra_lw_physics": 4,
+        "ra_sw_physics": 4,
+        "ra_rrtmg_variant": "rrtmg_legacy",
+        "gwd_opt": 3,
+        "cu_physics": 3,
+        "icloud_bl": 1,
+        "ishallow": 0
+      },
+      "landuse_dataset": "MODIFIED_IGBP_MODIS_NOAH",
+      "extra_tracers": [
+        "nc",
+        "ng",
+        "volg",
+        "nwfa",
+        "nifa"
+      ],
+      "plan": [
+        [
+          "drv-bucket-reset",
+          "every",
+          {
+            "blocks": "nclod"
+          }
+        ],
+        [
+          "drv-bucket-reset",
+          "every",
+          {
+            "blocks": "post_rdtemp"
+          }
+        ],
+        [
+          "phys-column-suite",
+          "nphs"
+        ],
+        [
+          "drv-halo-exch",
+          "nphs",
+          {
+            "x": "X16"
+          }
+        ],
+        [
+          "drv-halo-exch",
+          "every",
+          {
+            "x": "X21"
+          }
+        ]
+      ],
+      "declared": [
+        "MYNN qke is held per column by the scheme and not advected (RRFS advects it)",
+        "the TDFI digital filter runs adiabatic for this suite (the column physics state is not rewound by the filter)",
+        "GSL drag statistics (large and small scale) come from init_ugwp_oro on this grid (rw_hex_ugwp_oro), as RRFS reads ugwp_oro_data",
+        "the NMMB tracer table is the TEMPO layout (12 water slots); mp28 uses qv qc qr qi qs qg ni nr nc nwfa nifa of it"
+      ]
+    },
+    "woof-nam-next-12km": {
+      "label": "WOOF-NAM next, 12 km (optional preset, 2026-11-09, winter/CAD priority): NAM 12 km parent grid; NAM's MYJ PBL, NAM surface layer and BMJ convection kept; RUC LSM (9 levels, urban cells on NAM Noah) from HRRR's soil analysis where HRRR covers the grid, the CDF soil start elsewhere; TEMPO microphysics with melting reflectivity; RTE+RRTMGP radiation; NOAA-GSL UGWP drag; GFS start",
+      "decision": "2026-11-09 optional winter/CAD configuration",
+      "domain": "conus12",
+      "plan": "base",
+      "env": {
+        "NAMGPU_LSM": "ruc",
+        "NAMGPU_RUC_HRRR_SOIL": "auto",
+        "NAMGPU_RUC_SOIL_STATIC": "auto",
+        "NAMGPU_SOIL_START": "cdf",
+        "NAMGPU_SOIL_CDF": "auto",
+        "NAMGPU_MP": "tempo",
+        "NAMGPU_TEMPO_REFL_MELT": "1",
+        "NAMGPU_RADIATION": "rrtmgp",
+        "NAMGPU_GWD": "ugwp",
+        "NAMGPU_PHYS_BAND_ROWS": "0",
+        "NAMGPU_RUC_URBAN": "noah"
+      },
+      "declared": [
+        "TEMPO defaults to v3.2.5; version selection follows NAMGPU_TEMPO_VERSION",
+        "NAMGPU_PHYS_BAND_ROWS=0: the RUC seam runs on the whole grid, not in physics bands",
+        "outside HRRR's footprint (most of Canada, Alaska, Mexico) RUC starts from the CDF-matched source soil remapped to 9 levels; the HRRR edge is a hard seam (no blend)",
+        "urban cells (IGBP 13, 31-33) stay on NAM Noah's urban treatment (NAMGPU_RUC_URBAN=noah; wedge lane 2026-11-09)",
+        "dominant precipitation-type products are available in the folded package",
+        "the frozen nam suite stays the default; this optional preset requires the configured soil and column-physics inputs",
+        "BMJ is selected at 12 km"
+      ]
+    },
+    "woof-nam-next-7p6km": {
+      "label": "WOOF-NAM next, 7.6 km (optional preset, 2026-11-09, winter/CAD priority): NAM North America footprint at 7.6 km (na7p6); NAM's MYJ PBL and NAM surface layer kept; New Tiedtke convection with shallow on; RUC LSM (9 levels, urban cells on NAM Noah) from HRRR's soil analysis where HRRR covers the grid, the CDF soil start elsewhere; TEMPO microphysics with melting reflectivity; RTE+RRTMGP radiation; NOAA-GSL UGWP drag; GFS start",
+      "decision": "2026-11-09 optional winter/CAD configuration",
+      "domain": "na7p6",
+      "plan": "base",
+      "env": {
+        "NAMGPU_LSM": "ruc",
+        "NAMGPU_RUC_HRRR_SOIL": "auto",
+        "NAMGPU_RUC_SOIL_STATIC": "auto",
+        "NAMGPU_SOIL_START": "cdf",
+        "NAMGPU_SOIL_CDF": "auto",
+        "NAMGPU_MP": "tempo",
+        "NAMGPU_TEMPO_REFL_MELT": "1",
+        "NAMGPU_RADIATION": "rrtmgp",
+        "NAMGPU_GWD": "ugwp",
+        "NAMGPU_PHYS_BAND_ROWS": "0",
+        "NAMGPU_RUC_URBAN": "noah",
+        "NAMGPU_CONVECTION": "ntiedtke"
+      },
+      "declared": [
+        "TEMPO defaults to v3.2.5; version selection follows NAMGPU_TEMPO_VERSION",
+        "NAMGPU_PHYS_BAND_ROWS=0: the RUC seam runs on the whole grid, not in physics bands",
+        "outside HRRR's footprint (most of Canada, Alaska, Mexico) RUC starts from the CDF-matched source soil remapped to 9 levels; the HRRR edge is a hard seam (no blend)",
+        "urban cells (IGBP 13, 31-33) stay on NAM Noah's urban treatment (NAMGPU_RUC_URBAN=noah; wedge lane 2026-11-09)",
+        "dominant precipitation-type products are available in the folded package",
+        "the frozen nam suite stays the default; this optional preset requires the configured soil and column-physics inputs",
+        "New Tiedtke with shallow convection is selected at 7.6 km; full 7.6 km runtime qualification remains pending"
+      ]
+    }
+  }
+}

@@ -48,6 +48,7 @@ NS19 = 26
 CHK = 8                 # CHNK_RRTM (configure.nems -DCHNK_RRTM=8)
 MAXGAS = 6
 SW_NDAY_KEY = "SW_NDAY"
+KMIN8_KEY = "sw_seam:kmin8"   # per-column CHK-group minimum (sw_seam.window_kmins), batched windows only
 TABLE_FILE = Path(__file__).resolve().parents[2] / "data" / "rrtm_sw" / "kgb19.npz"
 
 _TABLES = None
@@ -83,7 +84,7 @@ def alloc_outputs(nlay: int, ncol: int):
 
 
 def _launch(inp: dict, out: dict, tab: dict, *, ncols: int, nlay: int, lc: int, lk: int,
-            ca: tuple, tg: tuple, cstart: int, ndayp, nday_host: int, stream=None):
+            ca: tuple, tg: tuple, cstart: int, ndayp, nday_host: int, stream=None, kmin_col=None):
     """One launch over ncols columns. ca = (ca_c, ca_k, ca_m) for colamt, tg = (tg_c, tg_k, tg_g) for
     taug and taur, lc/lk the per (column, layer) strides. ndayp is a device int32 array gating the live
     columns (chunk path); when None the first nday_host columns of this launch are live."""
@@ -105,6 +106,7 @@ def _launch(inp: dict, out: dict, tab: dict, *, ncols: int, nlay: int, lc: int, 
         np.int64(ca[0]), np.int64(ca[1]), np.int64(ca[2]),
         np.int64(tg[0]), np.int64(tg[1]), np.int64(tg[2]),
         out["taug"], out["taur"],
+        kmin_col if kmin_col is not None else dummy, np.int32(1 if kmin_col is not None else 0),
     )
     scope = stream if stream is not None else contextlib.nullcontext()
     with scope:
@@ -132,7 +134,11 @@ def run_chunk(ctx, ch: dict, cstart: int, nc: int):
     indself, indfor [nc, nlay] and laytrop [nc] (setcoef outputs). Writes ch taug and taur
     [nc, nlay, NGPTSW] for planes NS19..NS19+7. The chunk path does all its columns in one launch; the
     device SW_NDAY gates the live columns, so the last chunk may run past NDAY."""
-    if cstart % CHK != 0 or nc % CHK != 0:
+    # batched rrtm-call windows: the CHK groups come per column from sw_seam.window_kmins (one SW chunk per batch)
+    kcol = ctx.tables.get(KMIN8_KEY) if getattr(ctx, "tables", None) is not None else None
+    if kcol is not None and cstart != 0:
+        raise ValueError(f"taumol19 chunk: batched windows need one SW chunk per batch (cstart {cstart})")
+    if kcol is None and (cstart % CHK != 0 or nc % CHK != 0):
         raise ValueError(
             f"taumol19 chunk: cstart={cstart} and nc={nc} must be multiples of CHK={CHK}; the Fortran "
             "MINVAL(laytrop) groups are CHK day columns, so another partition gives another minimum")
@@ -147,7 +153,8 @@ def run_chunk(ctx, ch: dict, cstart: int, nc: int):
     stream = getattr(ctx, "stream", None)
     return _launch(ch, ch, load_tables(), ncols=nc, nlay=nlay, lc=nlay, lk=1,
                    ca=(nlay * MAXGAS, MAXGAS, 1), tg=(nlay * NGPTSW, NGPTSW, 1),
-                   cstart=cstart, ndayp=ndayp, nday_host=0, stream=stream)
+                   cstart=cstart, ndayp=ndayp, nday_host=0, stream=stream,
+                   kmin_col=None if kcol is None else kcol[:nc])
 
 
 def _random_tile(nlay: int, ncol: int, rng):

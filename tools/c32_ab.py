@@ -103,11 +103,11 @@ def run(a):
         flat = cp.ascontiguousarray(v).view(cp.uint32 if v.dtype.itemsize == 4 else cp.uint8).ravel()
         d1 = d2 = 0
         for c0 in range(0, flat.size, C):
-            a = flat[c0:c0 + C].astype(cp.uint64)
-            m = a.size
+            words = flat[c0:c0 + C].astype(cp.uint64)
+            m = words.size
             off = cp.uint64(c0)
-            d1 += int(cp.sum(a * (w1b[:m] + off)))
-            d2 += int(cp.sum((a ^ cp.uint64(0xA5A5A5A5)) * (w2b[:m] ^ off)))
+            d1 += int(cp.sum(words * (w1b[:m] + off)))
+            d2 += int(cp.sum((words ^ cp.uint64(0xA5A5A5A5)) * (w2b[:m] ^ off)))
         d1 &= (1 << 64) - 1
         d2 &= (1 << 64) - 1
         nbad = int(v.size - int(cp.isfinite(v).sum())) if v.dtype.kind == "f" else 0

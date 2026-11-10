@@ -69,11 +69,30 @@ class Grid:
     # first column, and the kernel takes (lon - lon0) mod 360 before the non-periodic clamp, so a window
     # across 0/360 or the dateline is placed right. Ignored when lon_periodic is True.
     lon_window: bool = False
+    # A projected regional source (source_grids.RotatedGrid): the target points are turned into the source's own
+    # fractional (row, column) indices first (proj.place), then the same kernel runs on an index grid (lat0 = lon0 =
+    # 0, dlat = dlon = 1, non-periodic, clamped at the edge). Points off the source grid take its edge values here;
+    # the start replaces them with its fallback source (gfs_start.stage, row "fallback").
+    proj: object = None
 
     @property
     def lon_mode(self) -> int:
         """Kernel lon_periodic argument: 1 periodic, 2 window, 0 plain non-periodic."""
         return 1 if self.lon_periodic else (2 if self.lon_window else 0)
+
+    def points(self, glat, glon):
+        """The (glat, glon) the kernel reads for these target points: themselves, or for a projected source the
+        fractional source indices dressed as radians (the kernel converts radians to degrees and reads lat0 + j*dlat).
+        Cached per target array (the H and V point sets are placed once per source grid)."""
+        if self.proj is None:
+            return glat, glon
+        import cupy as cp
+        key = (glat.data.ptr, glon.data.ptr, tuple(glat.shape))
+        cache = self.__dict__.setdefault("_placed", {})
+        if key not in cache:
+            fy, fx = self.proj.place(glat, glon, xp=cp)
+            cache[key] = (cp.radians(fy).astype(cp.float32), cp.radians(fx).astype(cp.float32))
+        return cache[key]
 
     def __post_init__(self):
         if self.lat_order != LAT_ORDER or not (self.dlat > 0.0):
@@ -137,6 +156,7 @@ def interp_strips(src, mask, glat, glon, *, width: int, grid: Grid | dict = GFS_
     if width < 1 or 2 * width > min(im, jm):
         raise ValueError(f"init-gfs-hinterp: width {width} does not fit a {im} x {jm} grid")
 
+    glat, glon = grid.points(glat, glon)
     buf = _buffers(slot, nslab, im, jm, width)
     buf["missing"].fill(0)
     npts = max(width * im, jm * width)
@@ -212,6 +232,7 @@ def interp_full(src, mask, glat, glon, *, grid: Grid | dict = GFS_QUARTER_DEG, s
         raise ValueError(f"init-gfs-hinterp: full-domain mask {mask.shape} {mask.dtype}, want {src.shape} uint8")
     nl, njs, nis = (int(x) for x in src.shape)
     jm, im = (int(x) for x in glat.shape)
+    glat, glon = grid.points(glat, glon)
     out = cp.empty((nl, jm, im), dtype=cp.float32)
     nmiss = cp.zeros((1,), dtype=cp.int32)
     bx, by, _ = FULL_BLOCK

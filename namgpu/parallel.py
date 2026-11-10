@@ -84,6 +84,118 @@ class Comm:
         return int(x.get()[0])
 
 
+class HostComm:
+    """Several ranks on ONE card, for the N-rank referee on a one-card machine: NCCL refuses two ranks on one device
+    ("Duplicate GPU detected"), so every exchange is staged through files in a shared folder (normally /dev/shm).
+    Selected only by NAMGPU_COMM=host; never a product path (each call synchronises the stream and copies through the
+    host, so it is slow). The answers are the same bytes NCCL moves: send/recv buffers are copied whole, reductions
+    are done in the buffer's own dtype in rank order (sum of float values would be order-dependent; the forecast
+    reduces only integer flags and max/min, which are order-free).
+
+    Message files: p<src>-<dst>-<n> for the n-th point-to-point message from src to dst (deleted by the receiver),
+    c<k>-<rank> for this rank's part of the k-th collective (every rank calls the collectives in the same order;
+    removed by its writer two collectives later, when every rank has read it)."""
+
+    def __init__(self, rank: int, nranks: int, idfile, timeout_s: float = 600.0):
+        import collections
+        self.rank, self.nranks = int(rank), int(nranks)
+        self.dir = Path(str(idfile) + ".hostcomm")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.timeout_s = float(timeout_s)
+        self._sent = collections.Counter()
+        self._got = collections.Counter()
+        self._col = 0
+
+    def _put(self, name: str, host) -> None:
+        tmp = self.dir / f".{name}.tmp{self.rank}"
+        host.tofile(tmp)
+        os.replace(tmp, self.dir / name)
+
+    def _get(self, name: str, dtype, unlink: bool):
+        import numpy as np
+        p = self.dir / name
+        t0 = time.time()
+        while not p.exists():
+            if time.time() - t0 > self.timeout_s:
+                raise TimeoutError(f"parallel.HostComm: rank {self.rank} waited {self.timeout_s} s for {p}")
+            time.sleep(0.0002)
+        a = np.fromfile(p, dtype=dtype)
+        if unlink:
+            p.unlink()
+        return a
+
+    def sendrecv(self, pairs, stream):
+        import cupy as cp
+        stream.synchronize()
+        for snd, _rcv, peer in pairs:
+            if snd is not None:
+                k = (self.rank, int(peer))
+                self._put(f"p{k[0]}-{k[1]}-{self._sent[k]}", cp.asnumpy(snd).ravel())
+                self._sent[k] += 1
+        for _snd, rcv, peer in pairs:
+            if rcv is not None:
+                k = (int(peer), self.rank)
+                h = self._get(f"p{k[0]}-{k[1]}-{self._got[k]}", rcv.dtype, True)
+                self._got[k] += 1
+                if h.size != rcv.size:
+                    raise ValueError(f"parallel.HostComm: rank {self.rank} got {h.size} values from {peer}, "
+                                     f"expected {rcv.size}")
+                rcv.set(h.reshape(rcv.shape), stream=stream)
+        stream.synchronize()
+
+    def _gather_all(self, sendbuf, stream):
+        import cupy as cp
+        stream.synchronize()
+        k = self._col
+        self._col += 1
+        self._put(f"c{k}-{self.rank}", cp.asnumpy(sendbuf).ravel())
+        parts = [self._get(f"c{k}-{r}", sendbuf.dtype, False) for r in range(self.nranks)]
+        old = self.dir / f"c{k - 2}-{self.rank}"
+        if k >= 2 and old.exists():
+            old.unlink()
+        return parts
+
+    def allgather(self, sendbuf, recvbuf, stream):
+        import numpy as np
+        parts = self._gather_all(sendbuf, stream)
+        recvbuf.set(np.concatenate(parts).reshape(recvbuf.shape), stream=stream)
+        stream.synchronize()
+
+    def bcast(self, buf, root: int, stream):
+        parts = self._gather_all(buf, stream)
+        buf.set(parts[int(root)].reshape(buf.shape), stream=stream)
+        stream.synchronize()
+
+    def allreduce(self, sendbuf, recvbuf, op: str, stream):
+        import numpy as np
+        parts = self._gather_all(sendbuf, stream)
+        f = {"sum": np.add, "max": np.maximum, "min": np.minimum}[op]
+        acc = parts[0].copy()
+        for p in parts[1:]:
+            acc = f(acc, p).astype(acc.dtype)
+        recvbuf.set(acc.reshape(recvbuf.shape), stream=stream)
+        stream.synchronize()
+
+    def barrier(self, stream) -> int:
+        import cupy as cp
+        with stream:
+            x = cp.ones((1,), dtype=cp.int32)
+            self.allreduce(x, x, "sum", stream)
+        stream.synchronize()
+        return int(x.get()[0])
+
+
+def make_comm(rank: int, nranks: int, idfile):
+    """The communicator for rank `rank` of `nranks`: NCCL (Comm), or HostComm when NAMGPU_COMM=host (several ranks
+    sharing one card, the N-rank referee on a one-card machine)."""
+    kind = os.environ.get("NAMGPU_COMM", "nccl").strip().lower()
+    if kind == "host":
+        return HostComm(rank, nranks, idfile)
+    if kind != "nccl":
+        raise SystemExit(f"NAMGPU_COMM={kind!r}: nccl (default) or host")
+    return Comm(rank, nranks, idfile)
+
+
 def get(ctx):
     """The communicator when more than one card runs, else None (one card: every multi-card step is a no-op)."""
     c = getattr(ctx, "comm", None)

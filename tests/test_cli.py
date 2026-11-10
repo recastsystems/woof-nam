@@ -91,7 +91,9 @@ def test_domains_table():
         for n in domains.names():
             row = domains.get(n)
             assert Path(row["configfile_path"]).is_file(), row
-            assert set(row["sources"]) <= {"native", "gfs"} and row["static"] in domains.table()["static_kinds"]
+            from namgpu.init.sources import SOURCES
+            assert set(row["sources"]) <= {"native"} | set(SOURCES), row
+            assert row["static"] in domains.table()["static_kinds"]
             domains.select(n)
             assert domains.current()["name"] == n
         domains.select("conus4")

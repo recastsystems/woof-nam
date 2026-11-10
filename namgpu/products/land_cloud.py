@@ -401,6 +401,17 @@ def cloud_base(s):
     return np.where(okb, np.float32(0.5) * (zb + zt) / G, np.float32(-5000.0)).astype(np.float32)
 
 
+# ---------------------------------------------------------------------------------------- precipitation type
+# NAM's categorical rain / snow / ice pellets / freezing rain (awphys recs 336-339; hiresf CSNOW/CICEP/CFRZR/CRAIN):
+# 1 where the dominant type (namgpu.products.ptype: four profile algorithms plus the microphysics, majority vote,
+# masked where the last physics step rate is at least a trace, 0.05 mm/h) is that type, else 0. NAMGPU_PTYPE names another method.
+def _ptype_flag(code):
+    def f(s):
+        from namgpu.products import ptype
+        return ptype.flag(s, code)
+    return f
+
+
 # ------------------------------------------------------------------------------------------------ the carrier set
 
 # frame name -> (function of the history Dataset, regrid to grid 218: "nearest" | "bilinear")
@@ -416,6 +427,8 @@ CARRIERS = {
     "NAM_ALBDO": (albdo, "bilinear"), "NAM_SHTFL": (shtfl, "bilinear"), "NAM_LHTFL": (lhtfl, "bilinear"),
     "NAM_TCDC": (tcdc, "bilinear"), "NAM_DSWRF": (dswrf, "bilinear"), "NAM_DLWRF": (dlwrf, "bilinear"),
     "NAM_USWRF": (uswrf, "bilinear"), "NAM_ULWRF": (ulwrf, "bilinear"),
+    "NAM_CRAIN": (_ptype_flag(1), "nearest"), "NAM_CSNOW": (_ptype_flag(2), "nearest"),
+    "NAM_CFRZR": (_ptype_flag(3), "nearest"), "NAM_CICEP": (_ptype_flag(4), "nearest"),
 }
 SOIL = ("NAM_TSOIL", "NAM_SOILW", "NAM_SOILL")
 

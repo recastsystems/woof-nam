@@ -598,7 +598,18 @@ L450:
 
 L600:
     (void)iswap; (void)deep; (void)cup;
+#ifdef BMJ_NO_SHALLOW
+    // Mass-flux PBL pairing rule (MYNN-EDMF owns shallow cumulus; RAP/HRRR run GF with ishallow off beside it):
+    // a shallow (or deep-swapped-to-shallow) column gets the no-convection exit, as the quick exit above.
+    if (shallow) {
+        lbot = 0;
+        ltop = lm;
+        cldefi = BMJ_AVGEFI * sm + BMJ_STEFI * (1.f - sm);
+    }
+    goto Lreturn;
+#else
     if (!shallow) goto Lreturn;
+#endif
     for (l = 1; l <= lmh; ++l) {
         pk[l] = prsmid(l);
         tk[l] = t(l);

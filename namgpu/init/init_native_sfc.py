@@ -90,12 +90,24 @@ def urban_soilw(soilw, vgtyp, sotyp, land, wlt=None, smax=None):
     return xp.ascontiguousarray(xp.where(urban, mapped, soilw).astype(xp.float32)), int(urban.sum())
 
 
-def soilw_for_source(raw, source, wlt=None, smax=None):
+def soilw_for_source(raw, source, wlt=None, smax=None, ctx=None):
     """The soil moisture init-native-sfc starts from: the source's own, with urban_soilw applied when the source's
-    land state is not NMMB Noah's own (OWN_LAND_SOURCES). Returns (array, urban points changed or None)."""
+    land state is not NMMB Noah's own (OWN_LAND_SOURCES). With ctx, the soil-start row (soil_start.py,
+    NAMGPU_SOIL_START: source | cdf | hrrr) is applied first; points a row already put in NMMB Noah's own range
+    (the CDF match to the NAM climatology) skip the urban remap. Returns (array, urban points changed or None)."""
     if source is None or source in OWN_LAND_SOURCES:
         return raw["SOILW"], None
-    return urban_soilw(raw["SOILW"], raw["VGTYP"], raw["SOTYP"], raw["LAND"], wlt, smax)
+    soilw, keep = raw["SOILW"], None
+    if ctx is not None:
+        from namgpu.init import soil_start
+        soilw, keep = soil_start.apply(ctx, raw, source)
+    out, n = urban_soilw(soilw, raw["VGTYP"], raw["SOTYP"], raw["LAND"], wlt, smax)
+    if keep is not None:
+        import cupy as cp
+        urban = (cp.asarray(raw["VGTYP"]) == URBAN_IW) & (cp.asarray(raw["LAND"]) > 0.5)
+        out = cp.ascontiguousarray(cp.where(keep[None], soilw, out).astype(cp.float32))
+        n = int((urban & ~keep).sum())
+    return out, n
 
 
 def _check_raw(raw, im, jm):
@@ -135,7 +147,7 @@ def run(ctx):
         snowc_arr, has_snowc = cp.zeros((jm, im), dtype=cp.float32), 0
     has_snowc_d = cp.asarray([has_snowc], dtype=cp.int32)
     source = (ctx.tables.get("grid_source") or {}).get("source")
-    soilw, n_urban = soilw_for_source(raw, source)
+    soilw, n_urban = soilw_for_source(raw, source, ctx=ctx)
     if n_urban is not None:
         print(f"{UNIT}: {source} soil moisture on {n_urban} urban land points mapped onto the NAM urban range "
               f"{URBAN_SMCWLT}-{URBAN_SMCMAX} (relative wetness of the soil class kept)", flush=True)

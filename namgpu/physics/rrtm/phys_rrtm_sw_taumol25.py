@@ -76,7 +76,7 @@ def alloc_outputs(nlay: int, jm: int, im: int, nplanes: int = NG25):
     }
 
 
-def taumol25(inp: dict, out: dict, tab: dict, kmin_buf, stream=None):
+def taumol25(inp: dict, out: dict, tab: dict, kmin_buf, stream=None, kmin_col=None):
     """One launch over every (i, j) column. inp/out/tab hold device arrays in CONTRACT layout.
     out taug/taur are [NG25, nlay, JM, IM]; plane p is Fortran g-point NS25+1+p."""
     import cupy as cp
@@ -85,7 +85,9 @@ def taumol25(inp: dict, out: dict, tab: dict, kmin_buf, stream=None):
     if out["taug"].shape[0] != NG25 or out["taur"].shape != out["taug"].shape:
         raise ValueError(f"taumol25: taug/taur must have {NG25} planes, got {out['taug'].shape}")
     # MINVAL(laytrop) as a device int32 scalar, written into a preallocated buffer (no host sync).
-    kmin_buf[...] = cp.min(inp["laytrop"]).astype(cp.int32).reshape(1)
+    # kmin_col: per-column window minimum ([JM*IM] int32, sw_seam.window_kmins) when rrtm-call batches windows
+    if kmin_col is None:
+        kmin_buf[...] = cp.min(inp["laytrop"]).astype(cp.int32).reshape(1)
     kern = kernels.get(UNIT, KERNEL)
     scope = stream if stream is not None else contextlib.nullcontext()
     with scope:
@@ -93,10 +95,11 @@ def taumol25(inp: dict, out: dict, tab: dict, kmin_buf, stream=None):
             inp["colamt"], inp["colmol"],
             inp["fac00"], inp["fac01"], inp["fac10"], inp["fac11"],
             inp["laytrop"], inp["jp"], inp["jt"], inp["jt1"],
-            kmin_buf,
+            kmin_buf if kmin_col is None else kmin_col,
             tab["absa"], tab["abso3a"], tab["abso3b"], tab["rayl"],
             np.int32(nlay), np.int32(im), np.int32(jm),
             out["taug"], out["taur"],
+            np.int32(0 if kmin_col is None else 1),
         ))
     return out
 

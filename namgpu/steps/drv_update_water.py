@@ -22,7 +22,7 @@ import contextlib
 
 import numpy as np
 
-from namgpu import kernels
+from namgpu import kernels, slab
 from namgpu.steps.drv_tracer_index import host_index
 
 UNIT = "drv_update_water"
@@ -51,7 +51,8 @@ def run(ctx, ntimestep: int | None = None, spec_adv: bool | None = None,
     im, jm, lm = int(g.im), int(g.jm), int(g.lm)
 
     mp = str(cfg.microphysics if microphysics is None else microphysics).strip()
-    mode = MODES.get(mp, 0)
+    from namgpu.steps.drv_tracer_index import family
+    mode = MODES.get(family(mp), 0)
 
     nts = int(ctx.ntimestep if ntimestep is None else ntimestep)
     cld_init = 1 if nts <= 1 else 0
@@ -77,6 +78,7 @@ def run(ctx, ntimestep: int | None = None, spec_adv: bool | None = None,
         np.int32(im), np.int32(jm), np.int32(lm),
         np.int32(mode), np.int32(cld_init), np.int32(1 if spec_adv else 0),
         cw, f_ice, f_rain, f_rimef, t, qc, qr, qs, qi, qg,
+        np.int32(int(cfg.lnsh) if (spec_adv and mode == 1) else 0), *slab.kargs(ctx),
     )
     scope = ctx.stream if ctx.stream is not None else contextlib.nullcontext()
     with scope:

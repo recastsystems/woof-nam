@@ -85,6 +85,18 @@ ISUBCSW = 0           # physparam.f:165
 IPSDSW0 = 1           # radsw_main_nmmb.f:349
 ISWRATE = 2           # physparam.f:49 (heating rate in k/s)
 NC_DEFAULT = 32768    # day columns per chunk (one SW chunk per 32-row rrtm-call chunk; 4096 left spcvrtc launch-bound)
+# rrtm-call hands each SW call its day-column count, counted on the host once per radiation call for every row
+# (rrtm_call.day_rows: one read per call instead of one per row window), and, when it batches row windows, the
+# batch geometry (sw_seam.window_kmins). Both are ctx.tables entries of the chunk context.
+NDAY_KEY = "rrtm_call:nday"
+NDAY_CHECK_KEY = "rrtm_call:nday_check"
+BATCH_KEY = "rrtm_call:batch"
+
+
+def sw_nc(n: int, batched: bool, nc: int = NC_DEFAULT) -> int:
+    """SW chunk width for a row chunk of n columns: batched windows run as ONE SW chunk (the window groups of
+    sw_seam.window_kmins are formed over the whole batch day list), so nc covers every column."""
+    return max(nc, -(-n // 8) * 8) if batched else nc
 
 # ctx.st / ctx.tables names for the swrad inputs. The grrad names are NMMB/grrad names; the ones marked
 # UNVERIFIED are the names this unit expects and must match the producers (phys-rrtm-grrad-setup,
@@ -297,6 +309,10 @@ def run(ctx, has_htrswb: bool = False, nc: int = NC_DEFAULT):
     inp["faersw"] = ctx.tables[FAERSW_TABLE]
     idxday = st["SW_IDXDAY"]
     ndayp = st["SW_NDAY"]
+    tabs = ctx.tables if getattr(ctx, "tables", None) is not None else {}
+    batched = tabs.get(BATCH_KEY) is not None
+    nc = sw_nc(n, batched, nc)
+    host_nday = tabs.get(NDAY_KEY)
 
     out = {
         "HTSWC": st.add("HTSWC", (nlay, jm, im)),
@@ -321,7 +337,15 @@ def run(ctx, has_htrswb: bool = False, nc: int = NC_DEFAULT):
         heatfac = _heatfac()
         # Day columns only: one host read of the device day count per SW call (the Fortran NDAY). Chunks
         # are multiples of CHK = 8 columns (taumol19's MINVAL tiles); n = JM*IM is one too for 8-row chunks.
-        nday = int(ndayp.get()[0])
+        if host_nday is None:
+            nday = int(ndayp.get()[0])
+        else:
+            # counted by rrtm-call from the same DAYPARTS cosine and day mask, once per call for every row; the
+            # device count is compared on the device and the mismatch flag is read at the next call's host sync
+            nday = int(host_nday)
+            chk = tabs.get(NDAY_CHECK_KEY)
+            if chk is not None:
+                chk += (ndayp != np.int32(nday)).astype(cp.int32)
         # 32 GB fit: allocate the chunk scratch at the size the chunk uses. It was first allocated for
         # nc = 32768 columns and then again for ncur whenever ncur != nc, and with 8-row rrtm-call chunks (at
         # most 7,632 day columns) that is every call: ~4 GiB of 32768-column blocks (0.9 GB per 112-g-point
@@ -339,7 +363,11 @@ def run(ctx, has_htrswb: bool = False, nc: int = NC_DEFAULT):
         sc = None if _fit else chunk_scratch(cp, nc, nlay, nlp1)
         for cstart in range(0, nday, nc):
             ncur = min(nc, nday - cstart)
-            ncur = min(-(-ncur // 8) * 8, n - cstart)
+            ncur = -(-ncur // 8) * 8
+            if not batched:
+                ncur = min(ncur, n - cstart)
+            # batched: ncur may pass n by < 8 dead columns (n need not be a multiple of 8); the scratch holds
+            # sw_ncap(n, nc) = roundup8(n) columns and every kernel that reads SW_IDXDAY is gated on SW_NDAY
             if _fit and (sc is None or ncur != nc):
                 if full is None:
                     # carved from the chunk's shared g-point workspace when rrtm-call made one; every view

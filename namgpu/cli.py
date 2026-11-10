@@ -29,8 +29,14 @@ COMMANDS = {
     "nest": ("namgpu.nest.cli",
              "run a 3, 4, 5 or 12 km domain anywhere on Earth from GFS, IFS or a WOOF-NAM parent: static, "
              "start, boundaries, forecast, maps and sheets in one command"),
+    "suite": ("namgpu.suite.cli",
+              "one cycle of the WOOF-NAM suite: the 12 km parent and the CONUS, Alaska, Hawaii, Puerto Rico and "
+              "fire-weather nests NCEP ran beside it, with their GRIB2 files, on every card of one machine"),
     "run": ("namgpu.run_forecast",
             "run one forecast: hourly history, maps and a timing receipt"),
+    "ensemble": ("namgpu.ensemble",
+                 "run a named member roster (parm/ensembles/*.json): one forecast per member, its physics keys, "
+                 "source member and soil factor, over one or more cards"),
     "maps": ("namgpu.io.maps",
              "draw maps from history files"),
     "columns": ("namgpu.io.columns",
@@ -39,9 +45,17 @@ COMMANDS = {
                      "draw MRMS | WOOF-NAM | archived NAM panels, then compose comparison sheets"),
     "products": ("namgpu.io.products",
                  "write the hourly NAM product files (nam.tHHz.awphysFF.tm00.grib2 on grid 218) from a run's history"),
+    "inventory": ("namgpu.products.inventory",
+                  "account for every archived NAM record and level, and check existing GRIB2 message bytes"),
     "fetch-bridges": ("namgpu.exporter",
                       "download the GRIB2 writer `woof-nam products` uses (rw_rrfs_upp), checked against this "
                       "release's SHA-256 pin"),
+    "score": ("namgpu.io.namscore",
+              "score runs against observations (ASOS T2/Td2/wind, MRMS reflectivity FSS, Stage IV 6 h QPE, the archived NAM) "
+              "and draw obs | control | run sheets, one command"),
+    "fetch-soil-cdf": ("namgpu.init.soil_cdf_fetch",
+                       "download the monthly soil-moisture CDF tables the CDF soil start (NAMGPU_SOIL_START=cdf) reads, "
+                       "checked against this release's SHA-256 pins"),
     "compare": ("namgpu.io.hist_compare",
                 "check that two runs wrote the same history, bit for bit (e.g. 1 card against N cards)"),
     "doctor": ("namgpu.doctor",
@@ -140,6 +154,11 @@ def main(argv=None) -> int:
         if rest[0] == "sheets":
             mod_name, rest = "namgpu.io.io_referee_sheets", rest[1:]
             cmd = "side-by-side sheets"
+    if cmd in ("nest", "suite", "ensemble") and not any(x in ("-h", "--help") for x in rest):
+        # TEMPO or MYNN v6.1 asked for through the environment: one line now if gpuwm-hex is missing, not a traceback
+        # at the physics start after the fetch and the start (`woof-nam run` checks its --physics-suite itself)
+        from namgpu import hexdep
+        hexdep.require(prog=f"woof-nam {cmd}")
     if cmd == "nest":
         rest = ["nest", *rest]                # namgpu.nest.cli parses the subcommand itself (tools/woof-nam nest)
     sys.argv[0] = f"woof-nam {cmd}"          # the command's name in its usage lines

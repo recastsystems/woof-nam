@@ -113,7 +113,8 @@ def run(ctx, inputs=None, *, ntoz: int | None = None, icwp: int | None = None,
     cucld = CUCLD_FORTRAN if cucld is None else bool(cucld)
     if microphysics is None:
         microphysics = cfg.microphysics
-    f_ni = str(microphysics).strip() == "thompson"       # F_NI
+    from namgpu.steps.drv_tracer_index import family
+    f_ni = family(microphysics) == "thompson"            # F_NI
     indx_cw = 4 if f_ni else 3                           # INDX_CW (line 457-459)
 
     p8w = _take(ctx, inputs, "PINT")

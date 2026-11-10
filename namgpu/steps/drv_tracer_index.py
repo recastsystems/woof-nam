@@ -40,8 +40,24 @@ MICROPHYSICS_WATER = {
     "fer_hires": dict(nw=4, qc=1, qi=0, qr=2, qs=3, qg=4, ni=0, nr=0),
     "wsm6":     dict(nw=5, qc=1, qi=4, qr=2, qs=3, qg=5, ni=0, nr=0),
     "thompson": dict(nw=7, qc=1, qi=2, qr=3, qs=4, qg=5, ni=6, nr=7),
+    # TEMPO (hrrrv5 suite, NAM modernisation): Thompson's seven slots, then nc ng volg nwfa nifa (8-12);
+    # namgpu/physics/suite_column.py EXTRA_SLOT reads 8-12.
+    "tempo":    dict(nw=12, qc=1, qi=2, qr=3, qs=4, qg=5, ni=6, nr=7),
     "gfs":      dict(nw=2, qc=1, qi=2, qr=0, qs=0, qg=0, ni=0, nr=0),
+    # modernise/mp-thompson-p3: ArWen schemes on the NMMB thompson branch (GSMDRIVE CASE thompson,
+    # UPDATE_WATER thompson, RRTM F_NI), with their extra prognostic tracers after the seven Thompson slots.
+    "thompson_aero": dict(nw=10, qc=1, qi=2, qr=3, qs=4, qg=5, ni=6, nr=7),   # + NC NWFA NIFA (mp 28)
+    "p3":       dict(nw=8, qc=1, qi=2, qr=3, qs=0, qg=0, ni=4, nr=5),          # + QIR QIB NC (P3 one-category)
 }
+# Extra water slots (P_x positions past the seven the kernel knows), host-side only.
+EXTRA_WATER = {"thompson_aero": {"NC": 8, "NWFA": 9, "NIFA": 10}, "p3": {"QIR": 6, "QIB": 7, "NC": 8}}
+# NMMB branch each scheme runs on (every microphysics-dependent NMMB unit keys on the family).
+FAMILY = {"thompson_aero": "thompson", "p3": "thompson"}
+
+
+def family(microphysics) -> str:
+    k = str(microphysics).strip()
+    return FAMILY.get(k, k)
 NUM_TRACERS_MET = 3       # module_SOLVER_INTERNAL_STATE.F90:943
 INDX_Q, INDX_CW, INDX_Q2 = 1, 2, 3   # module_SOLVER_INTERNAL_STATE.F90:1382,1391,1400; VARS_STATE:797
 SLOT_NAMES = ("INDX_Q", "INDX_CW", "INDX_Q2", "INDX_QC", "INDX_QI", "INDX_QR", "INDX_QS",
@@ -70,6 +86,8 @@ def host_index(microphysics: str, num_tracers_chem: int) -> dict:
                     ("INDX_QS", w["qs"]), ("INDX_QG", w["qg"]), ("INDX_NI", w["ni"]),
                     ("INDX_NR", w["nr"])):
         out[name] = (wstart - 1 + p) if p > 0 else 0
+    for name, p in EXTRA_WATER.get(microphysics.rstrip(), {}).items():
+        out[f"INDX_{name}"] = wstart - 1 + p
     return out
 
 

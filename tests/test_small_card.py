@@ -4,7 +4,7 @@
 2. the door's memory estimate was ~2.5 GiB above the measured peak on that card;
 3. `woof-nam run` had no memory check (12 km on 8 GB: a raw OutOfMemoryError);
 4. `--source era5` had no row in the nest door's FETCH table;
-5. `woof-nam products` on a nest history: IndexError on every hour;
+5. `woof-nam products` on a nest history: IndexError on every hour (now NOAA's nest files, hiresf);
 6. no `woof-nam doctor`; a case folder not named YYYY-MM-DD_HHz gave a strptime traceback; the receipt's VRAM read
    0.0 GiB in a container whose PID namespace hides the card's process ids.
 """
@@ -145,17 +145,28 @@ def _history(path: Path, nx: int, ny: int):
         d.createDimension("south_north", ny)
 
 
-def test_products_refuses_a_nest_history(tmp_path, capsys, monkeypatch):
+def test_products_writes_a_nest_with_the_nest_set(tmp_path, capsys, monkeypatch):
+    """0.1.3 refused a nest's history in one line; NOAA's nest files (hiresf) are now written for it. The run picks
+    awphys for the 12 km CONUS parent and a nest set for a nest, and a writer too old for the nest profile (no
+    two-field U/V messages, no off-domain bitmap) is refused in one line before any hour is read."""
+    import os
+    import stat
+    from namgpu import exporter
     from namgpu.io import products
     monkeypatch.delenv("NAMGPU_CONFIGFILE", raising=False)
     _history(tmp_path / "nest" / "wrfout_d01_2025-03-14_12:00:00", 328, 330)
     _history(tmp_path / "c12" / "wrfout_d01_2025-03-14_12:00:00", 954, 835)
-    assert products.grid_refusal(tmp_path / "c12") is None
-    why = products.grid_refusal(tmp_path / "nest")
-    assert why and "328 x 330" in why and "12 km CONUS" in why, why
-    assert products.main(["--run", str(tmp_path / "nest")]) == 2
+    assert products.detect_set(tmp_path / "c12") == "awphys"
+    assert products.detect_set(tmp_path / "nest") == "hiresf"
+    old = tmp_path / "rw_rrfs_upp"
+    old.write_text("#!/bin/sh\nexit 1\n")                     # a writer build from before the nest features
+    old.chmod(old.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("WOOF_NAM_RW_RRFS_UPP", str(old))
+    assert exporter.capabilities(old) == set()
+    assert products.main(["--run", str(tmp_path / "nest"), "--set", "conusnest"]) == 2
     err = capsys.readouterr().err.strip().splitlines()
-    assert len(err) == 1 and err[0].startswith("woof-nam products: refused:"), err
+    assert len(err) == 1 and "pair_next" in err[0] and "conusnest" in err[0], err
+    assert os.environ["WOOF_NAM_RW_RRFS_UPP"] == str(old)
 
 
 # ---- 6. doctor, case folder name, container VRAM sampling

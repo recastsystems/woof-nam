@@ -16,9 +16,18 @@ NAM retirement"):
           without an account from Google's public ARCO-ERA5 store by gpuwm's own ERA5 route (gpuwm.era5_arco, Rust
           Zarr bridge) and decoded by gpuwm's regular-forcing NetCDF reader (source_records container
           "regular-netcdf").
-  hrrr, rrfs  table rows for the same isobaric path. They are refused by name today: their files are
-          on Lambert-conformal grids (GRIB2 GDT 30) and init-grib2-decode places only GDT 0 and 32769
-          (a Lambert grid read as lat-lon puts every point in the wrong cell). Not done.
+  rap     NOAA's RAP analysis (13 km, radar-cycled, North America, wrfprsf00 on RAP's rotated lat-lon grid), the same
+          isobaric path with the source's own condensate and TKE (a warm start), GFS boundaries, and the same cycle's
+          GFS analysis outside RAP's grid and above its 50 hPa top (row "fallback"); soil from RAP's RUC nodes or, with
+          --soil-from gfs, from GFS. Grid placement: source_grids.py; records: source_records RAP.
+  hrrr    NOAA's HRRR analysis (3 km CONUS, radar-cycled, wrfprsf00 on HRRR's Lambert conformal grid), the rap row's
+          path: own condensate, GFS outside HRRR's CONUS grid and above 50 hPa, GFS boundaries, HRRR RUC soil or GFS.
+  rrfs    NOAA's RRFS v1 analysis (3 km, radar-cycled), the hrrr row's path; atmosphere from prslev, surface and RUC
+          soil from 2dfld. Public archive (noaa-rrfs-ops-pds) from 2026-08-12.
+  aifs    ECMWF AIFS Single (CC BY 4.0): the IFS open-data analysis it starts from (ifs-0p25) as the start, AIFS
+          leads every 6 h as the boundaries (start_from + boundary records). From 2025-03-14 12Z.
+  aigfs   NOAA AIGFS (NOMADS, the last 10 days only): the GFS analysis it starts from as the start, AIGFS leads every
+          6 h as the boundaries, surface pressure and 2 m humidity derived from the isobaric profile.
 Adding a source is a row in SOURCES (file pattern, kind, grid), never a new code path.
 
 Entry: stage(ctx) is what the chain stage init-grib2-decode runs when it is called with no file
@@ -163,12 +172,112 @@ SOURCES = {
                    "lat_margin_deg": 2.0,
                    # gpuwm Rust Zarr readers at once (one per boundary time, ~1.5 GB of host memory each on the NAM band)
                    "max_parallel": 4}},
+    # GEFS v12 members (NCEP, public domain), 0.5 deg pgrb2a + pgrb2b: one file per member and lead holds the
+    # selected records of both halves (fetch kind "ncep-idx-pair", GFS_INIT_VARS by .idx byte ranges). The records
+    # carry the GFS dcp numbers, so the record table is GFS's (RH on 26 levels sets the level set; GEFS has no
+    # ICMR/RWMR/SNMR, those slots stay 0). lead_start: the start may be a forecast lead of the boundary cycle,
+    # so a start 3 h after a GEFS cycle (the SREF cycles 03/09/15/21Z) reads that cycle's f003 as its start and
+    # f003, f006, ... as boundaries; age is start.hour mod 6 unless set (boco_age_h). Members: c00 (control) and
+    # p01-p30, from the configfile key source_member or NAMGPU_SOURCE_MEMBER (woof-nam fetch/run --member).
+    "gefs":   {"kind": "isobaric", "file": "raw/gefs/{mem}/gefs.t{bcyc:02d}z.f{lead:03d}.grib2", "gdt": 0,
+               "grid": "gefs_0p5", "records": "gfs_0p25", "valid_from": "2020-09-23T12", "lead_start": True,
+               "cycle_step_h": 6, "member_default": "c00", "members": ["c00"] + [f"p{k:02d}" for k in range(1, 31)],
+               "boundary": {"interval_h": 3, "file": "raw/gefs/{mem}/gefs.t{bcyc:02d}z.f{lead:03d}.grib2"},
+               "attribution": "NOAA/NCEP GEFS v12 (public domain)",
+               "licence": "public-domain (US government work, AWS NODD noaa-gefs-pds)",
+               "fetch": {"kind": "ncep-idx-pair", "host": "https://noaa-gefs-pds.s3.amazonaws.com",
+                         "files": ["gefs.{ymd}/{hh}/atmos/pgrb2ap5/ge{mem}.t{hh}z.pgrb2a.0p50.f{lead:03d}",
+                                   "gefs.{ymd}/{hh}/atmos/pgrb2bp5/ge{mem}.t{hh}z.pgrb2b.0p50.f{lead:03d}"],
+                         "records": "gfs_init", "steps": [[240, 3], [384, 6]]}},
+    # NOAA's RAP analysis (13 km, North America, hourly, cycled with radar reflectivity): the wrfprsf00 file on RAP's own
+    # rotated lat-lon grid (NCEP template 3.32769, source_grids.py), the same isobaric path (records: source_records
+    # RAP). RAP's grid stops about 17 NAM columns short of the NAM 12 km grid's west and east edges and its isobaric
+    # levels stop at 50 hPa (the NAM top is 2 hPa), so the row names a global fallback: the same cycle's GFS analysis
+    # gives the start outside RAP's grid, above 50 hPa (blended over 50-70 hPa and 8 RAP cells at its edge) and, with
+    # --soil-from gfs, the soil. Boundaries: none of its own, so GFS's (boco_age_h 6 as the operational NAM), like the
+    # native start: a RAP start differs from a GFS start only in the start.
+    "rap":    {"kind": "isobaric", "file": "raw/rap/rap.t{cyc:02d}z.wrfprsf00.grib2", "gdt": 32769, "grid": "rap_rotated",
+               "records": "rap", "valid_from": "2021-02-22T12",
+               "fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
+               "soil_from": ("source", "gfs", "gfs-moisture"),
+               "attribution": "NOAA/NCEP Rapid Refresh (RAP) analysis (public domain)",
+               "licence": "public-domain (US government work, AWS NODD noaa-rap-pds)"},
+    # NOAA's HRRR analysis (3 km CONUS, hourly, cycled with radar reflectivity): wrfprsf00 on HRRR's Lambert conformal
+    # grid (template 3.30, source_grids.LambertGrid), the RAP row's isobaric path and fallback (records: source_records
+    # HRRR). HRRR covers CONUS only, so on the NAM 12 km grid the start is HRRR over CONUS and the same cycle's GFS
+    # analysis outside it and above 50 hPa (blended over 8 HRRR cells = 24 km and 20 hPa), with GFS boundaries 6 h
+    # older, as the native and rap starts. Soil: HRRR's nine RUC nodes at Noah's layer midpoints, or GFS's.
     "hrrr":   {"kind": "isobaric", "file": "raw/hrrr/hrrr.t{cyc:02d}z.wrfprsf00.grib2", "gdt": 30,
-               "grid": "hrrr_lambert", "attribution": "NOAA/NCEP HRRR (public domain)",
+               "grid": "hrrr_lambert", "records": "hrrr",
+               # AWS NODD noaa-hrrr-bdp-pds holds wrfprsf00 from 2014-07-30 18Z; the record table is HRRR v4's
+               # (2020-12-02 on), measured on 2026-01-23 12Z. An older file missing a record is refused at decode.
+               "valid_from": "2014-07-30T18",
+               "fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
+               "soil_from": ("source", "gfs", "gfs-moisture"),
+               # default gfs-moisture (HRRR soil temperature, GFS soil moisture): 2026-01-23 12Z, 12 h, frozen NAM physics,
+               # CONUS ASOS MAE at +6/+12 h: T2 2.5/3.0 F (own RUC soil 2.5/2.9, GFS soil 3.4/3.9, control 3.4/3.7), Td2
+               # 3.8/4.7 F (own RUC soil 4.1/5.2: RUC moisture read at Noah depths is too dry). --soil-from source keeps it.
+               "soil_default": "gfs-moisture",
+               "attribution": "NOAA/NCEP High-Resolution Rapid Refresh (HRRR) analysis (public domain)",
                "licence": "public-domain (US government work, AWS NODD noaa-hrrr-bdp-pds)"},
-    "rrfs":   {"kind": "isobaric", "file": "raw/rrfs/rrfs.t{cyc:02d}z.prslev.f000.conus.grib2",
-               "gdt": 30, "grid": "rrfs_lambert", "attribution": "NOAA/NCEP RRFS (public domain)",
-               "licence": "public-domain (US government work, AWS NODD noaa-rrfs-pds)"},
+    # NOAA's RRFS v1 analysis (FV3 LAM, 3 km, radar-cycled): the CONUS cut on HRRR's Lambert grid, atmosphere in
+    # prslev, surface and RUC soil in 2dfld (source_records RRFS, sfc_file_from), the hrrr row's fallback and GFS
+    # boundaries. Public archive noaa-rrfs-ops-pds from 2026-08-12 (no earlier cycles there), f000 at every 3 h cycle.
+    "rrfs":   {"kind": "isobaric", "file": "raw/rrfs/rrfs.t{cyc:02d}z.prslev.3km.f000.conus.grib2", "gdt": 30,
+               "grid": "rrfs_lambert", "records": "rrfs", "valid_from": "2026-08-12T00",
+               "fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
+               "soil_from": ("source", "gfs", "gfs-moisture"),
+               "attribution": "NOAA/NCEP Rapid Refresh Forecast System (RRFS v1) analysis (public domain)",
+               "licence": "public-domain (US government work, AWS NODD noaa-rrfs-ops-pds)"},
+    # ECMWF AIFS Single (the machine-learned forecast ECMWF runs operationally, open data CC BY 4.0): route
+    # copied from gpuwm authorities/rw-wps-fetch-routes.v1.json "aifs" (aifs-single 0p25 oper, steps 0-360 h every 6 h,
+    # 00/06/12/18Z). The .index of 2026-01-23 12Z (measured 2026-11-08): pl q t u v w z on 13 levels 1000-50 hPa (z is
+    # geopotential, not gh), sfc sp z(step 0) skt 2t 2d 10u 10v lsm msl, sol sot/vsw on 2 of IFS's 4 layers, no snow
+    # depth, no sea ice. AIFS starts from the IFS analysis, so the start is that analysis (start_from ifs-0p25: all
+    # four soil layers, snow, the GFS sea-ice donor) and the boundaries are AIFS leads every 6 h (tboco 21600 s).
+    # start_fallback: IFS open data stops at 50 hPa and the NAM top is 2 hPa; extrapolated, the start was up to 35 K
+    # too cold at 7.6 hPa (min 149 K against the GFS start's 184 K, 2026-11-09), so above 50 hPa (blended over
+    # 20 hPa) the start is the same cycle's GFS analysis, as the rap/hrrr rows. Horizontally the IFS covers everything.
+    "aifs":   {"kind": "isobaric", "start_from": "ifs-0p25",
+               "start_fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
+               "file": "raw/aifs/aifs.t{cyc:02d}z.0p25.f000.grib2",
+               "gdt": 0, "grid": "ifs_0p25", "records": "aifs", "valid_from": "2025-03-14T12",
+               "boundary": {"age_h": 0, "interval_h": 6, "records": "aifs",
+                            "file": "raw/aifs/aifs.t{bcyc:02d}z.0p25.f{lead:03d}.grib2"},
+               "attribution": "ECMWF AIFS Single open data (CC BY 4.0); start: ECMWF IFS open data analysis",
+               "licence": "CC-BY-4.0",
+               "fetch": {
+                   "kind": "ecmwf-jsonl", "route": "gpuwm rw-wps-fetch-routes.v1.json aifs",
+                   "hosts": ["https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
+                             "https://data.ecmwf.int/forecasts"],
+                   "eras": [{"from": "2025-03-14T12", "until": None, "cycles": [0, 6, 12, 18],
+                             "files": ["{ymd}/{hh}z/aifs-single/0p25/oper/{ymd}{hh}0000-{lead}h-oper-fc.grib2"]}],
+                   "steps": [[360, 6]],
+                   "publication_lag_h": {"0": 8.0, "6": 8.0, "12": 8.0, "18": 8.0},
+                   "select": [{"levtype": "pl", "param": ["z", "q", "t", "u", "v"]},
+                              {"levtype": "sfc", "param": ["10u", "10v", "2d", "2t", "lsm", "skt", "sp", "z"]}],
+                   "f000_only": [{"levtype": "sfc", "param": ["z"]}]}},
+    # NOAA AIGFS v1.1 (NCEP's operational GraphCast-based forecast, US government work): route copied from gpuwm
+    # rw-wps-fetch-routes.v1.json "aigfs": NOMADS only (the S3 graphcastgfs bucket's same-named files are the
+    # experimental EAGLE stream, a different product), 10-day rolling window, pres + sfc files every 6 h to 384 h,
+    # whole files (no grib filter). Records (.idx of 2026-11-08 00Z): HGT TMP SPFH UGRD VGRD VVEL on 13 levels
+    # 1000-50 hPa; surface only 2 m T, 10 m winds and MSLP. AIGFS starts from NCEP's analysis, so the start is the
+    # same cycle's GFS analysis (start_from gfs) and the boundaries are AIGFS leads every 6 h, their surface pressure
+    # and 2 m humidity derived from the isobaric profile at the model terrain (source_records AIGFS).
+    "aigfs":  {"kind": "isobaric", "start_from": "gfs", "file": "raw/aigfs/aigfs.t{cyc:02d}z.f000.grib2", "gdt": 0,
+               "grid": "gfs_0p25", "records": "aigfs", "valid_from": "2025-12-01T00", "retention_h": 240,
+               "boundary": {"age_h": 0, "interval_h": 6, "records": "aigfs",
+                            "file": "raw/aigfs/aigfs.t{bcyc:02d}z.f{lead:03d}.grib2"},
+               "attribution": "NOAA/NCEP AIGFS (public domain); start: NOAA/NCEP GFS analysis",
+               "licence": "public-domain (US government work, NOAA NOMADS)",
+               "fetch": {
+                   "kind": "whole-files", "route": "gpuwm rw-wps-fetch-routes.v1.json aigfs",
+                   "hosts": ["https://nomads.ncep.noaa.gov/pub/data/nccf/com/aigfs/prod"],
+                   "eras": [{"from": "2025-12-01T00", "until": None, "cycles": [0, 6, 12, 18],
+                             "files": ["aigfs.{ymd}/{hh}/model/atmos/grib2/aigfs.t{hh}z.pres.f{lead:03d}.grib2",
+                                       "aigfs.{ymd}/{hh}/model/atmos/grib2/aigfs.t{hh}z.sfc.f{lead:03d}.grib2"]}],
+                   "steps": [[384, 6]],
+                   "publication_lag_h": {"0": 6.0, "6": 6.0, "12": 6.0, "18": 6.0}}},
     # One-way nest from our own WOOF-NAM history (offline, like WRF ndown): the parent run directory comes from
     # --parent-run / configfile parent_run / NAMGPU_PARENT_RUN; the run must have written the hand-off set
     # (configfile history_handoff: true). Start: parent_start.py; boundaries: parent_bocos.py.
@@ -269,24 +378,61 @@ def source_row(ctx) -> tuple[str, dict]:
     return name, SOURCES[name]
 
 
-def boco_age_h(row: dict, cfg=None, override=None) -> int:
+def boco_age_h(row: dict, cfg=None, override=None, start=None) -> int:
     """Hours between the start and the cycle the boundaries come from, for one SOURCES row. First set
-    wins: override (a CLI value), NAMGPU_BOCO_AGE_H, configfile key boco_age_h, the row's boco_age_h."""
+    wins: override (a CLI value), NAMGPU_BOCO_AGE_H, configfile key boco_age_h, the row's boco_age_h.
+    A lead_start row (gefs) takes start.hour mod cycle_step_h when nothing is set (the start is that lead of
+    the newest cycle at or before it), and any set age must land on one of its cycles."""
     import os
+    step = int(row.get("cycle_step_h", 6))
     for v in (override, os.environ.get("NAMGPU_BOCO_AGE_H"),
               (cfg.raw.get("boco_age_h") if cfg is not None else None), row.get("boco_age_h"),
               (row.get("boundary") or {}).get("age_h")):
         if v is not None and str(v).strip() != "":
             h = int(v)
+            if row.get("lead_start"):
+                if h < 0 or (start is not None and (start.hour - h) % step):
+                    raise ValueError(f"{UNIT}: boundary age {h} h from a {start:%HZ} start is not a {step}-hourly "
+                                     "cycle of this source")
+                return h
             if h < 0 or h % 6:
                 raise ValueError(f"{UNIT}: boundary age {h} h: must be a non-negative multiple of 6 (GFS and IFS cycles)")
             return h
+    if row.get("lead_start"):
+        if start is None:
+            raise ValueError(f"{UNIT}: a lead_start source needs the start time to find its cycle")
+        return int(start.hour) % step
     raise ValueError(f"{UNIT}: source row has no boco_age_h")
 
 
+def source_member(row: dict, cfg=None) -> str:
+    """The source member a row with members reads (gefs: c00, p01-p30): NAMGPU_SOURCE_MEMBER, else the
+    configfile key source_member, else the row's member_default. '' for a row without members."""
+    import os
+    if not row.get("members"):
+        return ""
+    v = os.environ.get("NAMGPU_SOURCE_MEMBER") or (cfg.raw.get("source_member") if cfg is not None else None) \
+        or row.get("member_default")
+    v = str(v).strip()
+    if v not in row["members"]:
+        raise ValueError(f"{UNIT}: source member {v!r} is not one of this source's members "
+                         f"({row['members'][0]} .. {row['members'][-1]})")
+    return v
+
+
+def file_keys(row: dict, start, cfg=None) -> dict:
+    """The template keys of a row's file names for a run starting at `start`: cyc (start hour), bcyc (the
+    boundary cycle's hour), lead (the start's lead in that cycle: 0 unless the row is lead_start) and mem."""
+    from datetime import timedelta
+    if start is None:
+        return {"cyc": 0, "bcyc": 0, "lead": 0, "mem": source_member(row, cfg)}
+    age = boco_age_h(row, cfg, start=start) if row.get("lead_start") else 0
+    return {"cyc": int(start.hour), "bcyc": int((start - timedelta(hours=age)).hour), "lead": age,
+            "mem": source_member(row, cfg)}
+
+
 def source_path(ctx, row) -> Path:
-    cyc = int(ctx.start.hour) if ctx.start is not None else 0
-    return Path(ctx.case_dir) / row["file"].format(cyc=cyc)
+    return Path(ctx.case_dir) / row["file"].format(**file_keys(row, ctx.start, getattr(ctx, "cfg", None)))
 
 
 def soil_hydraulics():
@@ -325,22 +471,38 @@ def _selsfc(spec):
                     return False
             except ValueError:
                 return False
-        return str(r["pdt"]) in ("0", "-")
+        # instantaneous records: template 4.0, or 4.1 (one member of an ensemble: GEFS writes every record so)
+        return str(r["pdt"]) in ("0", "1", "-")
     return sel
 
 
 def stage(ctx):
     name, row = source_row(ctx)
+    if row.get("start_from"):
+        # aifs / aigfs: the start is the analysis the AI forecast itself starts from (another row, staged as that
+        # row's own start), the boundaries are the AI forecast's leads (gfs_bocos.boundary_row reads this row)
+        sname = row["start_from"]
+        from namgpu.init import gfs_start
+        gfs_start.check_valid(ctx, name, row)
+        srow = dict(SOURCES[sname])
+        if row.get("start_fallback"):
+            srow["fallback"] = row["start_fallback"]
+        info = gfs_start.stage(ctx, sname, srow)
+        info.update(start_from=sname, boundaries_from=name, boundary_attribution=row.get("attribution"),
+                    boundary_licence=row.get("licence"))
+        print(f"{UNIT}: {name}: start from the {sname} analysis, boundaries from {name} leads every "
+              f"{row['boundary']['interval_h']} h", flush=True)
+        return info
     if row["kind"] == "nam_native":
         return stage_native(ctx, row)
     if row["kind"] == "nam_history":
         from namgpu.init import parent_start
         return parent_start.stage(ctx, name, row)
-    if row["gdt"] not in (0, 32769):
+    if row["gdt"] not in (0, 32769, 30):
         raise NotImplementedError(
             f"{UNIT}: source {name!r} is on GRIB2 GDT {row['gdt']} (Lambert conformal); init-grib2-decode "
-            "places only GDT 0 and 32769, so its fields would land in the wrong cells. Not done: a Lambert "
-            "source interpolation for init-gfs-hinterp.")
+            "places only GDT 0 and 32769 (source_grids.py: rotated lat-lon), so its fields would land in the wrong "
+            "cells. Not done: a Lambert source grid in source_grids.py.")
     from namgpu.init import gfs_start
     return gfs_start.stage(ctx, name, row)
 

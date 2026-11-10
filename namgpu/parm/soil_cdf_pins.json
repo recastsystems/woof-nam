@@ -1,0 +1,57 @@
+{
+ "schema": "woof-nam.soil-cdf-pins/v1",
+ "repo": "recastsystems/woof-nam",
+ "release": "v0.2.0",
+ "built": "tools/soil_start recipe: GFS and NAM soil analyses at 12Z every 3 days, +/-30 days around the 15th, 2021-2025; 201,742 NAM 12 km land points",
+ "licence": "public-domain inputs (NOAA GFS and NAM archives)",
+ "files": {
+  "cdf-01.npz": {
+   "bytes": 268457294,
+   "sha256": "5de6240e58d432565e446b7b98ae6609c10220dd968f27ca3905d0602ba8ca60"
+  },
+  "cdf-02.npz": {
+   "bytes": 268457294,
+   "sha256": "83d5f6ec2a1d1c7a6b05bcfe0856d6c8feee7424d738b1408bca66c5f9df0060"
+  },
+  "cdf-03.npz": {
+   "bytes": 268457294,
+   "sha256": "780029dab3437ed63ca7a31e942dd614cec6701d116fc0743cb568e4c8a92fba"
+  },
+  "cdf-04.npz": {
+   "bytes": 268457294,
+   "sha256": "9ac774f32bb59f6fd0fadadbc031031b5ecc2adeba75d788069aa71e074f4eb2"
+  },
+  "cdf-05.npz": {
+   "bytes": 268457294,
+   "sha256": "9977accf3a1ac7a13e752ea69874331ec8ed2ec89f9498fb12c57be190f63a11"
+  },
+  "cdf-06.npz": {
+   "bytes": 268457294,
+   "sha256": "9528ddb1551140e15a0d33c1f1f2132196dac14a2aab1f1be4eec175d081e3bd"
+  },
+  "cdf-07.npz": {
+   "bytes": 268457294,
+   "sha256": "0e4e6a1f502910d59b6dd6a776b16846293c85b2f4d64a901f8f6df79f30e694"
+  },
+  "cdf-08.npz": {
+   "bytes": 268457294,
+   "sha256": "25e4c6ac7473a8d3f1bc69c465edf8e067e9e3e7f7fcc6aa6bac1fd8aad31a82"
+  },
+  "cdf-09.npz": {
+   "bytes": 268457694,
+   "sha256": "18967f86c1c642afbeacb2f6fbdcb0552769bbd5db9cf8404ea235300acf3daf"
+  },
+  "cdf-10.npz": {
+   "bytes": 268458098,
+   "sha256": "d1cfbfb4e948922bef9cc97a197cc2ada8558af99af21d8ae347c637a623b508"
+  },
+  "cdf-11.npz": {
+   "bytes": 268458138,
+   "sha256": "fb50c192c2385f7788149bea28886935bba29457812139885ce2dde3018272e9"
+  },
+  "cdf-12.npz": {
+   "bytes": 268458138,
+   "sha256": "274b673d43c377be9ca15273dd5d32637d9df1590493ca4a75a490bd5da8d2ec"
+  }
+ }
+}

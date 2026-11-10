@@ -215,7 +215,8 @@ def run(ctx, *, dt: float | None = None, nrads: int | None = None, nradl: int | 
     oper = bool(_raw(cfg, "oper") if oper is None else oper)
     cucld = bool(cfg.raw.get("cucld", False) if cucld is None else cucld)
     if f_ni is None:
-        f_ni = str(cfg.microphysics).lower() == "thompson"
+        from namgpu.steps.drv_tracer_index import family
+        f_ni = family(str(cfg.microphysics).lower()) == "thompson"
     if jdat is None:
         jdat = ctx.tables.get("JDAT")
         if jdat is None:

@@ -57,6 +57,7 @@ MP_FLAGS = {
 
 _RRTM_UNIT = "namgpu.physics.rrtm.rrtm_call"   # the whole RRTM chain (prep .. grrad .. post)
 _RADUPDATE_UNIT = "namgpu.physics.rrtm.phys_rrtm_radupdate"
+_RRTMGP_UNIT = "namgpu.physics.rrtmgp.rrtmgp_call"   # shortwave/longwave rrtmgp (selectable; NAM default rrtm)
 
 
 def _device_vector(ctx, key: str, host):
@@ -191,9 +192,26 @@ def _run(ctx, *, radupdate=None, rrtm_call=None, mype: int = 0) -> None:
     g = ctx.grid
     im, jm, lm = int(g.im), int(g.jm), int(g.lm)
 
+    from namgpu.physics.rrtmg_wrf import rrtmg_wrf as _rrtmg_wrf
+    if _rrtmg_wrf.selected(cfg):
+        # rad-rrtmg (modernisation, opt-in): WRF RRTMG LW/SW + icloud=1 cloud fraction. Same cadence and the
+        # same per-step zeroing as the NMMB path; NMMB's radupdate (GFS-RRTM gases/solar) is not used, the
+        # WRF adapter computes its own solar constant and declination.
+        nts = int(ctx.ntimestep_rad)
+        kern = kernels.get(UNIT, KERNEL)
+        scope = ctx.stream if ctx.stream is not None else contextlib.nullcontext()
+        clock_jdat(ctx)
+        with scope:
+            kern(kernels.grid_cols(im, jm), kernels.BLOCK_COL,
+                 (np.int32(im), np.int32(jm), np.int32(lm),
+                  st["CLDFRA"], st["CFRACH"], st["CFRACL"], st["CFRACM"], st["CZMEAN"], st["SIGT4"]))
+            if nts == 1 or nts % int(cfg.nrads) == 0:
+                _rrtmg_wrf.run(ctx, lw_step=(nts % int(cfg.nradl) == 0 or nts == 1))
+        return None
     sw = str(cfg.shortwave).strip()
     lw = str(cfg.longwave).strip()
-    if sw != "rrtm" or lw != "rrtm":
+    use_rrtmgp = sw == "rrtmgp" and lw == "rrtmgp"
+    if (sw != "rrtm" or lw != "rrtm") and not use_rrtmgp:
         raise NotImplementedError(
             "phys-rad-driver runs shortwave=rrtm longwave=rrtm (parm/nam_configfile); "
             f"got shortwave={sw!r} longwave={lw!r}; the gfdl/dudh/gsfc branches are not ported")
@@ -202,7 +220,8 @@ def _run(ctx, *, radupdate=None, rrtm_call=None, mype: int = 0) -> None:
         raise NotImplementedError(
             f"phys-rad-driver: cldfraction={cldf!r} needs cal_cldfra3 (module_mp_thompson), "
             "not ported; parm/nam_configfile selects 'default'")
-    mp = str(cfg.microphysics).strip()
+    from namgpu.steps.drv_tracer_index import family
+    mp = family(cfg.microphysics)
     if mp not in MP_FLAGS:
         raise NotImplementedError(f"phys-rad-driver: no flag table for microphysics {mp!r}")
     flags = MP_FLAGS[mp]
@@ -216,9 +235,13 @@ def _run(ctx, *, radupdate=None, rrtm_call=None, mype: int = 0) -> None:
     scope = ctx.stream if ctx.stream is not None else contextlib.nullcontext()
     jdat = clock_jdat(ctx)
 
+    # rrtmgp: a call with neither spectrum due keeps the held outputs (no zeroing, no call); see rrtmgp_call.
+    rrtmgp_idle = use_rrtmgp and not (nts % nrads == 0 or nts % int(cfg.nradl) == 0)
+
     # 1. Zeroing of the radiation outputs, every step (Fortran 308-327, before radupdate at 391-397).
     kern = kernels.get(UNIT, KERNEL)
-    with scope:
+    with (contextlib.nullcontext() if rrtmgp_idle else scope):
+      if not rrtmgp_idle:
         kern(kernels.grid_cols(im, jm), kernels.BLOCK_COL,
              (np.int32(im), np.int32(jm), np.int32(lm),
               st["CLDFRA"], st["CFRACH"], st["CFRACL"], st["CFRACM"], st["CZMEAN"], st["SIGT4"]))
@@ -230,5 +253,10 @@ def _run(ctx, *, radupdate=None, rrtm_call=None, mype: int = 0) -> None:
 
     # 3. Radiation step (ITIMESTEP == 1 or MOD(ITIMESTEP, NRAD) == 0): default cloud branch, RRTM.
     if nts == 1 or nts % nrad == 0:
-        call = _hook(rrtm_call, _RRTM_UNIT, "the RRTM driver call unit")
+        if use_rrtmgp and rrtm_call is None:
+            if rrtmgp_idle:
+                return
+            call = _hook(None, _RRTMGP_UNIT, "the RRTMGP call unit")
+        else:
+            call = _hook(rrtm_call, _RRTM_UNIT, "the RRTM driver call unit")
         call(ctx, _rrtm_args(ctx, st, jdat, nts, dt, flags, solcon, mype))

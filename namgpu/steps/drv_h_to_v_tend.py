@@ -53,8 +53,8 @@ def run(ctx, branch: str = "nphs"):
         if cfg.convection == "sas":
             raise NotImplementedError("drv-h-to-v-tend: convection=sas wind tendency is not "
                                       "ported (module_SOLVER_GRID_COMP.F90:5813-5830).")
-        if cfg.convection != "bmj":
-            return      # Fortran wind block is not entered for other convection schemes
+        if cfg.convection not in ("bmj", "gf", "ntiedtke"):
+            return      # Fortran wind block is not entered for other convection schemes (gf, ntiedtke: WOOF-NAM options)
         nsteps = int(cfg.nprecip)
     else:
         nsteps = int(cfg.nphs)

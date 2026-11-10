@@ -1,0 +1,70 @@
+{
+ "schema": "woof-nam-suite.v1",
+ "about": "The WOOF-NAM suite: the NAM 12 km parent and the five nests NCEP ran beside it (nam.v4.2.11 scripts/exnam_fcst.sh, tm00 branch), as data. `woof-nam suite` (namgpu/suite) reads this table; a new nest or another card layout is a row here, never code. Sources: NAM v4.2.11 parm/nam_configfile_* (dimensions, steps, radiation, blending rows), parm/nam_namelist.nps_* (centres), ush/nam_prdgen_nest.sh (product grids), and NOAA's last cycle 2026-11-03 06Z (file names, record counts). has the citations.",
+ "cycles": [0, 6, 12, 18],
+ "prefix": "woof-nam",
+ "parent": {
+  "domain": "12km",
+  "title": "NAM 12 km parent (954 x 835 x 60)",
+  "row": "conus12-suite",
+  "configfile": "nam_configfile_suite12",
+  "hours": 84,
+  "source": "gfs",
+  "hour_file": "{prefix}.t{HH}z.awphys{FF}.tm00.grib2",
+  "hour_regex": "^(?P<prefix>[a-z0-9.-]+)[.]t(?P<HH>[0-9]{2})z[.]awphys(?P<FF>[0-9]{2,3})[.]tm00[.]grib2$",
+  "product_grid": {"template": "lambert", "ncep_grid": 218, "nx": 614, "ny": 428, "dx_m": 12191, "la1": 12.19, "lo1": 226.541, "lov": 265.0, "latin1": 25.0, "latin2": 25.0, "earth_shape": 6},
+  "packing": "complex"
+ },
+ "nests": {
+  "conusnest": {
+   "title": "CONUS 3 km",
+   "res_km": 3, "im": 1827, "jm": 1467, "center": [38.61676, -98.87040], "hours": 60,
+   "ncep": {"configfile": "nam_configfile_conusnest", "i_parent_start": 295, "j_parent_start": 95, "ratio": 4, "dt": "6+1/4", "nrads": 192, "lnsh": 5},
+   "product_grid": {"wgrib2": "lambert:262.5:38.5:38.5 237.280:1799:3000 21.138:1059:3000", "template": "lambert", "nx": 1799, "ny": 1059, "dx_m": 3000, "la1": 21.138, "lo1": 237.28, "lov": 262.5, "latin1": 38.5, "latin2": 38.5, "earth_shape": 6},
+   "packing": "complex", "writers": 4, "records_f00": 794, "records_fNN": 810
+  },
+  "alaskanest": {
+   "title": "Alaska 3 km",
+   "res_km": 3, "im": 1189, "jm": 1249, "center": [59.80179, -157.29422], "hours": 60,
+   "ncep": {"configfile": "nam_configfile_alaskanest", "i_parent_start": 139, "j_parent_start": 398, "ratio": 4, "dt": "6+1/4", "nrads": 192, "lnsh": 5},
+   "product_grid": {"wgrib2": "nps:210:60 181.429:1649:2976 40.530:1105:2976", "template": "polar_stereographic", "nx": 1649, "ny": 1105, "dx_m": 2976, "la1": 40.53, "lo1": 181.429, "lov": 210.0, "lad": 60.0, "earth_shape": 6},
+   "packing": "complex", "writers": 3, "records_f00": 793, "records_fNN": 805
+  },
+  "hawaiinest": {
+   "title": "Hawaii 3 km",
+   "res_km": 3, "im": 373, "jm": 561, "center": [20.91, -157.22], "hours": 60,
+   "ncep": {"configfile": "nam_configfile_hawaiinest", "i_parent_start": 42, "j_parent_start": 207, "ratio": 4, "dt": "6+1/4", "nrads": 192, "lnsh": 5},
+   "product_grid": {"wgrib2": "mercator:20 198.475:321:2500:206.131 18.073:225:2500:23.088", "template": "mercator", "nx": 321, "ny": 225, "dx_m": 2500, "la1": 18.073, "lo1": 198.475, "la2": 23.088, "lo2": 206.131, "lad": 20.0, "earth_shape": 6},
+   "packing": "complex", "noaa_packing": "jpeg2000", "writers": 2, "records_f00": 793, "records_fNN": 805
+  },
+  "priconest": {
+   "title": "Puerto Rico 3 km",
+   "res_km": 3, "im": 401, "jm": 325, "center": [18.55, -68.958], "hours": 60,
+   "ncep": {"configfile": "nam_configfile_priconest", "i_parent_start": 738, "j_parent_start": 145, "ratio": 4, "dt": "6+1/4", "nrads": 192, "lnsh": 5},
+   "product_grid": {"wgrib2": "mercator:20 284.5:544:2500:297.491 15.0:310:2500:22.005", "template": "mercator", "nx": 544, "ny": 310, "dx_m": 2500, "la1": 15.0, "lo1": 284.5, "la2": 22.005, "lo2": 297.491, "lad": 20.0, "earth_shape": 6},
+   "packing": "complex", "noaa_packing": "jpeg2000", "writers": 2, "records_f00": 793, "records_fNN": 805
+  },
+  "firewxnest": {
+   "title": "Fire weather 1.5 km",
+   "res_km": 1.5, "im": 333, "jm": 333, "center_from": "nam_firewx_loc", "hours": 36,
+   "ncep": {"configfile": "nam_configfile_firewxnest_conus", "ratio": 2, "parent": "conusnest or alaskanest", "dt": "2+1/12", "nrads": 288, "lnsh": 3},
+   "product_grid": {"computed": "nam_firewx_gridspecs: the bounding box of the nest's corners on the 1.27 km CONUS Lambert master (4289 x 2753, La1 20.192, Lo1 -121.554, LoV -95, Latin 25) or the 1.488 km Alaska polar-stereographic master (3297 x 2209, La1 40.530, Lo1 -178.571, LoV -150, 100 points of padding)"},
+   "packing": "complex", "noaa_packing": "jpeg2000", "writers": 2, "records_f00": 793, "records_fNN": 805,
+   "side_file": "{prefix}.t{HH}z.firewxnest_center_latlon"
+  }
+ },
+ "nest_hour_file": "{prefix}.t{HH}z.{nest}.hiresf{FF}.tm00.grib2",
+ "nest_hour_regex": "^(?P<prefix>[a-z0-9.-]+)[.]t(?P<HH>[0-9]{2})z[.](?P<nest>[a-z]+nest)[.]hiresf(?P<FF>[0-9]{2})[.]tm00[.]grib2$",
+ "declared": [
+  "Every nest is one-way from our own 12 km parent history (boundaries every 3 h), started after the parent has written the nest's hours; NCEP ran the nests one-way concurrent inside one executable, boundaries every parent step.",
+  "The fire-weather nest takes its start and boundaries from the 12 km parent (space ratio 8); NCEP's was a ratio-2 child of the CONUS (or Alaska) 3 km nest. The point, size, spacing and length are NCEP's.",
+  "Each nest sits on its own rotated pole at NCEP's centre with NCEP's point counts and spacing (woof-nam nest); NCEP's nests share the parent's pole."
+ ],
+ "layouts": {
+  "_doc": "card -> domains, by the box's card count. A domain on several cards runs `woof-nam nest --cards N`; domains listed on one card share it (each checks its memory before it starts and waits for room). The parent (12km) runs on one card: its hand-off set is one-card only (io_history_fields.handoff_fields). On 8 cards the three small nests share card 7 (measured peaks 16.2, 13.4 and 12.5 GiB of the 96) and the parent keeps card 0 to itself: with the fire-weather nest on card 0 from the parent's hour 36 the parent went from 272 to about 380 ms/step, and every 3 km nest waits for the parent's hour 60 (proof cycle 2026-11-03 06Z). On 4 cards the CONUS nest runs on all four (4 x RTX PRO 6000, 2026-11-10: 63-68 s per forecast hour, 18.3-18.6 GiB per rank in the step loop, 59.4 GiB on card 0 during its init-save; on cards 1-2 alone it was estimated at 110-145 s per hour). The other nests go where the CONUS rank leaves about 67 GiB free, and none on card 0: card 0 also holds the parent and the CONUS GRIB2 follower, and every CONUS rank waits on the slowest one (hours 4-6 ran 4-32 % slower when the follower shared card 0 with rank 0).",
+  "8": {"12km": ["0"], "conusnest": ["1", "2", "3", "4"], "alaskanest": ["5", "6"], "hawaiinest": ["7"], "priconest": ["7"], "firewxnest": ["7"]},
+  "4": {"12km": ["0"], "conusnest": ["0", "1", "2", "3"], "alaskanest": ["3"], "hawaiinest": ["1"], "priconest": ["2"], "firewxnest": ["2"]},
+  "2": {"12km": ["0"], "conusnest": ["1"], "alaskanest": ["0"], "hawaiinest": ["1"], "priconest": ["1"], "firewxnest": ["0"]},
+  "1": {"12km": ["0"], "conusnest": ["0"], "alaskanest": ["0"], "hawaiinest": ["0"], "priconest": ["0"], "firewxnest": ["0"]}
+ }
+}

@@ -50,7 +50,7 @@ def _nam_cycle_exists(cycle: datetime) -> bool:
 
 def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: int = DEFAULT_WORKERS,
           gfs_only: bool = False, source: str | None = None, cfg=None, age_h: int | None = None,
-          inputs_only: bool = False) -> int:
+          inputs_only: bool = False, spinup_hours: int = 0) -> int:
     """Fetch every input of one case for the configured domain (fetch_case.FETCH_ROWS). Returns the number of
     failed required requests (0 = complete).
     hours: the forecast length. The boundaries cover exactly what a run of that length reads (domains.bc_hours:
@@ -59,9 +59,20 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: 
     source with its own fetch entry (sources.SOURCES: ifs, ifs-0p25): its start and boundary leads, its donor
     fields and MRMS. gfs_only: no NAM rows (any cycle, including after the NAM's 2026-11-03 retirement).
     inputs_only: only the rows a forecast reads (roles init and boco): no referee or truth files (MRMS, the
-    archived NAM forecast and native surface files), which only the side-by-side comparison uses."""
-    if source and source not in ("gfs", "native"):
-        return _fetch_source(cycle, Path(case_dir), hours, workers, source)
+    archived NAM forecast and native surface files), which only the side-by-side comparison uses.
+    spinup_hours: also the inputs of woof-nam run --start spinup --spinup-hours N (fetch_case.fetch_spinup: the
+    analysis N hours before the cycle and the boundaries over that window), for the start source (gfs when
+    source is native or unset)."""
+    if spinup_hours:
+        spin_src = source if source and source != "native" else "gfs"
+        sbad = fetch_case.fetch_spinup(cycle, Path(case_dir), int(spinup_hours), workers, cfg=cfg, source=spin_src,
+                                       age_h=age_h, log=lambda m: print(m, flush=True))
+        print(f"{UNIT}: spin-up inputs ({spinup_hours} h before the cycle, {spin_src}): {sbad} failed", flush=True)
+    else:
+        sbad = 0
+    if source and source not in ("gfs", "native") and not any(r["source"] == source for r in fetch_case.FETCH_ROWS):
+        # a row with its own fetch entry (ifs, era5); a source with FETCH_ROWS rows (rap) is planned below
+        return _fetch_source(cycle, Path(case_dir), hours, workers, source) + sbad
     import json
     import time
     t0 = time.perf_counter()
@@ -85,8 +96,9 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: 
     (Path(case_dir) / "fetch-receipt.json").write_text(json.dumps(
         {"cycle": f"{cycle:%Y%m%d%H}", "hours": hours, "source": source, "gfs_only": gfs_only,
          "inputs_only": inputs_only, "rows": [r["name"] for r in rows], "failed": bad, "seconds": secs,
-         "raw_bytes": nbytes, "parallelism": f"{workers} threads (I/O)"}, indent=1))
-    return bad
+         "raw_bytes": nbytes, "parallelism": f"{workers} threads (I/O)"}
+        | ({"spinup_hours": int(spinup_hours), "spinup_failed": sbad} if spinup_hours else {}), indent=1))
+    return bad + sbad
 
 
 def _fetch_source(cycle: datetime, case_dir: Path, hours: int, workers: int, source: str) -> int:
@@ -163,13 +175,22 @@ def main(argv=None) -> int:
                          "ago, from Google's public ARCO-ERA5 copy, no account); CC BY 4.0")
     ap.add_argument("--config", type=Path, default=None,
                     help="domain configfile (default NAMGPU_CONFIGFILE, else the NAM 12 km grid)")
+    ap.add_argument("--member", default=None,
+                    help="the source member, for a source with members (gefs: c00 control, p01-p30); default the "
+                         "configfile key source_member, else the control. Sets NAMGPU_SOURCE_MEMBER for the run")
     ap.add_argument("--boco-age", type=int, default=None,
                     help="boundary cycle age in hours (default: the source row's, 6 h as operational NAM)")
+    ap.add_argument("--spinup-hours", type=int, default=0,
+                    help="also fetch what woof-nam run --start spinup --spinup-hours N reads: the analysis N hours "
+                         "before the cycle and the boundaries over that window (default 0: none; woof-nam run "
+                         "--start spinup fetches them itself when they are missing)")
     a = ap.parse_args(argv)
+    if getattr(a, "member", None):
+        __import__("os").environ["NAMGPU_SOURCE_MEMBER"] = str(a.member)
     from namgpu import config
     cfg = config.load(a.config) if a.config else config.load()
     bad = fetch(datetime.strptime(a.cycle, "%Y%m%d%H"), Path(a.case_dir), a.hours, a.workers, a.gfs_only, a.source,
-                cfg=cfg, age_h=a.boco_age, inputs_only=a.inputs_only)
+                cfg=cfg, age_h=a.boco_age, inputs_only=a.inputs_only, spinup_hours=a.spinup_hours)
     return 1 if bad else 0
 
 

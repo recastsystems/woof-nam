@@ -1,0 +1,30 @@
+{
+ "schema": "woof-nam.helper-pins/v1",
+ "repo": "recastsystems/woof-nam",
+ "release": "v0.2.0",
+ "built": "Rust 1.94.0 in quay.io/pypa/manylinux_2_28_x86_64@sha256:c2261579b9c2e5d45aa93312f73e2a302182e3e977b558581a1838d6fed3d8e6, offline and locked: rw_asos and rw_stage4 from gpuwm 5c948bead2ae47a278caf08ff55c0473c66e2021 (crate rw-obs); rw_hex_ugwp_oro from this repository's tools/ugwp-oro",
+ "licence": "Apache-2.0 (gpuwm; tools/ugwp-oro)",
+ "helpers": {
+  "rw_asos": {
+   "linux-x86_64": {
+    "asset": "rw_asos-linux-x86_64",
+    "bytes": 3854392,
+    "sha256": "f3e75c5b4060a6f6c26b115ee28f5b79f79e19d9ef92270c340dfa8e344a22af"
+   }
+  },
+  "rw_stage4": {
+   "linux-x86_64": {
+    "asset": "rw_stage4-linux-x86_64",
+    "bytes": 4129008,
+    "sha256": "6d5486fbe247c8be7d85227ec8ac1a20ce98004d41545dd3af685743a061e35c"
+   }
+  },
+  "rw_hex_ugwp_oro": {
+   "linux-x86_64": {
+    "asset": "rw_hex_ugwp_oro-linux-x86_64",
+    "bytes": 921016,
+    "sha256": "4e44975a4408da5e8c90f9f17e19d79973ce75964f80251165be06422e520a40"
+   }
+  }
+ }
+}

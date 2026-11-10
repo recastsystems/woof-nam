@@ -78,8 +78,11 @@ def test_convective_and_reflectivity_records_are_mapped():
     # 0.2.15/0.2.16 at 0-6000 m in NAM's awphys are the vertical shear (VUCSH/VVCSH), not storm motion
     assert (by["355"]["dcp"], by["355"]["level"], by["355"]["level2"]) == ("0.2.15", "103:0", "103:6000")
     # records the port cannot produce honestly stay unmapped, with the reason in the note
-    for rec in ("334", "336", "337", "338", "339", "392"):
+    for rec in ("334", "392"):
         assert by[rec]["source"] in ("", "-") and by[rec]["note"].startswith("LEFT OUT"), rec
+    # the categorical precipitation type: the dominant type (namgpu.products.ptype, ptype-winter lane)
+    for rec, nm in (("336", "CSNOW"), ("337", "CICEP"), ("338", "CFRZR"), ("339", "CRAIN")):
+        assert by[rec]["source"] == "carrier:NAM_" + nm, rec
 
 
 if __name__ == "__main__":

@@ -67,12 +67,34 @@ class PhysicsInitRefusal(RuntimeError):
 # Other values a key may take, each a branch this unit runs: convection none is NAM's CONUS-nest choice
 # (parm/nam_configfile_conusnest; PHYSICS_INITIALIZE CASE ('none') 10961 sets CU_PHYSICS = 0 and calls no
 # convective init; SOLVER_RUN 5722 skips CUCNVC).
-ALSO = {"convection": ("none",)}
+ALSO = {"convection": ("none", "gf", "ntiedtke"),   # gf: the WOOF-NAM Grell-Freitas option (namgpu/physics/gf); ntiedtke: New Tiedtke (WRF cu_physics 16, no init tables)
+        # RTE+RRTMGP (namgpu.physics.rrtmgp, selectable): the RRTM init below still runs (radupdate gives SOLCON)
+        "shortwave": ("rrtmgp",), "longwave": ("rrtmgp",),
+        # WRF YSU with the revised MM5 surface layer (namgpu.physics.ysu, selectable with --pbl ysu)
+        "turbulence": ("ysu",), "sfc_layer": ("sfclayrev",),
+        # ArWen microphysics on the NMMB thompson tracer layout (namgpu/physics/arwen_mp): classic Thompson, aerosol-aware Thompson, P3
+        "microphysics": ("thompson", "thompson_aero", "p3")}
+
+
+def _suite_microphysics(cfg) -> str | None:
+    """The microphysics a column physics suite (parm/physics_suites.json row with its own plan) runs in place of
+    the NMMB slot, else None. Such a suite's scheme is set up by phys-column-suite at its first call; this unit
+    still runs the fer_hires branch below for the cold-start F_ICE/F_RAIN/F_RIMEF fill the species start from."""
+    from namgpu.physics import suites
+    r = suites.row(suites.selected(cfg.raw))
+    if r.get("plan", "base") == "base":
+        return None
+    return str((r.get("nmmb") or {}).get("microphysics", "")).strip() or None
 
 
 def _check_scheme(cfg) -> None:
+    suite_mp = _suite_microphysics(cfg)
     for key, want in ACTIVE.items():
         got = str(getattr(cfg, key)).strip()
+        if key == "microphysics" and got == "thompson" and str(getattr(cfg, "mp_column", "")) == "tempo":
+            continue      # TEMPO on the thompson layout (config.MP_COLUMNS); its tables load in step 11
+        if key == "microphysics" and suite_mp is not None and got == suite_mp:
+            continue      # the column suite owns microphysics (phys-column-suite); see _suite_microphysics
         if got != want and got not in ALSO.get(key, ()):
             raise PhysicsInitRefusal(
                 f"drv-physics-initialize: {key}={got!r}; this unit ports the NAM 12 km branch "
@@ -87,7 +109,7 @@ def _select(ctx, cp) -> dict:
     d = RadInitArgs()   # Fortran defaults set by the caller (10646-10722)
     params = np.array([
         int(str(cfg.shortwave).strip() == "rrtm"),
-        int(str(cfg.microphysics).strip() == "thompson"),
+        int(__import__("namgpu.steps.drv_tracer_index", fromlist=["family"]).family(cfg.microphysics) == "thompson"),
         int(cfg.np3d),
         int(d.icice_sw), int(d.icice_lw), int(d.icliq_sw), int(d.icliq_lw),
     ], dtype=np.int32)
@@ -230,6 +252,11 @@ def _run(ctx, *, restart, noah_tbl_dir):
     # 10. BMJ_INIT (10941-10946), convection bmj; CASE ('none') (10961): CU_PHYSICS = 0, no init
     if str(cfg.convection).strip() == "none":
         ctx.tables["cu_physics"] = 0
+    elif str(cfg.convection).strip() == "gf":
+        ctx.tables["cu_physics"] = 3        # Grell-Freitas: stateless between calls, no init tables
+    elif str(cfg.convection).strip() == "ntiedtke":
+        ctx.tables["cu_physics"] = 16     # New Tiedtke needs no init tables (module_cu_ntiedtke.F cu_ntiedtkeinit
+                                          # only zeroes the tendencies, which CUCNVC prep does every call)
     else:
         ctx.tables["cu_physics"] = 2
         phys_bmj_init.run(ctx, restart=restart)
@@ -244,6 +271,18 @@ def _run(ctx, *, restart, noah_tbl_dir):
     dely = (f32(-2.0) * f32(cfg.ref_sbd)) * f32(111.3) / f32(slab.rows(ctx)[1])   # DY (km), GLOBAL JM
     ctx.tables["fer_hires_caller"] = {"dt_micro": float(dt_micro), "delx": float(delx), "dely": float(dely)}
     phys_fer_init.run(ctx, restart=restart)
+    if str(getattr(cfg, "mp_column", "")) == "tempo":
+        # TEMPO tables (the column scheme that replaces the slot's microphysics). FERRIER_INIT above still
+        # gives the cold-start F_ICE/F_RAIN/F_RIMEF fill UPDATE_WATER's thompson init reads.
+        from namgpu.physics.driver import phys_tempo_driver
+        phys_tempo_driver._setup(ctx)
+    from namgpu.steps.drv_tracer_index import family
+    if family(cfg.microphysics) == "thompson" and not restart and str(getattr(cfg, "mp_column", "")) != "tempo":
+        # UPDATE_WATER thompson splits the starting CWM by F_ICE at cld_init; FERRIER_INIT's cold fill is
+        # F_ICE = 0 (all liquid). Ice below -20 C, liquid above 0 C, linear between (cold start only).
+        # Not under TEMPO: its cold start keeps FERRIER_INIT's fill, as scored with the TEMPO option.
+        t = st["T"]
+        st["F_ICE"][...] = cp.clip((np.float32(273.15) - t) / np.float32(20.0), 0.0, 1.0).astype(cp.float32)
 
     # 12. GWD_init (11030-11041): DTPHS = DT*NPHS
     # IF(GWDFLG) (gwd_read, SOLVER_RUN 10202): gwdflg false (the CONUS-nest configfile) skips it.

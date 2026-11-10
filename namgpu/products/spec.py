@@ -1,4 +1,6 @@
-"""The awphys record table: one row per record of NOAA's nam.tHHz.awphysFF.tm00.grib2, in NOAA's order.
+"""The record tables: one row per record of a NOAA product file, in NOAA's order (awphys: nam.tHHz.awphysFF.tm00.grib2;
+the nest tables hiresf-conusnest.tsv and hiresf.tsv: nam.tHHz.<nest>.hiresfFF.tm00.grib2; namgpu/products/sets.py
+says which set uses which).
 
 `namgpu/products/awphys.tsv` is the table. `woof-nam products` turns it into the field-set document the GRIB2
 writer reads (gpuwm's Rust exporter, `rw_rrfs_upp --profile-json`), so adding a record is a table row, never a
@@ -88,11 +90,11 @@ def read(path: Path = TABLE) -> list[dict]:
     return rows
 
 
-def field(r: dict) -> dict:
+def field(r: dict, file: str = "awphys") -> dict:
     """One table row as a field of the writer's field-set document (rw-grib2export rrfs_upp.rs `Field`)."""
     stat = STAT_CODES.get(r["stat"])
     return {
-        "file": "awphys", "datset": "AWPHYS", "shortname": r["source"], "pname": r["name"],
+        "file": file, "datset": file.upper(), "shortname": r["source"], "pname": r["name"],
         "discipline": r["discipline"], "category": r["category"], "number": r["number"],
         "ncep_local": r["category"] >= 192 or r["number"] >= 192 or r["t1"] in LOCAL_LEVELS,
         "level_type": r["t1"], "levels": [r["v1"]],
@@ -128,10 +130,11 @@ def read_noaa(path: Path = NOAA) -> list[dict]:
     return out
 
 
-def attach_noaa(rows: list[dict], noaa: list[dict] | None = None) -> list[dict]:
+def attach_noaa(rows: list[dict], noaa: list[dict] | None = None, noaa_path: Path = NOAA) -> list[dict]:
     """Put NOAA's precision and inventory text on each table row. The two files are matched row by row and
     must agree on the record's identity: a shifted row would pack or label one record as another."""
-    noaa = read_noaa() if noaa is None else noaa
+    NOAA = noaa_path  # noqa: N806 (the message names the file checked)
+    noaa = read_noaa(noaa_path) if noaa is None else noaa
     if not noaa:
         return rows
     if len(noaa) != len(rows):
@@ -148,19 +151,35 @@ def attach_noaa(rows: list[dict], noaa: list[dict] | None = None) -> list[dict]:
     return rows
 
 
-def profile(rows: list[dict] | None = None, name: str = "nam-awphys") -> tuple[dict, list[dict]]:
-    """(the writer's field-set document, the rows left out because no source is mapped yet)."""
-    rows = attach_noaa(read() if rows is None else rows)
+def profile(rows: list[dict] | None = None, name: str = "nam-awphys", noaa_path: Path = NOAA,
+            mask_carrier: str | None = None, pair_uv: bool = False) -> tuple[dict, list[dict]]:
+    """(the writer's field-set document, the rows left out because no source is mapped yet). mask_carrier: the frame
+    carrier that marks points off the model domain (written missing, bitmap). pair_uv: a row `N.1` followed by its
+    `N.2` (NCEP's U/V and USTM/VSTM messages) is written as one two-field message, as NOAA's nest files are."""
+    rows = attach_noaa(read() if rows is None else rows, noaa_path=noaa_path)
     use = [r for r in rows if r["source"] not in ("", "-")]
     left = [r for r in rows if r["source"] in ("", "-")]
-    # NCEP grid 218 messages carry resolution flags 0x38: increments given, winds grid-relative
+    file = name.removeprefix("nam-")
+    fields = [field(r, file) for r in use]
+    if pair_uv:
+        for i in range(len(use) - 1):
+            a, b = use[i]["rec"], use[i + 1]["rec"]
+            if a.endswith(".1") and b == a[:-2] + ".2":
+                fields[i]["pair_next"] = True
+    # NCEP grid 218 and nest-grid messages carry resolution flags 0x38: increments given, winds grid-relative
     # isobaric records made as NAM's own post makes them (NCEP UPP MDL2P, NMM): rw_rrfs_upp's upp-nmm rule
-    return {"profile": name, "resolution_flags": 0x38, "isobaric_rule": "upp-nmm",
-            "fields": [field(r) for r in use]}, left
+    doc = {"profile": name, "resolution_flags": 0x38, "isobaric_rule": "upp-nmm", "fields": fields}
+    if mask_carrier:
+        doc["mask_carrier"] = mask_carrier
+    if pair_uv:
+        # NAM's nest hiresf00 carries its 3 h bucket averages and accumulations as 0-0 day windows
+        doc["initial_window_stats"] = [0, 1]
+        doc["initial_window_unit"] = 2
+    return doc, left
 
 
-def write_profile(dst: Path, rows: list[dict] | None = None) -> tuple[Path, list[dict]]:
-    doc, left = profile(rows)
+def write_profile(dst: Path, rows: list[dict] | None = None, **kw) -> tuple[Path, list[dict]]:
+    doc, left = profile(rows, **kw)
     dst = Path(dst)
     dst.write_text(json.dumps(doc, indent=1))
     return dst, left
@@ -201,12 +220,12 @@ def skeleton(archive: Path) -> str:
     return "\n".join(out) + "\n"
 
 
-def noaa_table(archive: Path, idx: Path) -> str:
-    """awphys-noaa.tsv from NOAA's archived awphys06 and its .idx (the .idx is wgrib2 -s of the file)."""
+def noaa_table(archive: Path, idx: Path, table: Path = TABLE) -> str:
+    """<set>-noaa.tsv from NOAA's archived file and its .idx (the .idx is wgrib2 -s of the file)."""
     from namgpu.io import products as P  # noqa: PLC0415
     recs = P.scan(Path(archive))
     lines = [ln for ln in Path(idx).read_text().splitlines() if ln.strip()]
-    rows = read()
+    rows = read(table)
     if not (len(recs) == len(lines) == len(rows)):
         raise SystemExit(f"{archive}: {len(recs)} records, {idx}: {len(lines)} lines, table: {len(rows)} rows")
     out = ["# NOAA's own facts per awphys record (spec.py documents it). Generated: python -m namgpu.products.spec "
@@ -230,6 +249,19 @@ def main(argv=None) -> int:
     if argv[:1] == ["noaa"] and len(argv) == 3:
         NOAA.write_text(noaa_table(Path(argv[1]), Path(argv[2])))
         print(f"{NOAA}: written")
+        return 0
+    if argv[:1] == ["noaa"] and len(argv) == 5:        # noaa <archive> <idx> <table> <out>
+        Path(argv[4]).write_text(noaa_table(Path(argv[1]), Path(argv[2]), Path(argv[3])))
+        print(f"{argv[4]}: written")
+        return 0
+    if argv[:1] == ["check"] and len(argv) == 2:        # check <set>
+        from namgpu.products import sets as PS  # noqa: PLC0415
+        ps = PS.get(argv[1])
+        rows = read(PS.table_path(ps))
+        doc, left = profile(rows, noaa_path=PS.noaa_path(ps), pair_uv=ps.name != "awphys")
+        pairs = sum(1 for f in doc["fields"] if f.get("pair_next"))
+        print(f"{PS.table_path(ps)}: {len(rows)} records, {len(doc['fields'])} with a source, {len(left)} left out, "
+              f"{pairs} two-field messages")
         return 0
     if argv[:1] == ["skeleton"] and len(argv) == 2:
         sys.stdout.write(skeleton(Path(argv[1])))

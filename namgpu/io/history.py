@@ -13,7 +13,8 @@ Fields written (names as WRF where WRF has them, values from NMMB state):
   XLAT, XLONG (H points, degrees), HGT (FIS/g), PSFC (PINT bottom), T2 (2 m temperature from the TSHLTR
   theta), Q2 (QSHLTR), MSLP (Pa, NMMB QUASIPOST membrane MSLP),
   U10, V10 (earth-relative, rotated from grid-relative by io-wind-rotate), RAINNC/RAINC (ACPREC
-  minus CUPREC, CUPREC, mm), T (theta - 300), QVAPOR, QCLOUD, QRAIN, QICE, QSNOW (mixing ratios),
+  minus CUPREC, CUPREC, mm), SNOWNC (grid-scale snowfall since the start, mm water), SR (frozen fraction of
+  the surface precipitation), T (theta - 300), QVAPOR, QCLOUD, QRAIN, QICE, QSNOW (mixing ratios),
   PH (g*Z on the interfaces), XTIME (minutes), and the 3-D winds U, V (earth-relative at mass
   points, not WRF's staggered U/V) and W for soundings.
   PRES is the full mid-layer pressure (Pa). It is not WRF's perturbation P, and the file has no PB
@@ -146,7 +147,10 @@ def stage_history(ctx, fields: dict, start: datetime) -> dict:
             arr = device_array(arr)           # StreamField: computed into H_STREAM now, copied out before the next
             if isinstance(arr, cp.ndarray):
                 src = arr if (arr.dtype == cp.float32 and arr.flags.c_contiguous) else                     cp.ascontiguousarray(arr, dtype=cp.float32)
-                dst = _pinned(name, src.shape)
+                # per domain (ctx.hist_pin_key, set when one process steps several domains): a buffer shared by name
+                # between a parent and its nest was reallocated every hour (shapes differ) or, at equal shapes,
+                # refilled while the other domain's writer could still be reading it
+                dst = _pinned(f"{getattr(ctx, 'hist_pin_key', '')}:{name}", src.shape)
                 src.get(stream=stream, out=dst, blocking=False)
                 keep.append(src)
             else:
@@ -192,6 +196,53 @@ def finish_payload(staged: dict) -> dict:
 
 def stage_and_write(path: Path, staged: dict) -> Path:
     return write_payload(path, finish_payload(staged))
+
+
+def finish_payload_shm(staged: dict):
+    """Writer thread: wait for the staged copies and copy them (flipped as finish_payload flips them) into one
+    shared-memory block, so a writer PROCESS can encode the file while the pinned buffers serve the next hour.
+    Returns (SharedMemory, payload without arrays; 'fields_shm' = [(name, offset, shape, dims)])."""
+    from multiprocessing import shared_memory  # noqa: PLC0415
+    staged["event"].synchronize()
+    staged["keep"] = None
+    items = staged.pop("staged")
+    sizes = [-(-int(np.prod(h.shape)) * 4 // 64) * 64 for _, h, _ in items]
+    shm = shared_memory.SharedMemory(create=True, size=max(64, sum(sizes)))
+    desc, off = [], 0
+    try:
+        for (name, h, dims), sz in zip(items, sizes):
+            src = h[::-1] if (h.ndim == 3 and dims[0] in LEVEL_DIMS) else h   # NMMB l=1 top -> WRF bottom-up
+            dst = np.ndarray(h.shape, dtype=np.float32, buffer=shm.buf, offset=off)
+            np.copyto(dst, src, casting="same_kind")
+            del dst
+            desc.append((name, off, tuple(h.shape), dims))
+            off += sz
+    except BaseException:
+        shm.close()
+        shm.unlink()
+        raise
+    out = {k: v for k, v in staged.items() if k not in ("event", "keep")}
+    out["fields_shm"] = desc
+    return shm, out
+
+
+def write_from_shm(path: str, shm_name: str, meta: dict) -> str:
+    """Writer process: the same write_payload over views of the shared block (the file bytes do not depend on
+    which process writes them)."""
+    from multiprocessing import shared_memory  # noqa: PLC0415
+    try:
+        shm = shared_memory.SharedMemory(name=shm_name, track=False)   # the parent owns and unlinks it
+    except TypeError:                                                # Python < 3.13: no track argument
+        shm = shared_memory.SharedMemory(name=shm_name)
+    try:
+        payload = {k: v for k, v in meta.items() if k != "fields_shm"}
+        payload["fields"] = [(name, np.ndarray(shape, dtype=np.float32, buffer=shm.buf, offset=off), dims)
+                             for name, off, shape, dims in meta["fields_shm"]]
+        out = str(write_payload(Path(path), payload))
+        del payload
+        return out
+    finally:
+        shm.close()
 
 
 def write_payload(path: Path, payload: dict) -> Path:

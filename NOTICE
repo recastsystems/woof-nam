@@ -18,7 +18,24 @@ Origins
 |                                | rrtm_sw_bands.cuh, namgpu/physics/rrtm/,            | modifications US Government   |
 |                                | namgpu/data/rrtm_*                                  | work                          |
 | ArWen (gpuwm) kernels, reused  | namgpu/third_party/arwen/,                          | Apache-2.0                    |
-|                                | namgpu/physics/{myj,jsfc,noah}/                     |                               |
+|                                | namgpu/third_party/arwen_noahmp/,                   |                               |
+|                                | namgpu/physics/{myj,jsfc,noah,ruc,ysu,mynn,gf,      |                               |
+|                                | ntiedtke,arwen_mp,noahmp,rrtmg_wrf,rrtmgp}/         |                               |
+| FP32 libm transcriptions in    | namgpu/third_party/arwen*/core/kernels/ (glibc      | MIT (Arm optimized-routines), |
+| ArWen kernels (glibc 2.39)     | float routines; LICENSE-third-party.txt beside them)| FDLIBM/SunPro notice          |
+| NOAA-GSL UGWP drag suite       | namgpu/kernels/phys_ugwp_oro.cu,                    | Apache-2.0 (NOAA-GSL/UGWP     |
+|                                | namgpu/physics/gwd/phys_ugwp_driver.py,             | LICENSE, commit 4108d491470c; |
+|                                | tools/ugwp-oro/                                     | LICENSE-UGWP-Apache-2.0.txt)  |
+| WRF physics (YSU, revised MM5  | the ArWen ports above (WRF v4.6.1 / 4.5.2 lineage)  | WRF public-domain statement   |
+| surface layer, MYNN, RUC, GF,  |                                                     | (below)                       |
+| New Tiedtke, Thompson, P3,     |                                                     |                               |
+| Noah-MP v4.x and its tables)   |                                                     |                               |
+| RTE+RRTMGP, rrtmgp-data v1.9   | through gpuwm.core.rrtmgp (namgpu/physics/rrtmgp/)  | BSD-3-Clause; the RFMIP gas   |
+|                                |                                                     | table CC-BY-SA-4.0 (gpuwm)    |
+| RRTMG (AER, WRF v4.6.1 copy)   | through gpuwm.core.rrtmg_legacy                     | BSD-3-Clause (AER, 2016)      |
+|                                | (namgpu/physics/rrtmg_wrf/)                         |                               |
+| TEMPO microphysics (NCAR/NOAA) | runs from gpuwm-hex (hexcore), not shipped here;    | Apache-2.0                    |
+|                                | glue namgpu/kernels/phys_tempo_driver.cu            |                               |
 | WRF Noah tables (stand-in)     | namgpu/data/fix/noah/, namgpu/data/noah_tables/     | WRF public-domain statement   |
 | Ferrier table                  | namgpu/data/ferrier/ETAMPNEW_DATA.expanded_rain     | NOAA / WRF public domain      |
 | Map basemap (Natural Earth,    | namgpu/data/basemap/ (unmodified)                   | Natural Earth: public domain; |
@@ -146,6 +163,12 @@ NOAA data shipped in this package, and data fetched at run time
 - Case inputs (NAM native analysis and boundary files, GFS 0.25 degree, MRMS), fetched from NOAA
   Open Data Dissemination by namgpu.init.init_fetch_case. US Government data.
 - GMTED2010 terrain (USGS/NGA), read from the user's WPS geog set. Public domain.
+- Start and boundary sources fetched at run time: NOAA RAP, HRRR, RRFS v1, GEFS v12 and AIGFS (US Government
+  data, AWS NODD and NOMADS); ECMWF AIFS Single and IFS open data (CC BY 4.0, ECMWF).
+- HRRR static soil classes (BNU soil, as NCEP's HRRR static file uses them), read from the user's geog set
+  (bnu_soiltype_top, `gpuwm fetch-geog`) for the RUC option. Treated as US Government data, as the HRRR uses it.
+- Monthly soil-moisture CDF tables (`woof-nam fetch-soil-cdf`, woof-nam release assets): built from the NOAA GFS
+  and NAM soil analyses (US Government data) by tools/soil_start.
 - Map basemap in namgpu/data/basemap/: Natural Earth 10m and 110m coastlines, lakes, land, ocean,
   borders and state lines (naturalearthdata.com, public domain) and the US Census Bureau
   cb_2023_us_county_5m county boundaries (US Government work, 17 U.S.C. 105), unmodified copies of

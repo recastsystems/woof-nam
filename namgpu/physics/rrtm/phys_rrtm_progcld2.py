@@ -123,6 +123,6 @@ def dep(name, ctx, inputs):
     """grrad_clouds dependency entry: dep(name, ctx, inputs) -> dict with 'clouds', 'mtopa', 'mbota'."""
     if name != "progcld2":
         raise RuntimeError(f"{UNIT}: dep called for {name!r}")
-    cld = cld_init.check_status(ctx)              # llyr and iovr from cld_init (rrtm_cld table)
+    cld = cld_init.host_status(ctx)               # llyr and iovr from cld_init (rrtm_cld table), read once per run
     return run(ctx, inputs, ivflip=int(ctx.cfg.ivflip), llyr=cld["llyr"],
                iovr=cld["iovr"], cld_fraction=int(inputs["cld_fraction"]))

@@ -139,6 +139,10 @@ _ISLSCP_SOILTEMP_HOLD = (
     "UNCLEAR, so not cleared and held out of the default geography; the "
     "default deep-soil temperature is soiltemp_era5_1deg (ERA5, Licence "
     "to Use Copernicus Products)")
+_HRRR_SOIL_LINE = (
+    "BNU 30-arc-sec 16-category top-layer soil type (Beijing Normal University; the soil categories in NCEP's "
+    "operational HRRR static file). Owner ruling 2026-10-21: the HRRR static soil layers are used as the operational "
+    "HRRR uses them, treated as US government data, no hold. Opt-in soil set, never a default.")
 HELD = {"soiltype_top_30s": _FAO_DSMW_HOLD, "soiltype_bot_30s": _FAO_DSMW_HOLD, "soiltemp_1deg": _ISLSCP_SOILTEMP_HOLD}
 
 
@@ -166,7 +170,7 @@ def resolve_datasets(root, overrides=None, soil: str = "permissive") -> dict:
         for role, key in (("soil_top", "soil"), ("soiltemp", "soiltemp")):
             name = SOIL_SETS[soil][key]
             rows[role] = {"dataset": name, "contents": rows[role]["contents"], "opt_in": soil,
-                          "source_and_licence": f"opt-in soil set {soil}: " + HELD.get(name, "WPS_GEOG " + name)}
+                          "source_and_licence": f"opt-in soil set {soil}: " + HELD.get(name, _HRRR_SOIL_LINE if name == "bnu_soiltype_top" else "WPS_GEOG " + name)}
     for role, name in (overrides or {}).items():
         if role not in rows:
             raise ValueError(f"{UNIT}: unknown dataset role {role!r} (roles: {sorted(rows)})")
@@ -210,6 +214,9 @@ OUT_KEYS = ("HGT_SFC", "LAND", "VGTYP", "SOTYP", "SFCR", "VEG", "ALBDO",
 SOIL_SETS = {
     "permissive": {"soil": "soilgrids/texture_top", "soiltemp": "soiltemp_era5_1deg"},
     "wrf": {"soil": "soiltype_top_30s", "soiltemp": "soiltemp_1deg"},
+    # the HRRR static soil: NCEP's operational HRRR soil categories (BNU 30-arc-sec top-layer soil type, the WPS
+    # bnu_soiltype_top tiles), for the RUC LSM option with an HRRR soil analysis start (lane lsm-ruc)
+    "hrrr": {"soil": "bnu_soiltype_top", "soiltemp": "soiltemp_era5_1deg"},
 }
 
 

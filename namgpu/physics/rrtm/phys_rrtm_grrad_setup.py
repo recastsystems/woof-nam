@@ -63,17 +63,24 @@ def _gr1(ctx, st, lm, jm, im, ntoz: int):
     if ntoz > 0:                                             # module_RA_RRTM.F90:951
         gr1[0] = cp.maximum(st["O3"], EPSO3)
     gr1[2] = st["CW"]                                        # module_RA_RRTM.F90:957, total condensate
-    if ctx.cfg.microphysics.rstrip() == "thompson":          # module_RA_RRTM.F90:966-986 (F_NI)
+    from namgpu.steps.drv_tracer_index import family
+    if family(ctx.cfg.microphysics) == "thompson":           # module_RA_RRTM.F90:966-986 (F_NI)
         tab = ctx.tables.get("indx")
         if tab is None:
             tab = host_index(ctx.cfg.microphysics, ctx.cfg.raw.get("num_tracers_chem", 0))
         tr = st["TRACERS"]
-        gr1[3] = tr[int(tab["INDX_QC"]) - 1]
-        gr1[4] = tr[int(tab["INDX_QI"]) - 1]
-        gr1[5] = tr[int(tab["INDX_QS"]) - 1]
-        gr1[6] = tr[int(tab["INDX_QR"]) - 1]
-        gr1[7] = tr[int(tab["INDX_QG"]) - 1]
-        gr1[8] = tr[int(tab["INDX_NI"]) - 1]
+        if int(tab["INDX_QC"]) > 0:                      # P3 carries no snow/graupel slot
+            gr1[3] = tr[int(tab["INDX_QC"]) - 1]
+        if int(tab["INDX_QI"]) > 0:                      # P3 carries no snow/graupel slot
+            gr1[4] = tr[int(tab["INDX_QI"]) - 1]
+        if int(tab["INDX_QS"]) > 0:                      # P3 carries no snow/graupel slot
+            gr1[5] = tr[int(tab["INDX_QS"]) - 1]
+        if int(tab["INDX_QR"]) > 0:                      # P3 carries no snow/graupel slot
+            gr1[6] = tr[int(tab["INDX_QR"]) - 1]
+        if int(tab["INDX_QG"]) > 0:                      # P3 carries no snow/graupel slot
+            gr1[7] = tr[int(tab["INDX_QG"]) - 1]
+        if int(tab["INDX_NI"]) > 0:                      # P3 carries no snow/graupel slot
+            gr1[8] = tr[int(tab["INDX_NI"]) - 1]
     return gr1
 
 

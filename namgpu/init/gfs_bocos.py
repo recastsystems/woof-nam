@@ -82,11 +82,15 @@ def source_files(case_dir: Path, start, hours: int, row: dict, cfg=None):
     """[(forecast hour, path)] of a row's boundary files: its cycle age_h older than start (sources.boco_age_h:
     NAMGPU_BOCO_AGE_H, configfile boco_age_h, else the row), every interval_h."""
     from namgpu.init import sources as srcmod
-    b = dict(row["boundary"], age_h=srcmod.boco_age_h(row, cfg))
-    if int(b["interval_h"]) * 3600 != int(TBOCO):
-        raise ValueError(f"{UNIT}: boundary interval {b['interval_h']} h; boco files carry tboco = {TBOCO} s")
+    b = dict(row["boundary"], age_h=srcmod.boco_age_h(row, cfg, start=start))
+    # Any whole-hour interval: each boco file carries its own tboco (write_boco), drv-consts reads it from boco.0000
+    # and READ_BC opens the next file every tboco / dt steps, as for the parent nests' hourly files (parent_bocos).
+    # Was refused unless 3 h (the files carried a fixed tboco = 10800 s); the 6-hourly AI forecasts need 6 h.
+    if int(b["interval_h"]) <= 0:
+        raise ValueError(f"{UNIT}: boundary interval {b['interval_h']} h")
     cyc = start - timedelta(hours=int(b["age_h"]))
-    return [(fh, Path(case_dir) / b["file"].format(bcyc=cyc.hour, lead=fh + int(b["age_h"])))
+    mem = srcmod.source_member(row, cfg)
+    return [(fh, Path(case_dir) / b["file"].format(bcyc=cyc.hour, lead=fh + int(b["age_h"]), mem=mem))
             for fh in range(0, int(hours) + 1, int(b["interval_h"]))]
 
 
@@ -95,9 +99,14 @@ def boco_dir(ctx) -> Path:
     for any other boundary source: a folder of GFS boundaries must never be reused by an IFS run of the same
     domain (run() skips the build when every file exists)."""
     from namgpu import config as configmod
-    name, _ = boundary_row(ctx)
+    from namgpu.init import sources as srcmod
+    name, row = boundary_row(ctx)
     d = configmod.boco_dirname(ctx.cfg)
-    return Path(ctx.case_dir) / (d if name == "gfs" else f"{d}-{name}")
+    # a source with members (gefs): one folder per member, so members of one cycle never share boundaries
+    mem = srcmod.source_member(row, ctx.cfg)
+    d = d if name == "gfs" else f"{d}-{name}" + (f"-{mem}" if mem else "")
+    tag = getattr(ctx, "boco_tag", None)        # "spinup": the spin-up window's boundaries (namgpu/spinup.py)
+    return Path(ctx.case_dir) / (f"{d}-{tag}" if tag else d)
 
 
 class ReadAhead:
@@ -182,8 +191,8 @@ def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: in
     out_dir.mkdir(parents=True, exist_ok=True)
     from namgpu.init import sources as srcmod
     bname, brow = boundary_row(ctx)
-    rec = srec.table(brow)
-    age_h = srcmod.boco_age_h(brow, cfg)
+    rec = srec.boundary_table(brow)
+    age_h = srcmod.boco_age_h(brow, cfg, start=ctx.start)
     interval_h = int(brow["boundary"]["interval_h"])
     files = source_files(ctx.case_dir, ctx.start, hours, brow, cfg)
     if from_hour:
@@ -236,7 +245,7 @@ def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: in
         if prev is not None:
             t0 = ctx.start + timedelta(hours=files[k - 1][0])
             name = out_dir / f"boco.{files[k - 1][0]:04d}"
-            write_boco(name, t0, prev, cur)
+            write_boco(name, t0, prev, cur, tboco=float(interval_h * 3600))
             log(f"{UNIT}: {name.name} (+{files[k - 1][0]} h -> +{fh} h)")
         prev = cur
     pool.shutdown()
@@ -282,12 +291,12 @@ def run(ctx, hours: int | None = None):
         ctx.boco_dir = str(out_dir)
         return out_dir
     from namgpu.domains import bc_hours
-    hours = bc_hours(hours)      # 3-hourly GFS steps: a 7 h run reads boco.0006, so it needs GFS to +9 h
-    out_dir = boco_dir(ctx)
-    want = [out_dir / f"boco.{fh:04d}" for fh in range(0, hours, 3)]
-    import json
     bname, row = boundary_row(ctx)
-    age_h, interval_h = srcmod.boco_age_h(row, ctx.cfg), int(row["boundary"]["interval_h"])
+    age_h, interval_h = srcmod.boco_age_h(row, ctx.cfg, start=ctx.start), int(row["boundary"]["interval_h"])
+    hours = bc_hours(hours, interval_h)   # 3-hourly GFS steps: a 7 h run reads boco.0006, so it needs GFS to +9 h
+    out_dir = boco_dir(ctx)
+    want = [out_dir / f"boco.{fh:04d}" for fh in range(0, hours, interval_h)]
+    import json
     grid = configmod.grid_stamp(ctx.cfg)
     mk = out_dir / "BOCO-SOURCE.json"
     try:

@@ -1,4 +1,4 @@
-"""Write the domain configfiles derived from NAM's own: parm/nam_configfile_4km, _5km and _band12.
+"""Write the domain configfiles derived from NAM's own: parm/nam_configfile_4km, _5km, _7p6km and _band12.
 
     python tools/make_domain_configs.py
 
@@ -48,6 +48,22 @@ DOMAINS = {
                 dt_int="10", dt_num="0", dt_den="3", filt_dt_int="3", filt_dt_num="1", filt_dt_den="3",
                 nrads="120", nradl="120", **NEST_PHYSICS,
                 static_npz="static/nam5km_static.npz", domain_name="nam5km"),
+    # 7.6 km: the same CONUS-nest footprint at 12/7.6 of the parent spacing (dlmd 0.0798, dphd 0.0684 deg;
+    # 723 x 581, wbd = -361 dlmd, sbd = -290 dphd). Frozen-NAM 12 km physics (BMJ convection, GWD on, smag2 0.4,
+    # codamp 9: the parent keys, not NEST_PHYSICS: 7.6 km does not resolve convection). dt 15 s (parent 25 s x 7.6/12
+    # = 15.8, rounded down: dx/dt 507 m/s vs the parent 480), filt_dt 5 s (divides the 600 s TDFI window),
+    # nrads = nradl = 80 (20 min, as NAM). Lane mesh-7p6km 2026-11-08.
+    "7p6km": dict(CENTRE, im="723", jm="581", wbd="-28.807800", sbd="-19.836000",
+                  dt_int="15", dt_num="0", dt_den="3", filt_dt_int="5", filt_dt_num="0", filt_dt_den="3",
+                  nrads="80", nradl="80",
+                  static_npz="static/nam7p6km_static.npz", domain_name="nam7p6km"),
+    # na7p6: the NAM 12 km parent footprint (North America, pole 54 N 106 W, same wbd/sbd corners) at 7.6 km
+    # (1506 x 1318: dlmd 0.079786, dphd 0.068392 deg = 12 km x 0.633). Parent physics keys (BMJ, GWD), dt 15 s,
+    # filt_dt 5 s, radiation every 80 steps (20 min), as the 7p6km row. 2026-11-09.
+    "na7p6": dict(im="1506", jm="1318",
+                  dt_int="15", dt_num="0", dt_den="3", filt_dt_int="5", filt_dt_num="0", filt_dt_den="3",
+                  nrads="80", nradl="80",
+                  static_npz="static/namna7p6_static.npz", domain_name="namna7p6"),
     "band12": dict(jm="279", sbd="-15.012", static_npz="static/nam12band_static.npz", domain_name="nam12band"),
 }
 # band4: the 4 km grid's centre band (1371 x 201, rows 451..651, sbd -3.6), the one-card smoke of the 4 km

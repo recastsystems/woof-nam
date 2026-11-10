@@ -175,12 +175,199 @@ ERA5 = {
     "lat_crop": "both",
 }
 
-TABLES = {"gfs_0p25": GFS, "ifs": IFS, "era5": ERA5}
+# RUC LSM soil: nine depth NODES (m), values at a depth, not layer means. RAP, HRRR and RRFS publish TSOIL/SOILW at
+# exactly these depths (GRIB2 level type 106 with second level = first). Noah's layers are read at their midpoints
+# (0.05, 0.25, 0.7, 1.5 m) by linear interpolation between the bracketing nodes: gpuwm's own RAP/HRRR start does
+# this (gpuwm/authorities/rw-wps-rap-awip32-grib2.composition.json soil remap kind "linear_node_samples",
+# gpuwm/ingest/soil.py _remap_declared_soil), and so does WRF real.exe for a level-form soil source going into Noah
+# (module_soil_pre.F init_soil_2_real). Neither rescales moisture between the RUC and Noah soil tables, so neither
+# does this: the volumetric moisture is RAP's, read at Noah's depths. --soil-from gfs takes Noah-native soil instead.
+RUC_SOIL_NODES = (0.0, 0.01, 0.04, 0.1, 0.3, 0.6, 1.0, 1.6, 3.0)
+
+# RAP 13 km analysis on its own rotated lat-lon grid (rap.tHHz.wrfprsf00.grib2, NCEP template 3.32769, 953 x 834,
+# isobaric 1013.2 and 1000-50 hPa every 25 hPa). Codes from grib2_inventory of rap.t00z.wrfprsf00 2023-07-29: cloud
+# ice is NCEP 0-1-82 (CIMIXR), not GFS's 0-1-23; graupel 0-1-32; TKE 0-19-11; RUC soil 2-0-2 / 2-0-192 at the nine
+# nodes; no canopy water record. Grid and winds: source_grids.py (grid-relative winds turned to earth-relative).
+#   pl_add    slot -> extra isobaric records summed into it at decode: graupel joins snow, the Ferrier-Aligo ice
+#             category (NMMB carries one ice mass, F_ICE of CWM, with a rime factor; RAP's graupel has no rime factor
+#             to carry, so F_RIMEF stays 1: graupel is kept as ice mass, its density is dropped).
+#   pl_extra  name -> extra isobaric records kept beside the slots: TKE (NMMB Q2 = 2 TKE, as the native warm start).
+#   warm      the start carries the source's condensate (CW, F_ICE, F_RAIN) and TKE (Q2) instead of the cold CW = 0.
+RAP = {
+    "pl": {"HGT": (0, 3, 5), "TMP": (0, 0, 0), "SPFH": (0, 1, 0), "UGRD": (0, 2, 2), "VGRD": (0, 2, 3),
+           "CLMR": (0, 1, 22), "ICMR": (0, 1, 82), "RWMR": (0, 1, 24), "SNMR": (0, 1, 25)},
+    "pl_need": ("HGT", "TMP", "SPFH", "UGRD", "VGRD"),
+    # q is RAP's own: RH derived from it with the vinterp kernel's own formula (rh_from_q), not RAP's RH record
+    "pl_derive": {"RH": ("rh_from_q", ("SPFH", "TMP", "@p"))},
+    "pl_add": {"SNMR": ((0, 1, 32),)},
+    "pl_extra": {"TKE": (0, 19, 11)},
+    "warm": True,
+    "sfc": {
+        "PRES": (0, 3, 0, "1", "0", None), "HGT": (0, 3, 5, "1", "0", None),
+        "TSK": (0, 0, 0, "1", "0", None),
+        "T2": (0, 0, 0, "103", "2", None), "Q2": (0, 1, 0, "103", "2", None),
+        "U10": (0, 2, 2, "103", "10", None), "V10": (0, 2, 3, "103", "10", None),
+        **{f"STN{k}": (2, 0, 2, "106", f"{z:g}", f"{z:g}") for k, z in enumerate(RUC_SOIL_NODES)},
+        **{f"SMN{k}": (2, 0, 192, "106", f"{z:g}", f"{z:g}") for k, z in enumerate(RUC_SOIL_NODES)},
+        "WEASD": (0, 1, 13, "1", "0", None), "SNOD": (0, 1, 11, "1", "0", None),
+        "ICEC": (10, 2, 0, "1", "0", None), "LANDSRC": (2, 0, 0, "1", "0", None),
+    },
+    "sfc_derive": [
+        ("RH2", "rh_from_q", ("Q2", "T2", "PRES")),
+        (("TSOIL1", "TSOIL2", "TSOIL3", "TSOIL4"), "node_interp",
+         (tuple(f"STN{k}" for k in range(len(RUC_SOIL_NODES))), RUC_SOIL_NODES, NOAH_SOIL_LAYERS)),
+        (("SOILW1", "SOILW2", "SOILW3", "SOILW4"), "node_interp",
+         (tuple(f"SMN{k}" for k in range(len(RUC_SOIL_NODES))), RUC_SOIL_NODES, NOAH_SOIL_LAYERS)),
+        ("TDEEP", "scale", (f"STN{len(RUC_SOIL_NODES) - 1}", 1.0)),     # the 3 m node: Noah's TG lower boundary
+        ("CNWAT", "const", (0.0,)),                                     # RAP's wrfprs has no canopy water record
+    ],
+    "sfc_columns": ("PRES", "HGT", "T2", "Q2", "U10", "V10"),
+    "derive_columns": ("RH2",),
+    "donors": {},
+    "lat_crop": "both",
+}
+
+# HRRR 3 km analysis (hrrr.tHHz.wrfprsf00.grib2, CONUS, NCEP template 3.30 Lambert conformal 1799 x 1059, isobaric
+# 1013.2 and 1000-50 hPa every 25 hPa). The same UPP record set as RAP (grib2 .idx of 2026-01-23 12Z): CLMR, CIMIXR,
+# RWMR, SNMR, GRLE on every level, the nine RUC soil nodes, LAND, ICEC, WEASD, SNOD, 2 m T/q, 10 m winds. Two
+# differences: the file has canopy water (CNWAT surface), so it is read rather than set to 0, and it has no isobaric
+# TKE, so Q2 starts at the cold floor (gfs_start.warm_state). Grid and winds: source_grids.LambertGrid.
+HRRR = {**RAP,
+        "pl_extra": {},
+        # canopy water is WMO 2-0-13 in the HRRR wrfprsf00 (grib2_inventory of 2026-01-23 12Z), not NCEP local 2-0-196
+        "sfc": {**RAP["sfc"], "CNWAT": (2, 0, 13, "1", "0", None)},
+        "sfc_derive": [d for d in RAP["sfc_derive"] if d[0] != "CNWAT"]}
+
+# RRFS v1 (NOAA's operational FV3 regional, 3 km North America) as published on noaa-rrfs-ops-pds: the CONUS cut on
+# HRRR's Lambert grid, the state split over two files per hour. prslev (45 isobaric levels 1000-2 hPa): HGT TMP SPFH
+# UGRD VGRD CLMR ICMR RWMR SNMR GRLE; cloud ice is 0-1-23 there (GFS's code, measured on rrfs.t00z.prslev f000
+# 2026-10-14), not HRRR's 0-1-82. 2dfld: the surface, 2 m / 10 m, LAND, ICEC, snow, canopy water and the nine RUC
+# soil nodes, the same records as HRRR's wrfprsf00 surface set. sfc_file_from: the surface records are read from the
+# file whose name has prslev replaced by 2dfld (gfs_start.decode_projected). No isobaric TKE: Q2 starts at the floor.
+RRFS = {**HRRR,
+        "pl": {**HRRR["pl"], "ICMR": (0, 1, 23)},
+        "sfc_file_from": ("prslev", "2dfld")}
+
+# ECMWF AIFS Single 0.25 deg as an isobaric BOUNDARY source (its start is the IFS analysis, sources row aifs
+# start_from ifs-0p25). The IFS table's records, except that AIFS publishes geopotential z (0-3-4) on the pressure
+# levels rather than gh, so HGT is z / g0 (as ERA5). Boundary times read only the columns.
+AIFS = {**IFS,
+        "pl": {**IFS["pl"], "HGT": (0, 3, 4)},
+        "pl_derive": {"HGT": ("scale", ("HGT", 1.0 / G0)), "RH": ("rh_from_q", ("SPFH", "TMP", "@p"))}}
+
+# NOAA AIGFS v1.1 as an isobaric BOUNDARY source (its start is the GFS analysis, sources row aigfs start_from gfs).
+# The pres file: HGT TMP SPFH UGRD VGRD on 13 levels (NCEP codes, as GFS). The sfc file: 2 m T and 10 m winds only:
+# no surface pressure, no terrain, no 2 m humidity. So:
+#   same_grid_donors  HGT (terrain) from the same cycle's GFS analysis, the same 0.25 deg global grid (cut with the
+#                     source's own window): terrain does not change over the run.
+#   column_derive     PRES: the pressure at the terrain height, hydrostatic in the source's own isobaric heights and
+#                     temperatures (between two levels: T linear in height, p = p_k (T/T_k)^(-g/(R a)); below the
+#                     lowest level: the standard 6.5 K/km lapse from it, as metgrid/real.exe extrapolate);
+#                     RH2: the isobaric RH interpolated linearly in ln p to that surface pressure.
+AIGFS = {
+    "pl": {"HGT": (0, 3, 5), "TMP": (0, 0, 0), "SPFH": (0, 1, 0), "UGRD": (0, 2, 2), "VGRD": (0, 2, 3)},
+    "pl_need": ("HGT", "TMP", "SPFH", "UGRD", "VGRD"),
+    "pl_derive": {"RH": ("rh_from_q", ("SPFH", "TMP", "@p"))},
+    "sfc": {"T2": (0, 0, 0, "103", "2", None),
+            "U10": (0, 2, 2, "103", "10", None), "V10": (0, 2, 3, "103", "10", None)},
+    "same_grid_donors": {"HGT": {"file": "raw/gfs/gfs.t{cyc:02d}z.pgrb2.0p25.f000", "spec": (0, 3, 5, "1", "0", None)}},
+    "column_derive": [("PRES", "psfc_from_isobaric", ("HGT",)), ("RH2", "isobaric_at_psfc", ("RH", "PRES"))],
+    "sfc_derive": [],
+    "sfc_columns": ("T2", "U10", "V10"),
+    "derive_columns": (),
+    "donors": {},
+    "lat_crop": "both",
+}
+
+TABLES = {"gfs_0p25": GFS, "ifs": IFS, "era5": ERA5, "rap": RAP, "hrrr": HRRR, "rrfs": RRFS, "aifs": AIFS,
+          "aigfs": AIGFS}
 
 
 def table(row: dict) -> dict:
     """The record table of a SOURCES row (GFS when the row names none: the rows that predate the tables)."""
     return TABLES[row.get("records", "gfs_0p25")]
+
+
+def boundary_table(row: dict) -> dict:
+    """The record table a row's boundary files are read with: its boundary entry's own "records" (aifs, aigfs: the
+    start is another row's analysis, the boundaries are the AI forecast's files), else the row's."""
+    b = row.get("boundary") or {}
+    return TABLES[b["records"]] if b.get("records") else table(row)
+
+
+RD_ = 287.04
+LAPSE = 0.0065                                             # K/m, the standard lapse below the lowest level
+
+
+def psfc_from_isobaric(hgt, tmp, plev, zs, xp=None):
+    """Pressure (Pa) at height zs [ny, nx] from isobaric heights hgt and temperatures tmp [nlev, ny, nx] on levels
+    plev (Pa, ground up: highest pressure first). Between the two levels that bracket zs, T is linear in height
+    (lapse a = -(T_up - T_lo)/(z_up - z_lo)) and p = p_lo (T(zs)/T_lo)^(g/(R a)) (isothermal form when a ~ 0).
+    Below the lowest level: the standard 6.5 K/km from it. Above the highest: that level's isothermal extension.
+    Missing (NaN) heights are skipped level by level (a below-ground level a source leaves undefined)."""
+    if xp is None:
+        import cupy as xp
+    f32 = xp.float32
+    nlev = hgt.shape[0]
+    g_r = f32(G0 / RD_)
+    out = xp.full(zs.shape, f32(np.nan), dtype=f32)
+
+    def hyd(p0, t0, z0, a):
+        t = t0 - a * (zs - z0)
+        small = xp.abs(a) < f32(1e-5)
+        iso = p0 * xp.exp(-g_r * (zs - z0) / t0)
+        safe_a = xp.where(small, f32(1.0), a)
+        lap = p0 * (xp.maximum(t, f32(1.0)) / t0) ** (g_r / safe_a)
+        return xp.where(small, iso, lap).astype(f32)
+
+    # below the lowest valid level (ground up: level 0 is the highest pressure)
+    z0, t0 = hgt[0], tmp[0]
+    below = xp.isfinite(z0) & (zs <= z0)
+    out = xp.where(below, hyd(f32(plev[0]), t0, z0, f32(LAPSE)), out)
+    for k in range(nlev - 1):
+        zl, zu, tl, tu = hgt[k], hgt[k + 1], tmp[k], tmp[k + 1]
+        ok = xp.isfinite(zl) & xp.isfinite(zu) & (zs > zl) & (zs <= zu) & ~xp.isfinite(out)
+        a = -(tu - tl) / xp.maximum(zu - zl, f32(1.0))
+        out = xp.where(ok, hyd(f32(plev[k]), tl, zl, a), out)
+    # a column whose lowest level is undefined (below ground in the source): lowest defined level, standard lapse
+    for k in range(nlev):
+        ok = ~xp.isfinite(out) & xp.isfinite(hgt[k]) & (zs <= hgt[k])
+        out = xp.where(ok, hyd(f32(plev[k]), tmp[k], hgt[k], f32(LAPSE)), out)
+    top = ~xp.isfinite(out)
+    out = xp.where(top, hyd(f32(plev[-1]), tmp[-1], hgt[-1], f32(0.0)), out)
+    return out.astype(f32)
+
+
+def isobaric_at_psfc(field, plev, ps, xp=None):
+    """field [nlev, ny, nx] on plev (Pa, ground up) interpolated linearly in ln p to ps [ny, nx]; held at the
+    nearest level outside the levels."""
+    if xp is None:
+        import cupy as xp
+    f32 = xp.float32
+    lp = np.log(np.asarray(plev, np.float64))
+    lps = xp.log(ps)
+    out = xp.where(lps >= f32(lp[0]), field[0], field[-1]).astype(f32)
+    for k in range(len(plev) - 1):
+        hi, lo = f32(lp[k]), f32(lp[k + 1])
+        ok = (lps < hi) & (lps >= lo)
+        w = (lps - lo) / (hi - lo)
+        out = xp.where(ok, w * field[k] + (f32(1.0) - w) * field[k + 1], out)
+    return out.astype(f32)
+
+
+def derive_columns_sfc(rec: dict, pl, plev, order, sfc) -> None:
+    """Apply rec['column_derive'] in order: surface fields computed from the isobaric slots (pl [nslot, nlev, ny, nx])
+    and earlier surface fields. Works on NumPy (CPU tests) and CuPy arrays alike."""
+    if not rec.get("column_derive"):
+        return
+    xp = np if isinstance(pl, np.ndarray) else __import__("cupy")
+    for out, op, args in rec["column_derive"]:
+        if op == "psfc_from_isobaric":
+            sfc[out] = psfc_from_isobaric(pl[order.index("HGT")], pl[order.index("TMP")], plev, sfc[args[0]], xp=xp)
+        elif op == "isobaric_at_psfc":
+            sfc[out] = isobaric_at_psfc(pl[order.index(args[0])], plev, sfc[args[1]], xp=xp)
+        else:
+            raise ValueError(f"source_records: unknown column_derive op {op!r}")
 
 
 def conservative_overlap_weights(source, target) -> np.ndarray:
@@ -191,6 +378,24 @@ def conservative_overlap_weights(source, target) -> np.ndarray:
             w[ti, si] = max(0.0, min(t1, s1) - max(t0, s0)) / (t1 - t0)
         if abs(float(w[ti].sum()) - 1.0) > 2e-15:
             raise ValueError(f"soil remap: target layer {ti} {target[ti]} is not covered by the source layers {source}")
+    return w
+
+
+def node_interp_weights(nodes, target) -> np.ndarray:
+    """Target-layer-by-node weights: each target layer's midpoint linearly between its two bracketing depth nodes
+    (gpuwm ingest/soil.py _interp_nodes, the "linear_node_samples" remap). A midpoint outside the nodes is refused:
+    there is no node pair to read it from (WRF leaves such a level unset)."""
+    z = np.asarray(nodes, dtype=np.float64)
+    if z.ndim != 1 or z.size < 2 or np.any(np.diff(z) <= 0.0):
+        raise ValueError(f"soil node remap: nodes {nodes} must be at least two strictly increasing depths")
+    w = np.zeros((len(target), z.size), dtype=np.float64)
+    for ti, (t0, t1) in enumerate(target):
+        m = 0.5 * (t0 + t1)
+        if not z[0] <= m <= z[-1]:
+            raise ValueError(f"soil node remap: target layer {ti} midpoint {m} m is outside the nodes {nodes}")
+        k = min(int(np.searchsorted(z, m, side="right")) - 1, z.size - 2)
+        f = (m - z[k]) / (z[k + 1] - z[k])
+        w[ti, k], w[ti, k + 1] = 1.0 - f, f
     return w
 
 
@@ -215,8 +420,13 @@ def rh_from_q(q, t, p):
 
 
 def derive_sfc(rec: dict, sfc: dict, only=None) -> None:
-    """Apply rec['sfc_derive'] in order, in place on sfc (dict of cupy [ny, nx]). only: output names wanted."""
-    import cupy as cp
+    """Apply rec['sfc_derive'] in order, in place on sfc (dict of cupy [ny, nx]). only: output names wanted.
+    The arrays may be NumPy (the CPU tests); the operations are the same elementwise float32 arithmetic."""
+    first = next(iter(sfc.values()), None)
+    if isinstance(first, np.ndarray):
+        cp = np
+    else:
+        import cupy as cp
     for out, op, args in rec["sfc_derive"]:
         outs = out if isinstance(out, tuple) else (out,)
         if only is not None and not any(o in only for o in outs):
@@ -250,15 +460,16 @@ def derive_sfc(rec: dict, sfc: dict, only=None) -> None:
             sfc[out] = q_from_dewpoint(sfc[args[0]], sfc[args[1]])
         elif op == "rh_from_q":
             sfc[out] = rh_from_q(sfc[args[0]], sfc[args[1]], sfc[args[2]])
-        elif op == "layer_remap":
+        elif op in ("layer_remap", "node_interp"):
             srcs, sl, tl = args
-            w = conservative_overlap_weights(sl, tl)
+            w = conservative_overlap_weights(sl, tl) if op == "layer_remap" else node_interp_weights(sl, tl)
             for ti, o in enumerate(outs):
-                acc = cp.zeros_like(sfc[srcs[0]])
+                acc = None
                 for si, s in enumerate(srcs):
                     if w[ti, si]:
-                        acc += cp.float32(w[ti, si]) * sfc[s]
-                sfc[o] = acc
+                        term = np.float32(w[ti, si]) * sfc[s]
+                        acc = term if acc is None else acc + term
+                sfc[o] = acc.astype(np.float32)
         else:
             raise ValueError(f"source_records: unknown sfc_derive op {op!r}")
 

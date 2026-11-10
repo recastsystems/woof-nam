@@ -75,12 +75,13 @@ extern "C" __global__ void rrtm_sw_taumol28(
     const float  strrat28,
     const int nlay, const int im, const int jm,
     float* __restrict__ taug,
-    float* __restrict__ taur)
+    float* __restrict__ taur,
+    const int kmin_percol)         // 1: kmin_p is per column ([JM*IM], batched rrtm-call windows); 0: kmin_p[0]
 {
     COLUMN_IJ(im, jm)                         // i0, j0; returns early past the last column
     const int ij = IDX2(i0, j0, im);
     const int L = laytrop[ij];
-    const int kmin = kmin_p[0];
+    const int kmin = kmin_p[kmin_percol ? ij : 0];
 
     for (int k0 = 0; k0 < nlay; ++k0) {
         const size_t lij = IDX3(i0, j0, k0, im, jm);

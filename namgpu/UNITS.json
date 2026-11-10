@@ -5,11 +5,11 @@
   "case": "cases/2025-03-14_12z",
   "done_rule": "kernel compiles; wrapper runs once on a full-size random State without NaN/Inf; Fortran-to-CUDA diff review finds no missing term (CONTRACT.md section 6)",
   "counts": {
-    "port": 212,
+    "port": 213,
     "skip": 42,
     "new": 27,
     "copy-arwen": 37,
-    "total": 318
+    "total": 319
   },
   "units": [
     {
@@ -4265,6 +4265,54 @@
       "wrapper": "namgpu.steps.drv_filter_consts",
       "kernel": "",
       "status": "done"
+    },
+    {
+      "id": "phys-tempo-driver",
+      "group": "physics-driver",
+      "fortran": "nmm/module_MICROPHYSICS.F90:60-558 (thompson branch 418-452, USE_QV 275-298, 488-503)",
+      "purpose": "GSMDRIVE on the thompson tracer layout with the TEMPO v3.0.3 column (hexcore tempo_v303) in place of mp_gt_driver; REFL_10CM from TEMPO.",
+      "mode": "port",
+      "deps": [],
+      "wrapper": "namgpu.physics.driver.phys_tempo_driver",
+      "kernel": "namgpu/kernels/phys_tempo_driver.cu",
+      "status": "port",
+      "note": "modernise/mp-tempo 2026-11-08"
+    },
+    {
+      "id": "phys-column-suite",
+      "group": "physics-driver",
+      "fortran": "",
+      "purpose": "an ArWen physics suite (parm/physics_suites.json row, e.g. hrrrv5) on every NMMB column through the arwen adapter and gpuwm.core.mpas_column_suite, every NPHS",
+      "mode": "new",
+      "deps": [],
+      "wrapper": "namgpu.physics.suite_column",
+      "kernel": "",
+      "status": "done",
+      "note": "NAM modernisation 2026-11-08, lane hrrrv5-suite-on-nam"
+    },
+    {
+      "id": "phys-ntiedtke-cu",
+      "group": "physics-column",
+      "fortran": "WRF phys/module_cu_ntiedtke.F (v4.6.1), via ArWen gpuwm/core/ntiedtke.py",
+      "purpose": "New Tiedtke deep/shallow/mid-level mass-flux convection on NMMB columns, called by CUCNVC in place of BMJ (convection: ntiedtke). Seam kernels phys_ntiedtke_map.cu; scheme copied from ArWen.",
+      "mode": "copy-arwen",
+      "deps": [],
+      "wrapper": "namgpu.physics.ntiedtke.phys_ntiedtke_cu",
+      "kernel": "namgpu/kernels/phys_ntiedtke_map.cu",
+      "status": "done",
+      "note": "modernise lane cu-tiedtke 2026-11-08"
+    },
+    {
+      "id": "phys-ntiedtke-snap",
+      "group": "physics-driver",
+      "fortran": "port addition",
+      "purpose": "T and Q after GSMDRIVE, the reference for New Tiedtke's large-scale forcing at the next call.",
+      "mode": "port",
+      "deps": [],
+      "wrapper": "namgpu.physics.ntiedtke.phys_ntiedtke_snap",
+      "kernel": "namgpu/kernels/phys_ntiedtke_map.cu",
+      "status": "done",
+      "note": "modernise lane cu-tiedtke 2026-11-08"
     }
   ]
 }

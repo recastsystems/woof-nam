@@ -32,12 +32,12 @@ from pathlib import Path
 NAME = "rw_rrfs_upp"
 REPO = "recastsystems/woof-nam"
 # the woof-nam release whose assets carry this writer (a dev build fetches from the release it leads to)
-ASSET_RELEASE = "v0.1.2"
-# built from gpuwm 5893f519fbd2fbeb07118456c63efa7f22ea8879 (crate rw-grib2export, bin rw_rrfs_upp) with Rust 1.94.0
-# in quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+ASSET_RELEASE = "v0.2.0"
+# built from gpuwm 5c948bead2ae47a278caf08ff55c0473c66e2021 (crate rw-grib2export, bin rw_rrfs_upp) with Rust 1.94.0
+# in quay.io/pypa/manylinux_2_28_x86_64@sha256:c2261579b9c2e5d45aa93312f73e2a302182e3e977b558581a1838d6fed3d8e6
 PINS = {
-    "linux-x86_64": {"asset": "rw_rrfs_upp-linux-x86_64", "bytes": 12949640,
-                     "sha256": "7fbc271cb0af398b246c66eba62aa53d771ea82ba4c2e8ca9f5095a5065ebd11"},
+    "linux-x86_64": {"asset": "rw_rrfs_upp-linux-x86_64", "bytes": 16797248,
+                     "sha256": "cd74b73e8b5342b913a0f4518baa86f7321ce88727102b4b1ce8b4f8eec8fbea"},
 }
 FETCH_CMD = "woof-nam fetch-bridges"
 
@@ -174,12 +174,43 @@ def ensure(fetch_if_missing: bool = True) -> Path:
         raise ExporterMissing(missing_message(str(e))) from None
 
 
+def capabilities(path: Path | None = None) -> set:
+    """The profile features a writer build reads (`rw_rrfs_upp --capabilities`); empty for a build older than them.
+    An older writer reads a nest profile without error and ignores what it does not know, so the nest files would
+    carry U and V as separate messages and write points off the nest as data: woof-nam checks first."""
+    import subprocess
+    p = path or find()
+    if p is None:
+        return set()
+    try:
+        r = subprocess.run([str(p), "--capabilities"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if r.returncode != 0:
+        return set()
+    return set(r.stdout.split())
+
+
+def require(features, what: str) -> Path:
+    """The writer, refused in one line when it lacks a profile feature `what` needs."""
+    p = ensure()
+    have = capabilities(p)
+    miss = [f for f in features if f not in have]
+    if miss:
+        raise ExporterMissing(
+            f"{p} cannot write {what}: it lacks the profile feature(s) {', '.join(miss)}; "
+            f"point WOOF_NAM_RW_RRFS_UPP at a qualified writer whose "
+            f"rw_rrfs_upp --capabilities lists {', '.join(features)}")
+    return p
+
+
 def main(argv=None) -> int:
     from namgpu.cli import HelpFormatter
     ap = argparse.ArgumentParser(
         description=f"Download the GRIB2 writer `woof-nam products` uses ({NAME}, Linux x86-64) from the woof-nam "
                     f"{ASSET_RELEASE} release, and install it after checking its size and SHA-256 against the pins "
-                    f"this release carries.",
+                    f"this release carries. The same for the helper programs of `woof-nam score` (rw_asos, "
+                    f"rw_stage4) and of the UGWP drag option (rw_hex_ugwp_oro).",
         formatter_class=HelpFormatter,
         epilog=f"examples:\n  {FETCH_CMD}\n  {FETCH_CMD} --from ./{NAME}           # a copy already on disk\n"
                f"  WOOF_NAM_BRIDGE_URL=https://mirror.example/woof-nam {FETCH_CMD}\n  {FETCH_CMD} --where")
@@ -190,10 +221,23 @@ def main(argv=None) -> int:
     ap.add_argument("--force", action="store_true", help="download again even if a pinned copy is installed")
     ap.add_argument("--where", action="store_true", help="print the writer `woof-nam products` would run, then exit")
     a = ap.parse_args(argv)
+    from namgpu import helpers
     if a.where:
         p = find()
         print(p if p is not None else missing_message())
+        for n in helpers.names():
+            h = helpers.find(n)
+            print(h if h is not None else helpers.missing_message(n))
         return 0 if p is not None else 1
+    if a.source is not None and helpers.by_asset(a.source):      # a helper program already on disk
+        n = helpers.by_asset(a.source)
+        try:
+            h = helpers.fetch(n, a.source, a.force)
+        except ExporterMissing as e:
+            print(f"woof-nam fetch-bridges: {e}", file=sys.stderr)
+            return 2
+        print(f"{n}: {h} (pinned)")
+        return 0
     try:
         p = fetch(a.source, a.dest, a.force)
     except ExporterMissing as e:
@@ -202,7 +246,15 @@ def main(argv=None) -> int:
     print(f"{NAME}: {p} (sha256 {PINS[platform_key()]['sha256'][:16]}.., pinned)")
     if a.dest and find() != p:
         print(f"note: woof-nam products looks in {staged_path()}; set WOOF_NAM_RW_RRFS_UPP={p} to use this copy")
-    return 0
+    rc = 0
+    if a.source is None and a.dest is None:      # the helper programs beside it (namgpu/helpers.py)
+        for n in helpers.names():
+            try:
+                print(f"{n}: {helpers.fetch(n, None, a.force)} (pinned)")
+            except ExporterMissing as e:
+                print(f"woof-nam fetch-bridges: {e}", file=sys.stderr)
+                rc = 2
+    return rc
 
 
 if __name__ == "__main__":

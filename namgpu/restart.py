@@ -91,7 +91,7 @@ def read_meta(rset) -> dict:
 # context (rrtm_call.KEY_CHUNK: chunk copies and chunk-local scratch, rebuilt zero-filled by the next radiation call),
 # driver-prep's per-call scratch (rrtm_prep:*, not the rrtm_prep:vec:* vectors), the horizontal-diffusion step
 # tables (hdiff_*) and the 30-arcsec terrain read only by init-gwd-orog (gwd_dem, 1.78 GiB).
-TRANSIENT_TABLES = ("rrtm_call:chunkctx", "gwd_dem")
+TRANSIENT_TABLES = ("rrtm_call:chunkctx", "gwd_dem", "tempo")  # tempo: TEMPO module + device blob, rebuilt on first use
 TRANSIENT_TABLE_PREFIXES = ("rrtm_prep:", "hdiff_")
 TRANSIENT_TABLE_KEEP_PREFIXES = ("rrtm_prep:vec:",)
 TRANSIENT_ATTRS = ("history_fields",)

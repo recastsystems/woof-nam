@@ -55,7 +55,10 @@ def rotated_latlon(meta, ii, jj):
     """Geographic lat/lon (deg) at fractional H indices of the (cropped) grid: NMMB rotated lat-lon."""
     d = np.pi / 180.0
     tph0, tlm0 = meta["tph0d"] * d, meta["tlm0d"] * d
-    dlm, dph = -2.0 * meta["wbd"] / (meta["im"] - 1) * d, -2.0 * meta["sbd"] / (meta["jm"] - 1) * d
+    # a nest on its parent's pole is off centre: its spacing is META dlmd/dphd (static_build writes them), not
+    # -2 wbd/(im-1) (the NCEP Alaska nest, wbd -42.651 with dlmd 0.0315, rendered its class maps as an arc over the sea)
+    dlm = float(meta.get("dlmd") or -2.0 * meta["wbd"] / (meta["im"] - 1)) * d
+    dph = float(meta.get("dphd") or -2.0 * meta["sbd"] / (meta["jm"] - 1)) * d
     tlm, tph = meta["wbd"] * d + ii * dlm, meta["sbd"] * d + jj * dph
     st0, ct0 = np.sin(tph0), np.cos(tph0)
     lat = np.arcsin(np.clip(st0 * np.cos(tph) * np.cos(tlm) + ct0 * np.sin(tph), -1.0, 1.0))

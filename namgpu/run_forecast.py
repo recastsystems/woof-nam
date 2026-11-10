@@ -11,6 +11,13 @@ receipt's "restart_latest" is the newest complete set. `woof-nam run --resume <o
 the run to its original end; case, source, hours and output folder come from the set.
 History size (namgpu/io/history_select.py): --history-fields products|full|state|<list>, --full-every 3h.
 
+Spin-up start (namgpu/spinup.py): --start spinup starts from the source analysis --spinup-hours (6) before the cycle,
+runs the model that long with the source's boundaries, brings the state to the cycle's analysis without dropping the
+spun-up fields (--spinup-update iau, centred incremental analysis update, or nudge, 1 h nudging) and forecasts from
+the cycle, so hour 0 carries hydrometeors, cold pools and mesoscale circulations. The IAU run re-executes itself once
+(woof-nam run --resume <out>/spinup/rewind) to rewind to the start of its window. The receipt's "spinup" names the
+variant and its timings. The default (--start cold) is the unchanged cold start.
+
 Our own box lanes source env-box.sh, which sets WOOF_NAM_BOX=1: only then does the run hand back the
 card lock it inherited (CARD3.lock / NAMGPU_CARD_LOCK) before the maps. Without it no lock is touched.
 """
@@ -95,7 +102,8 @@ def memory_check(a) -> int:
     rows: refuse in one line when the card cannot hold the run, before any allocation. 0.1.2 had none, so the 12 km
     grid on an 8 GB card died in State() with a raw OutOfMemoryError. The estimate is the fit memory path's (the
     smallest working set; a card of 64 GiB or more takes the full path, which holds more but fits there: 58-76 GB for
-    12 km on a 96 GB card), so this refuses only a run that cannot fit on any path. No margin either: this door has
+    12 km on a 96 GB card), so this refuses only a run that cannot fit on any path. When the card would take the full
+    path by its size and cannot hold this grid on it, the run takes the fit path (below). No margin either: this door has
     no smaller setting to fall back to, and column bands shrink a tight run.
     Skipped when the nest door already checked (NAMGPU_PREFLIGHT_DONE) or NAMGPU_PREFLIGHT=0."""
     if os.environ.get("NAMGPU_PREFLIGHT_DONE") or os.environ.get("NAMGPU_PREFLIGHT") == "0":
@@ -115,21 +123,78 @@ def memory_check(a) -> int:
         cards = cards[:a.cards]
     else:
         cards = [domain._visible_index()]
+    # Radiation rows on the fit path: NAMGPU_RRTM_ROWS when set, else the domain row's "fit_rrtm_rows" when the card
+    # has room for it, else FIT_RRTM_ROWS (8). Before this, `run --domain` always took 8 rows on the fit path, so the
+    # 7.6 km grid (about 16.6 GiB peak at 32 rows, measured on a 5090) spent 46 % of its device time in 8-row
+    # radiation chunks on cards with room for 32 (lane mesh-7p6km, 2026-11-08). The row is data, measured per grid.
+    from namgpu import domains as _domains
+    want_rows = int(_domains.current().get("fit_rrtm_rows") or 0)
+    rows_try = ([int(forced)] if forced else
+                sorted({statemod.FIT_RRTM_ROWS, max(want_rows, statemod.FIT_RRTM_ROWS)}, reverse=True))
+    pick = rows_try[0]
+    frees = {}
     for c in cards:
         try:
             free = domain.free_gib(c)
         except (OSError, subprocess.SubprocessError, ValueError, IndexError):
             return 0                      # no nvidia-smi reading: nothing to check against (the run says so if it dies)
-        rows = int(forced) if forced else statemod.FIT_RRTM_ROWS
-        e = domain.vram_estimate(g, min(rows, g["jm"]), len(cards), c, path="fit")
-        if e["total_gib"] > free:
+        fits = None
+        for rows in rows_try:
+            e = domain.vram_estimate(g, min(rows, g["jm"]), len(cards), c, path="fit")
+            if e["total_gib"] <= free:
+                fits = rows
+                break
+        if fits is None:
             total = domain.card_total_gib(c)
             print(f"woof-nam run: refused: the {g['im']} x {g['jm']} grid needs about {e['total_gib']} GiB per card "
                   f"({len(cards)} card{'s' if len(cards) > 1 else ''}, NAMGPU_RRTM_ROWS {e['rrtm_rows']}, the "
                   f"smallest memory path) and card {c} ({domain.card_name(c)}, {total:.1f} GiB) has "
                   f"{free:.2f} GiB free; use more cards (--cards N) or a smaller domain (woof-nam nest)", file=sys.stderr)
             return 3
+        pick = min(pick, fits)
+        frees[c] = free
+    # A card of 64 GiB or more takes the full memory path by its size alone. A grid whose full path the card cannot
+    # hold now (domain.full_run_gib, measured) runs the fit path instead: the same history, bit for bit. Breakage it
+    # prevents: the 7.6 km North America grid on a 96 GB card died with OutOfMemoryError at 99 GB in the start filter
+    # (2026-11-09). A path the caller set is never changed.
+    if (os.environ.get("NAMGPU_MEMORY_PATH", "").strip().lower() in ("", "auto")
+            and os.environ.get("NAMGPU_SCRATCH_ARENA", "").strip() not in ("0", "1")):
+        need = domain.full_run_gib(g, len(cards))
+        for c in cards:
+            total = domain.card_total_gib(c)
+            if statemod.resolve_memory_path("", total)["path"] == "full" and need > frees[c]:
+                why = (f"the full path needs about {need:.0f} GiB per card for the {g['im']} x {g['jm']} grid and "
+                       f"card {c} ({total:.1f} GiB) has {frees[c]:.1f} GiB free")
+                os.environ["NAMGPU_MEMORY_PATH"] = "fit"          # the forecast and its ranks read it
+                os.environ["NAMGPU_MEMORY_PATH_WHY"] = why
+                print(f"woof-nam run: fit memory path: {why}; the history is the same on either path", flush=True)
+                break
+    if not forced and pick > statemod.FIT_RRTM_ROWS:
+        path = statemod.resolve_memory_path(os.environ.get("NAMGPU_MEMORY_PATH", ""), domain.card_total_gib(cards[0]))
+        if path["path"] == "fit":
+            os.environ["NAMGPU_RRTM_ROWS"] = str(pick)   # rrtm_call and the ranks read it
+            print(f"woof-nam run: fit memory path, radiation in {pick}-row chunks (domain row fit_rrtm_rows, "
+                  f"the card has room)", flush=True)
     return 0
+
+
+def write_step_file(out: Path, cfg) -> Path:
+    """<out>/nam_configfile_step: the run's physics step (dt and nphs as config.load() resolved them, overrides
+    included) in configfile form, so `woof-nam products` (namgpu.io.products._run_ctx) can form step rates from PREC:
+    the precipitation-type trace mask (PREC / (DT NPHS) >= 0.05 mm/h, namgpu.products.ptype). Breakage it prevents:
+    a 12 km or 7.6 km parent run folder carried no configfile, so the awphys CSNOW/CICEP/CFRZR/CRAIN records had no
+    physics step and were left out (ptype-winter lane, 2026-11-09). Not a forecast input; the run never reads it."""
+    dst = Path(out) / "nam_configfile_step"
+    dt = float(cfg.dt)
+    whole = int(dt)
+    num = int(round((dt - whole) * 1000.0))
+    txt = ("# woof-nam run: this run's physics step, for woof-nam products (PRATE, the ptype trace rate)\n"
+           f"dt_int: {whole}\ndt_num: {num}\ndt_den: 1000\nnphs: {int(cfg.nphs)}\n")
+    if not dst.is_file() or dst.read_text() != txt:
+        tmp = dst.with_name(dst.name + f".tmp{os.getpid()}")
+        tmp.write_text(txt)
+        tmp.replace(dst)
+    return dst
 
 
 def main(argv=None):
@@ -138,7 +203,8 @@ def main(argv=None):
         description="Run one WOOF-NAM forecast on the NAM 12 km CONUS grid (954 x 835 x 60, all physics) on "
                     "one NVIDIA card, or on several cards of one machine with --cards N. Writes hourly history "
                     "(wrfout_d01_<valid time>), maps in <out>/maps/ and <out>/forecast-receipt.json. Memory: one "
-                    "card with 24 GB or more. On a card under 64 GB the run takes the 32 GB fit by itself (every "
+                    "card with 24 GB or more. On a card under 64 GB, or one that cannot hold the grid's full working set "
+                    "(the 7.6 km North America grid on a 96 GB card), the run takes the fit path by itself (every "
                     "physics scheme stays on; NAMGPU_MEMORY_PATH=full or fit picks one); the log and the receipt "
                     "name the path that ran.",
         epilog="example (after woof-nam fetch --cycle 2025031412 --hours 24 --case-dir cases/2025-03-14_12z):\n"
@@ -154,7 +220,19 @@ def main(argv=None):
                     help="start from the archived NAM analysis (native, cycles before 2026-11-03 12Z), GFS (gfs), "
                          "ECMWF open data IFS (ifs from 2026-10-20 12Z, ifs-0p25 from 2025-03-14 12Z; start and "
                          "boundaries from the same IFS cycle, CC BY 4.0) or the ERA5 reanalysis (era5, from 1940 to "
-                         "about 6 days ago; start and boundaries are ERA5 analyses; for hindcasts, CC BY 4.0)")
+                         "about 6 days ago; start and boundaries are ERA5 analyses; for hindcasts, CC BY 4.0) or NOAA's "
+                         "RAP analysis (rap, from 2021-02-22: 13 km, radar-cycled, with its own clouds; GFS boundaries "
+                         "and the GFS analysis outside RAP's grid and above 50 hPa) or NOAA's HRRR analysis (hrrr: 3 km CONUS, "
+                         "radar-cycled, the same way: GFS outside CONUS and above 50 hPa, GFS boundaries) or NOAA's RRFS v1 "
+                         "analysis (rrfs, from 2026-08-12: 3 km, the same way as hrrr) or a GEFS v12 member (gefs, with --member)")
+    ap.add_argument("--soil-from", default=None, choices=("source", "gfs", "gfs-moisture"),
+                    help="where the start's soil temperature and moisture come from: the start source's own (default) "
+                         "or the same cycle's GFS analysis (rap and hrrr: their RUC soil moisture is read at Noah's depths "
+                         "without rescaling between the two soil tables; gfs gives Noah-native soil instead; gfs-moisture keeps the source soil "
+                         "temperature and takes GFS soil moisture and canopy water)")
+    ap.add_argument("--member", default=None,
+                    help="the source member, for a source with members (gefs: c00 control, p01-p30); default the "
+                         "configfile key source_member, else the control. Sets NAMGPU_SOURCE_MEMBER for the run")
     ap.add_argument("--case-dir", type=Path, default=None,
                     help="the case folder (raw/, boco-<domain>/) when --case is only its name; the nest door passes a "
                          "cache on a data disk shared by every domain of that cycle")
@@ -165,6 +243,11 @@ def main(argv=None):
                          "the NAM 12 km parent). conus4 and conus5 start from GFS and build their static surface from "
                          "WPS_GEOG (permissive soil set) on the first run of each month" % ", ".join(_domain_names()))
     ap.add_argument("--hours", type=float, default=None, help="forecast length in hours (default 1)")
+    ap.add_argument("--physics-suite", default=None, metavar="NAME",
+                    help="physics suite (parm/physics_suites.json): nam (default, NAM v4.2.11 physics), hrrrv5 or rapv5 "
+                         "(TEMPO, MYNN-EDMF, MYNN surface layer, RUC, RRTMG, GSL drag on the NMMB dycore), or the "
+                         "presets woof-nam-next-12km and woof-nam-next-7p6km. Every suite but nam uses TEMPO, which "
+                         "needs gpuwm-hex 0.5.0 or newer (pip install \"recast-woof-nam[modern]\")")
     ap.add_argument("--out", type=Path, default=None, help="output folder (relative paths are under the work root)")
     ap.add_argument("--skip-init", default="init-fetch-case",
                     help="comma list of init units to skip (default: the fetch, already done by woof-nam fetch)")
@@ -173,10 +256,18 @@ def main(argv=None):
                     help="the start's digital filter (TDFI). auto (default): off for --source native, whose NAM "
                          "analysis is already the NAM's filtered 0 h state; on for every other source. on / off force it")
     ap.add_argument("--no-maps", action="store_true", help="write history only, no maps")
-    ap.add_argument("--products", action="store_true",
-                    help="also write NOAA's NAM awphys GRIB2 (nam.tHHz.awphysFF.tm00.grib2 on grid 218, "
-                         "<out>/products/) while the forecast runs: a `woof-nam products --follow` process writes "
-                         "each hour as its history file lands (log <out>/products.log, <out>/products/DONE at the end)")
+    ap.add_argument("--pbl", choices=("myj", "ysu"), default=None,
+                    help="boundary layer: myj (NAM: MYJ PBL + Janjic surface layer, default) or ysu (WRF YSU PBL + "
+                         "revised MM5 surface layer); sets NAMGPU_TURBULENCE / NAMGPU_SFC_LAYER for every process")
+    ap.add_argument("--topo-wind", type=int, choices=(0, 1), default=None,
+                    help="with --pbl ysu: WRF topo_wind (0 off, WRF default; 1 Jimenez-Dudhia subgrid-topography "
+                         "surface drag from the 30-arcsec terrain spread); sets NAMGPU_TOPO_WIND")
+    ap.add_argument("--products", nargs="?", const="auto", default=None, metavar="SET",
+                    help="also write NOAA's NAM GRIB2 files while the forecast runs (<out>/products/): the awphys "
+                         "files on grid 218 for the 12 km parent, a nest's hiresf files on its NOAA grid (SET: "
+                         "conusnest, alaskanest, hawaiinest, priconest, firewxnest, hiresf; default auto). A "
+                         "`woof-nam products --follow` process writes each hour as its history file lands "
+                         "(log <out>/products.log, <out>/products/DONE at the end)")
     ap.add_argument("--no-columns", action="store_true",
                     help="no sounding column store after the run (<out>/columns/d01/*.wcol; woof-nam columns)")
     ap.add_argument("--maps-only", action="store_true", help=argparse.SUPPRESS)   # internal: the post-run maps tail (no CUDA)
@@ -228,7 +319,62 @@ def main(argv=None):
     ap.add_argument("--managed-init", action="store_true",
                     help="--cards N: build the saved initial state in CUDA managed memory (a domain whose init does "
                          "not fit one card)")
+    ap.add_argument("--gwd", choices=("nam", "ugwp", "off"), default=None,
+                    help="orographic drag: nam (NAM's GWD, default), ugwp (NOAA-GSL UGWP drag suite as in RRFS: "
+                         "large-scale GWD and blocking, small-scale GWD, turbulent form drag), off")
+    ap.add_argument("--start", default="cold",
+                    help="cold (default): the forecast starts from the --source analysis at the cycle. spinup: start "
+                         "from the source analysis --spinup-hours before the cycle, run the model that long with the "
+                         "source's boundaries, bring the state to the cycle's analysis (--spinup-update) and forecast "
+                         "from the cycle: hour 0 then carries hydrometeors, cold pools and mesoscale circulations, as "
+                         "the operational NAM's 6 h catch-up gave it. A source name (gfs, ifs, era5, ...) is a cold "
+                         "start from that source")
+    ap.add_argument("--spinup-hours", type=int, default=6,
+                    help="--start spinup: hours of model before the cycle (default 6; a multiple of 6)")
+    ap.add_argument("--spinup-update", default="iau", choices=("iau", "nudge"),
+                    help="--start spinup: how the spun-up state is brought to the cycle's analysis. iau (default): "
+                         "the increment analysis minus model at the cycle is added in equal parts over a window "
+                         "centred on the cycle (the run rewinds to the window's start once). nudge: the state is "
+                         "relaxed toward the analysis over the last hour before the cycle. Both change PD, T, Q, U, V "
+                         "only, never the hydrometeors")
+    ap.add_argument("--spinup-iau-hours", type=float, default=None,
+                    help="--spinup-update iau: length of the centred window (default --spinup-hours: T0-3 h to T0+3 h)")
+    ap.add_argument("--spinup-nudge-hours", type=float, default=1.0,
+                    help="--spinup-update nudge: nudging window ending at the cycle, hours (default 1)")
+    ap.add_argument("--spinup-nudge-tau", default="1h",
+                    help="--spinup-update nudge: relaxation time (default 1h)")
     a = ap.parse_args(argv)
+    if a.start not in ("cold", "spinup"):
+        from namgpu.init import sources as _srcmod
+        if a.start not in _srcmod.SOURCES:
+            ap.error(f"--start {a.start!r}: cold, spinup, or a source ({', '.join(sorted(_srcmod.SOURCES))})")
+        a.source, a.start = a.start, "cold"          # --start gfs: a cold start from GFS
+    if a.start == "spinup" and not a.maps_only:
+        from namgpu.init import sources as _srcmod
+        _row = _srcmod.SOURCES.get(a.source, {})
+        if _row.get("kind") != "isobaric" or "boundary" not in _row:
+            ap.error(f"--start spinup --source {a.source}: the spin-up needs the source's analysis 6 h before the "
+                     "cycle and its boundaries over that window, which only the isobaric sources with a boundary "
+                     "row have (gfs, ifs, ifs-0p25, era5); the native row is one analysis file per case "
+                     "(raw/nam/bgrd3d00.grib2) and a parent run starts at its own hour 0")
+        if a.cards > 1:
+            ap.error("--start spinup --cards N: the N-card run builds its initial state in a separate process that "
+                     "every rank loads, and the spin-up's re-base and analysis update are not written for that "
+                     "layout yet; run the spin-up on one card")
+        if a.resume is not None or a.init_from is not None:
+            ap.error("--start spinup with --resume/--init-from: a spin-up run resumes from its own restart sets "
+                     "(woof-nam run --resume <set>, the spin-up is read from the set)")
+    if a.gwd:
+        os.environ["NAMGPU_GWD"] = a.gwd       # read by config.load(); rank children inherit it
+    if a.pbl:
+        os.environ["NAMGPU_TURBULENCE"] = a.pbl
+        os.environ["NAMGPU_SFC_LAYER"] = {"myj": "myj", "ysu": "sfclayrev"}[a.pbl]
+    if a.topo_wind is not None:
+        os.environ["NAMGPU_TOPO_WIND"] = str(a.topo_wind)
+    if getattr(a, "member", None):
+        os.environ["NAMGPU_SOURCE_MEMBER"] = str(a.member)
+    from namgpu import devmem as _devmem
+    _devmem.blocking_sync()          # waits block instead of spinning a core (devmem.blocking_sync)
     resume_meta = None
     if a.resume is not None and not a.maps_only:
         from namgpu import restart as rstmod
@@ -252,6 +398,19 @@ def main(argv=None):
     if a.case is None or a.out is None:
         ap.error("--case and --out are required (or --resume <restart>)")
     a.hours = 1.0 if a.hours is None else a.hours
+    if a.physics_suite:
+        from namgpu.physics import suites as _suites
+        os.environ[_suites.ENV] = a.physics_suite      # config.load, the ranks and the children read it
+        _suites.selected()                            # an unknown name stops here, before the init
+        # a preset row may name its grid (woof-nam-next-7p6km -> na7p6); an explicit --domain or NAMGPU_CONFIGFILE wins
+        if a.domain is None and not os.environ.get("NAMGPU_CONFIGFILE") and _suites.row().get("domain"):
+            a.domain = _suites.row()["domain"]
+            print(f"woof-nam run: --physics-suite {a.physics_suite} runs on its own grid --domain {a.domain}", flush=True)
+    if "NAMGPU_RANK" not in os.environ:
+        # TEMPO or MYNN v6.1 without gpuwm-hex: one line here, before the fetch and the start, not a traceback at
+        # the physics start (namgpu/hexdep.py says which options need it)
+        from namgpu import hexdep
+        hexdep.require(a.physics_suite, prog="woof-nam run")
     from namgpu import restart as _rst
     from namgpu.io import history_select as _hs
     a.history_fields = a.history_fields or _hs.DEFAULT_PRESET
@@ -277,9 +436,11 @@ def main(argv=None):
         from namgpu import exporter
         try:
             exporter.ensure()
+            if a.products not in ("auto", "awphys"):
+                exporter.require(("pair_next", "mask_carrier"), f"the {a.products} nest files")
         except exporter.ExporterMissing as e:
             raise SystemExit(f"woof-nam run --products: {e}") from None
-        _start_products(a.out if a.out.is_absolute() else paths.work_root() / a.out)
+        _start_products(a.out if a.out.is_absolute() else paths.work_root() / a.out, a.products)
     from namgpu import domains
     domains.select(a.domain, a.source)
     if "NAMGPU_RANK" not in os.environ:
@@ -315,6 +476,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     cfg = config.load()
     config.start_filter(cfg, a.source, a.filter)          # TDFI off for a native NAM start unless --filter on
+    write_step_file(out, cfg)
     g = gridmod.build(cfg)
     multi = rank_setup(g) if "NAMGPU_RANK" in os.environ else None   # several cards: this process is one rank
     if multi is not None and a.init_from is None:
@@ -341,6 +503,10 @@ def main(argv=None):
                                   "%Y-%m-%d_%Hz")
     ctx.start_time = ctx.start
     ctx.init_source = a.source
+    if a.soil_from:
+        from namgpu.init import gfs_start as _gs
+        ctx.soil_from = a.soil_from
+        os.environ[_gs.SOIL_FROM_ENV] = a.soil_from   # card processes
     ctx.parent_run = a.parent_run
     ctx.out_dir = out if multi is None else out / f"rank{ctx.slab.rank}"   # history goes via NAMGPU_HIST_SHM
     Path(ctx.out_dir).mkdir(parents=True, exist_ok=True)
@@ -357,6 +523,27 @@ def main(argv=None):
     if static_rec is not None:
         rec["static"] = static_rec
         _stage(rec, "static", static_rec["seconds"], "GPU, 1 card" if static_rec["action"] == "built" else "none (cached)")
+    spin = None
+    if a.start == "spinup" or (resume_meta or {}).get("spinup"):
+        from namgpu import spinup
+        from namgpu.init import sources as srcmod
+        if resume_meta is not None:
+            spin = spinup.Plan.from_meta(resume_meta["spinup"])
+        else:
+            spin = spinup.make_plan(ctx.start, a.spinup_hours, a.spinup_update, a.spinup_iau_hours,
+                                    a.spinup_nudge_hours, _rst.parse_hours(a.spinup_nudge_tau) * 3600.0, a.source,
+                                    srcmod.boco_age_h(srcmod.SOURCES[a.source], cfg))
+        rec["start"] = "spinup"
+        rec["spinup"] = {"plan": spin.meta()}
+        pa = out / "spinup" / "phase-a-receipt.json"
+        if resume_meta is not None and pa.is_file():
+            rec["spinup"]["phase_a_receipt"] = json.loads(pa.read_text())
+        if resume_meta is None:
+            ts = time.perf_counter()
+            rec["spinup"]["inputs"] = spinup.ensure_inputs(ctx.case_dir, spin, cfg)
+            _stage(rec, "spinup inputs", time.perf_counter() - ts, "I/O, 16 threads")
+        print(f"spinup: start {spin.spin_start:%Y-%m-%d %HZ}, {spin.hours} h to the cycle {spin.cycle:%Y-%m-%d %HZ}, "
+              f"update {spin.update}", flush=True)
     mp = statemod.memory_path()
     rec["memory_path"] = mp
     # the stdout line names the path only; the card size that chose it stays in the receipt
@@ -413,6 +600,9 @@ def main(argv=None):
         from namgpu.steps import drv_loop_limits
         with ctx.stream:
             drv_loop_limits.run(ctx)
+    elif spin is not None:
+        with ctx.stream, spinup.InitScope(ctx, spin, ctx.forecast_hours):
+            rec["init"] = init_case_driver.run(ctx, only=chain)       # the start at T0-S, its own boundaries
     else:
         with ctx.stream:
             rec["init"] = init_case_driver.run(ctx, only=chain)
@@ -448,9 +638,16 @@ def main(argv=None):
     from namgpu import devmem
     devmem.release(ctx.stream)
     cp.get_default_pinned_memory_pool().free_all_blocks()
+    rec["cuda_wait"] = devmem.CUDA_WAIT          # blocking or spin (devmem.blocking_sync)
     rec["after_init_used_gib"] = round((lambda m: (m[1] - m[0]) / 2**30)(cp.cuda.Device().mem_info), 1)
     rec["pool_after_init_gib"] = round(devmem.pool().total_bytes() / 2**30, 2)
 
+    spin_boco = None
+    if spin is not None:
+        if a.resume is not None and Path((resume_meta or {}).get("case_dir", "")).is_dir():
+            ctx.case_dir = Path(resume_meta["case_dir"])
+        spin_boco, s_b = spinup.forecast_bocos(ctx, spin, a.hours)
+        _stage(rec, "forecast boundaries", s_b, "GPU, 1 card; decode threads")
     leave = [u for u in a.leave_out.split(",") if u]
     for u in leave:
         drv.units[u]["mode"] = "skip"
@@ -466,13 +663,17 @@ def main(argv=None):
         rroot = rroot if rroot.is_absolute() else paths.work_root() / rroot
         ctx.restart_writer = rstmod.Writer(rroot, a.restart_every_h, cfg.dt, keep=a.restart_keep, meta={
             "case": str(a.case), "case_dir": str(ctx.case_dir), "source": a.source, "hours": a.hours,
-            "out": str(out), "start": f"{ctx.start:%Y-%m-%d_%H:%M:%S}", "dt": float(cfg.dt),
+            "out": str(out), "start": f"{(ctx.start if spin is None else spin.cycle):%Y-%m-%d_%H:%M:%S}",
+            "dt": float(cfg.dt),
             "restart_every": a.restart_every, "restart_dir": str(rroot), "memory_path": mp["path"],
             "history": {"fields": a.history_fields, "full_every": a.full_every},
             "woof_nam": __import__("namgpu").__version__,
             "window": __import__("namgpu.nest.move", fromlist=["window_meta"]).window_meta(cfg),
             "configfile": str(config.configfile_path()), "static_npz": str(config.static_npz(cfg) or "")},
             at_hours=a.restart_at_h)
+        if spin is not None:
+            ctx.restart_writer.meta["spinup"] = dict(spin.meta(), phase="forecast",
+                                                     increment=str(out / "spinup" / "increment"))
         print(f"restart sets every {a.restart_every_h:g} h" + (f" and at {a.restart_at_h} h" if a.restart_at_h else "")
               + f" -> {rroot}", flush=True)
     # moving nest shock numbers (namgpu/nest/move.py Monitor): after a landing, and before the segment's last restart
@@ -521,6 +722,7 @@ def main(argv=None):
         print(msg, flush=True)
 
     t1 = time.perf_counter()
+    spin_exec = None
     try:
         # TDFI first, as the NAM forecast does (filter_method 3, exnam_fcst.sh), then the forecast loop: the same
         # order as drv-time-loop / tests/smoke_full.py. Driver.run alone skipped the filter (every run_forecast
@@ -537,7 +739,21 @@ def main(argv=None):
             return out
         rec["filter_method"] = int(cfg.filter_method)
         with ctx.stream:
-            if a.resume is not None or getattr(ctx, "move_landing", None) is not None:
+            if spin is not None and a.resume is not None:
+                ctx.filter_active = False             # the filter ran in the first process
+                rec["spinup"]["run"] = spinup.run_resumed(ctx, drv, spin, resume_meta, a.hours, spin_boco, log)
+            elif spin is not None and spin.update == "iau":
+                wmeta = {"case": str(a.case), "case_dir": str(ctx.case_dir), "source": a.source, "hours": a.hours,
+                         "out": str(out), "start": f"{spin.cycle:%Y-%m-%d_%H:%M:%S}", "dt": float(cfg.dt),
+                         "restart_every": a.restart_every,
+                         "restart_dir": None if a.restart_dir is None else str(a.restart_dir),
+                         "memory_path": mp["path"], "history": {"fields": a.history_fields, "full_every": a.full_every},
+                         "woof_nam": __import__("namgpu").__version__}
+                rec["spinup"]["phase_a"] = spinup.phase_a_iau(ctx, drv, spin, _tdfi, out, wmeta, log)
+                spin_exec = rec["spinup"]["phase_a"]["rewind_set"]
+            elif spin is not None:
+                rec["spinup"]["run"] = spinup.run_nudge(ctx, drv, spin, _tdfi, a.hours, spin_boco, log)
+            elif a.resume is not None or getattr(ctx, "move_landing", None) is not None:
                 ctx.filter_active = False             # the filter ran before the first restart set / the move
                 n = drv.run(a.hours, log=log)
             else:
@@ -554,6 +770,13 @@ def main(argv=None):
         print("RUN ERROR", rec["error"], flush=True)
     ctx.stream.synchronize()
     wall = time.perf_counter() - t1
+    if spin_exec is not None and rec["error"] is None:
+        rec["spinup_phase_a_wall_s"] = round(wall, 2)
+        rec["exit_code"] = None
+        (out / "spinup" / "phase-a-receipt.json").write_text(json.dumps(rec, indent=1, default=str))
+        rd.__exit__(None, None, None)
+        print(f"spinup: phase A done in {wall:.1f} s; rewinding to {spin_exec}", flush=True)
+        spinup.exec_phase_b(a, spin_exec, ctx.case_dir, out)    # does not return
     if getattr(ctx, "restart_writer", None) is not None:
         try:
             ctx.restart_writer.drain()
@@ -575,6 +798,15 @@ def main(argv=None):
     if rec.get("tdfi_s") is not None:
         _stage(rec, "tdfi", rec["tdfi_s"], "GPU, 1 card")
     _stage(rec, "forecast", wall - (rec.get("tdfi_s") or 0.0), "GPU, 1 card; history on a writer thread")
+    if spin is not None and isinstance(rec["spinup"].get("run"), dict) and "forecast_s" in rec["spinup"]["run"]:
+        fs = rec["spinup"]["run"]["forecast_s"]
+        nf = int(ctx.ntimestep) - (n0 if rec["spinup"]["run"].get("resumed_phase") == "forecast" else 0)
+        rec["ms_per_step"] = round(fs / max(1, nf) * 1e3, 1)
+        _stage(rec, "spinup", wall - fs - (rec.get("tdfi_s") or 0.0),
+               "GPU, 1 card" + ("; resumed from the rewind set" if a.resume is not None else ""))
+        _stage(rec, "forecast", fs, "GPU, 1 card; history on a writer thread")
+        if rec["error"] is None:
+            rec["spinup"]["cleaned"] = spinup.cleanup(out)
     rec["hour_lines"] = hours_log
     bad = init_case_driver.census(ctx)
     if multi is not None:
@@ -604,8 +836,12 @@ def main(argv=None):
         # run starts while the frames render (run lead 11:05Z: the old post-run maps held CARD3.lock and
         # 62 GB for ~50 min on one core). Freeing the pool still left 10.7 GB in unit caches, so this process
         # re-executes itself as the maps-only tail (same PID for the runner, no CUDA context left).
-        from namgpu.io.io_history import drain
+        from namgpu.io.io_history import drain, shutdown as history_shutdown
         drain(ctx)                                   # the last history frame is on disk
+        # The exec below replaces this process; without this the history writer processes, their forkserver and its
+        # resource tracker stayed behind after every run with maps (1.3-1.8 GB of host memory each, still there an
+        # hour after the run; release pass 2026-11-09).
+        history_shutdown()
         rec["card_released"] = release_card(ctx)
         rec["exit_code"] = 1 if (rec["error"] or bad) else 0
         (out / "forecast-receipt.json").write_text(json.dumps(rec, indent=1, default=str))
@@ -629,17 +865,18 @@ def main(argv=None):
     return 1 if (rec["error"] or bad) else 0
 
 
-def _start_products(out: Path) -> None:
-    """The awphys GRIB2 follower: its own process (no CUDA context of this run; the writer's GPU post is a small
-    separate context), started once by the top process, alive across the maps-only re-exec, done when it has
-    written every hour after the run's receipt appears."""
+def _start_products(out: Path, set_name: str = "auto") -> None:
+    """The GRIB2 follower (awphys, or a nest's hiresf set): its own process (no CUDA context of this run; the
+    writer's GPU post is a small separate context), started once by the top process, alive across the maps-only
+    re-exec, done when it has written every hour after the run's receipt appears."""
     out.mkdir(parents=True, exist_ok=True)
     log = open(out / "products.log", "ab")
     subprocess.Popen([sys.executable, "-c",
                       "import sys; sys.path.insert(0, %r); from namgpu.io.products import main; "
-                      "sys.exit(main(sys.argv[1:]))" % PKG_PARENT, "--run", str(out), "--follow"],
+                      "sys.exit(main(sys.argv[1:]))" % PKG_PARENT, "--run", str(out), "--follow", "--set", set_name],
                      stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-    print(f"products: awphys GRIB2 follower started -> {out / 'products'} (log {out / 'products.log'})", flush=True)
+    print(f"products: GRIB2 follower ({set_name}) started -> {out / 'products'} (log {out / 'products.log'})",
+          flush=True)
 
 
 def owned_census(ctx) -> dict:
@@ -666,7 +903,7 @@ def rank_setup(g) -> dict:
     communicator."""
     import numpy as np
 
-    from namgpu.parallel import Comm
+    from namgpu.parallel import make_comm
     from namgpu.slab import Slab, local_grid
     r, n = int(os.environ["NAMGPU_RANK"]), int(os.environ["NAMGPU_NRANKS"])
     jmg, im = int(g.jm), int(g.im)
@@ -676,7 +913,7 @@ def rank_setup(g) -> dict:
            "cen_lat": float(np.degrees(g.glat_h[cen])), "cen_lon": float(np.degrees(g.glon_h[cen])),
            "dx": float(np.asarray(g.dxh)[jmg // 2])}
     slab = Slab.for_rank(r, n, jmg)
-    comm = Comm(r, n, os.environ["NAMGPU_NCCL_ID"])
+    comm = make_comm(r, n, os.environ["NAMGPU_NCCL_ID"])
     return {"slab": slab, "comm": comm, "geo": geo, "grid": local_grid(g, slab)}
 
 
@@ -839,6 +1076,8 @@ def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool 
 
 if __name__ == "__main__":
     _rc = main()
+    from namgpu.io import io_history as _ioh
+    _ioh.shutdown()             # writer processes hold stdout; os._exit skips their exit hooks
     sys.stdout.flush()
     sys.stderr.flush()
     # hard exit: after a device OOM the CUDA/CuPy teardown hung for minutes holding the card and its lock

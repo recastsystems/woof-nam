@@ -139,3 +139,27 @@ def test_parent_run_refusal_names_folders(tmp_path):
     assert str(empty) in msg and str(empty / "run") in msg and "wrfout_d01_" in msg
     with pytest.raises(SystemExit):
         cli.resolve_parent_run(None)
+
+
+def test_free_memory_query_survives_a_slow_nvidia_smi(monkeypatch):
+    # 0.2.0 release pass (2026-11-09): on a host with a load average in the thousands nvidia-smi took over 20 s and
+    # the nest door died with an uncaught subprocess.TimeoutExpired. One retry with a longer wait, then one plain line.
+    import subprocess
+    waits = []
+
+    def slow_then_ok(cmd, **kw):
+        waits.append(kw["timeout"])
+        if len(waits) == 1:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="49152", stderr="")
+    monkeypatch.setattr(domain.subprocess, "run", slow_then_ok)
+    assert domain.free_gib("0") == 48.0
+    assert waits == [20, 120]
+
+    def never(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    monkeypatch.setattr(domain.subprocess, "run", never)
+    with pytest.raises(SystemExit) as e:
+        domain.free_gib("3")
+    msg = str(e.value)
+    assert "card 3" in msg and "nvidia-smi did not answer" in msg and "out of memory" in msg

@@ -97,13 +97,19 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--no-handoff", action="store_true", help="a 12 km (parent row) run: do not write the parent "
                    "hand-off set (history_handoff) into its history")
     n.add_argument("--start", required=True, help="YYYYMMDDHH (00/06/12/18 for gfs/ifs)")
-    n.add_argument("--hours", type=float, default=48.0)
+    n.add_argument("--hours", type=float, default=None, help="forecast hours (default 48; an --ncep-nest row's own "
+                   "length, 60 for NCEP's 3 km nests; --ncep-nest --concurrent: the parent, default 84 as NCEP)")
     n.add_argument("--out", type=Path, required=True)
     n.add_argument("--cards", type=int, default=1)
     n.add_argument("--card-list", default=os.environ.get("NAM_CARDS", ""))
     n.add_argument("--spec-adv", action="store_true", help="NAM's nest value spec_adv true (not yet run in the port)")
     n.add_argument("--rrtm-rows", type=int, default=None, help="force NAMGPU_RRTM_ROWS (default: pre-flight picks)")
     n.add_argument("--no-maps", action="store_true")
+    n.add_argument("--products", nargs="?", const="auto", default=None, metavar="SET",
+                   help="also write NOAA's NAM nest GRIB2 files (<prefix>.tHHz.<nest>.hiresfFF.tm00.grib2 + .idx, "
+                        "<out>/run/products/) while the forecast runs: SET is the NOAA nest grid and record list "
+                        "(conusnest, alaskanest, hawaiinest, priconest, firewxnest; hiresf = a Lambert box around "
+                        "this nest; default auto: the NCEP nest this domain is, else hiresf)")
     n.add_argument("--no-warm", action="store_true")
     n.add_argument("--dry-run", action="store_true", help="domain, pre-flight and static only")
     n.add_argument("--wait-min", type=float, default=0.0, help="shared card: if the nest does not fit now, fetch "
@@ -112,6 +118,27 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--boco-age-h", type=int, default=None, help="boundary cycle age in hours (default: 0 when the "
                    "start cycle's forecast is already published, else the source row's, 6 for gfs as NAM)")
     n.add_argument("--no-sheets", action="store_true")
+    n.add_argument("--ncep-nest", default=None, metavar="NAME[,NAME]", help="one of NCEP's own NAM nests "
+                   "(namgpu/nest/ncep_nests.py NCEP_NESTS, e.g. alaskanest): its native grid on the NAM 12 km "
+                   "parent's rotated grid, its length and spec_adv, in place of --center/--size-km/--res-km; with --concurrent "
+                   "(a comma list) they run one-way inside the live NAM 12 km parent, one card or --cards N "
+                   "(namgpu/nest/suite_door.py)")
+    n.add_argument("--firewx-loc", type=Path, default=None, help="--ncep-nest firewxnest: a nam_firewx_loc file "
+                   "(one 'HHz lat lon' line per cycle, setfirewx.fd's format); default NCEP's last production points "
+                   "(namgpu/parm/nam_firewx_loc: 00/12Z 39.0 -112.0, 06/18Z 42.0 -122.3)")
+    n.add_argument("--firewx-center", default=None, metavar="LAT,LON", help="--ncep-nest firewxnest: this cycle's "
+                   "point, in place of the nam_firewx_loc line (checked with setfirewx.fd's 5-row rule)")
+    n.add_argument("--ncep-window", default=None, metavar="NXxNY", help="with --ncep-nest: a centred sub-box of "
+                   "the nest, NX x NY parent (12 km) cells, same pole, spacing and physics (a smoke on a card the "
+                   "whole nest does not fit); NXxNY+I+J puts its SW corner I, J parent cells from the nest's")
+    n.add_argument("--nest-hours", type=float, default=None, help="--ncep-nest --concurrent: the nests' length "
+                   "(default the row's, 60 h as NCEP); the parent runs on alone to --hours")
+    n.add_argument("--parent-margin", type=int, default=None, help="--ncep-nest --concurrent: run the parent on a "
+                   "crop of the NAM 12 km grid this many parent cells wider than the nests (default: the whole grid; "
+                   "30 with --ncep-window)")
+    n.add_argument("--keep-init", action="store_true", help="--ncep-nest --concurrent: keep the saved inits")
+    n.add_argument("--hist-workers", type=int, default=8, help="--ncep-nest --concurrent on several cards: history "
+                   "writer processes per nest (the parent gets half); a 3 km CONUS hour takes one writer ~3 min")
     from namgpu.nest import twoway_door           # --two-way / --concurrent (a parent and this nest in one process)
     twoway_door.add_args(n)
     from namgpu.nest import follow_door           # --follow (a storm-following nest, one-way from a parent run or a source)
@@ -390,6 +417,53 @@ def main(argv=None) -> int:
               f"(the door picks from {domain.RRTM_ROW_CHOICES}); give 3 or more", file=sys.stderr)
         return 2
     following = bool(a.follow or a.storm or a.storm_id or a.follow_config)
+    if a.ncep_nest and (a.concurrent or a.two_way or a.parent_margin is not None):
+        # NCEP's nests inside the live NAM 12 km parent, one card or N (namgpu/nest/suite_door.py)
+        if following or a.center or a.parent_center or a.parent_size_km or a.parent_size_y_km:
+            ap.error("nest: --ncep-nest --concurrent places the nests where NCEP did, in the NAM 12 km grid: drop "
+                     "--center/--parent-*/--follow")
+        from namgpu.nest import suite_door
+        return suite_door.main(a, argv)
+    ncep = None
+    if a.ncep_window and not a.ncep_nest:
+        ap.error("nest: --ncep-window needs --ncep-nest")
+    if a.ncep_nest:
+        # NCEP's own nest: a row of ncep_nests.NCEP_NESTS (its grid is fixed on the NAM parent's rotated grid, so a
+        # centre, size or resolution would contradict it; a live parent or a moving nest is not what NCEP ran)
+        if following or a.two_way or a.concurrent or a.parent_center or a.parent_size_km or a.parent_size_y_km:
+            ap.error("nest: --ncep-nest runs NCEP's fixed one-way nest; it takes no --follow or live-parent option")
+        from namgpu.nest import ncep_nests
+        per_cycle = ncep_nests.row(a.ncep_nest).get("placement") == "firewx"
+        if a.center is not None and not per_cycle:
+            ap.error("nest: --ncep-nest places the nest where NCEP did; drop --center")
+        if (a.firewx_loc is not None or a.firewx_center is not None) and not per_cycle:
+            ap.error("nest: --firewx-loc / --firewx-center are for --ncep-nest firewxnest")
+        if per_cycle and a.center is not None and a.firewx_center is not None:
+            ap.error("nest: give the fire-weather point once (--firewx-center or --center)")
+        win = None
+        if a.ncep_window:
+            m = re.fullmatch(r"(\d+)[xX](\d+)(?:\+(\d+)\+(\d+))?", a.ncep_window.strip())
+            if not m:
+                ap.error(f"nest: --ncep-window {a.ncep_window!r}: want NXxNY parent cells, e.g. 150x156, or "
+                         f"NXxNY+I+J with the window's SW corner I, J parent cells from the nest's")
+            win = (int(m.group(1)), int(m.group(2)))
+            off = (int(m.group(3)), int(m.group(4))) if m.group(3) is not None else None
+        else:
+            off = None
+        point = None
+        if per_cycle and (a.firewx_center or a.center):
+            point = parse_center(a.firewx_center or a.center)
+        ncep = {"row": ncep_nests.row(a.ncep_nest),
+                "grid": ncep_nests.nest_grid(a.ncep_nest, win, off, datetime.strptime(a.start, "%Y%m%d%H").hour,
+                                             a.firewx_loc, point)}
+        a.res_km = float(ncep["row"]["res_km"])
+        if a.hours is None:
+            a.hours = float(ncep["row"]["hours"])
+        if ncep["row"].get("spec_adv"):
+            a.spec_adv = True                    # NCEP's nest value (parm/nam_configfile_<nest> spec_adv .true.)
+        a.center = "{},{}".format(*ncep["grid"]["center"])
+    if a.hours is None:
+        a.hours = 48.0
     # A live parent (--two-way, --concurrent, or any --parent-* option) runs one-way concurrent, as NOAA's NAM ran its
     # nests (nest_mode: 1-way); --two-way turns on NMMB's feedback. The --source parent hand-off and the one-domain
     # door below are one-way too.
@@ -453,8 +527,17 @@ def main(argv=None) -> int:
 
     # domain
     stage("domain")
-    g = domain.nest_grid(lat, lon, a.size_km, a.res_km, a.size_y_km)
-    name = domain.domain_name(g, a.size_km, a.size_y_km)
+    if ncep is not None:
+        from namgpu.nest import ncep_nests
+        g = ncep["grid"]
+        name = ncep_nests.domain_name(g)
+        rec["ncep_nest"] = {"name": a.ncep_nest, "window": g.get("ncep_window"),
+                            "window_offset": g.get("ncep_window_offset"), "src": ncep["row"]["src"],
+                            "hiresf": ncep["row"].get("hiresf", {}).get("file"), "keys": ncep["row"].get("keys"),
+                            "firewx": g.get("firewx")}
+    else:
+        g = domain.nest_grid(lat, lon, a.size_km, a.res_km, a.size_y_km)
+        name = domain.domain_name(g, a.size_km, a.size_y_km)
     STATIC_CACHE.mkdir(parents=True, exist_ok=True)
     # the key names the dataset table that builds the file (static_build.datasets_key): a static built from other
     # data (the FAO soil / ISLSCP deep-soil T builds from before static-world) is never reused under a new table
@@ -471,7 +554,11 @@ def main(argv=None) -> int:
         rec["handoff"] = ("off: --cards > 1 (tools/history_merge.py writes no soil_layers_stag dimension; "
                           "io_history_fields.handoff_fields is one-card only)")
         print(f"woof-nam: {rec['handoff']}", flush=True)
-    keys = domain.write_configfile(cfgfile, g, name, static, a.spec_adv, handoff=handoff)
+    keys = domain.write_configfile(cfgfile, g, name, static, a.spec_adv, handoff=handoff,
+                                   extra=(ncep["row"].get("keys") if ncep is not None else None))
+    if ncep is not None and g.get("firewx"):
+        # NOAA's nam.tHHz.firewxnest_center_latlon (f4.1,1x,f6.1), with the woof-nam. prefix
+        (out / f"woof-nam.t{cycle:%H}z.firewxnest_center_latlon").write_text(g["firewx"]["center_latlon"])
     if follow is not None and source == "parent":
         # a moving nest under our own parent lands every hour (follow.SOURCE_LANDING), so its boundaries are hourly:
         # READ_BC names each interval's file from the forecast hour, and a window landing at hour H reads boco.H of its
@@ -543,9 +630,14 @@ def main(argv=None) -> int:
                NAMGPU_DATA_CREDIT=credit, NAMGPU_DATA_LICENCES=json.dumps(credit_lines), NAMGPU_START_SOURCE=source,
                PYTHONPATH=str(ROOT) + (":" + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""))
     env["NAMGPU_BOCO_AGE_H"] = str(boco_age)
+    if source == "parent":
+        # every child reads the parent from here: run_forecast takes --parent-run, but the --cards N init save
+        # (slab_init save) has no such option, so a several-card nest from a parent stopped in init-parent-start
+        # ("source 'parent' needs the parent run directory"; WOOF-NAM suite proof box, Alaska nest on 2 cards)
+        env["NAMGPU_PARENT_RUN"] = str(Path(a.parent_run).resolve())
     a.boco_age_h = boco_age
     if pf.get("pick"):
-        _pool_cap(env, rec, pf["pick"])
+        _pool_cap(env, rec, pf["pick"], pf.get("free_gib"))
 
     # static
     stage("static")
@@ -606,7 +698,7 @@ def main(argv=None) -> int:
             return 3
         rows = pf["pick"]["rrtm_rows"]
         env["NAMGPU_RRTM_ROWS"] = str(rows)
-        _pool_cap(env, rec, pf["pick"])
+        _pool_cap(env, rec, pf["pick"], pf.get("free_gib"))
         print(f"woof-nam: card has room: {pf['free_gib']} GiB free, NAMGPU_RRTM_ROWS {rows}", flush=True)
 
     # forecast (init + bocos + TDFI + run) and maps
@@ -615,6 +707,12 @@ def main(argv=None) -> int:
            "--source", source, "--hours", str(hours), "--out", str(run_dir)]
     if a.no_maps:
         cmd.append("--no-maps")
+    if getattr(a, "products", None):
+        # an NCEP nest writes its own NOAA file (--ncep-nest conusnest -> the conusnest hiresf files)
+        pset = a.products
+        if pset == "auto" and getattr(a, "ncep_nest", None) and "," not in a.ncep_nest:
+            pset = a.ncep_nest
+        cmd += ["--products", pset]
     if source == "parent":
         cmd += ["--parent-run", str(Path(a.parent_run).resolve())]
     init_tmp = None
@@ -623,10 +721,14 @@ def main(argv=None) -> int:
         init_dir = Path(os.environ.get("NAMGPU_INIT_DIR", f"/dev/shm/{name}-init"))
         if "NAMGPU_INIT_DIR" not in os.environ:
             init_tmp = init_dir      # the door-made copy in /dev/shm (host RAM): removed when the run ends
-        # the init runs on the first card of the list, which the pre-flight checked
+        # the init runs on the first card of the list, which the pre-flight checked. It builds the WHOLE domain (in
+        # managed memory), so the forecast's per-rank pool cap is not its limit: with it, the CONUS 3 km nest on 4
+        # cards (1827 x 1467, cap 29.1 GiB per rank) stopped in init-save with OutOfMemoryError at 30.7 GiB
+        # allocated (WOOF-NAM suite proof box, 2026-11-06)
+        save_env = {k: v for k, v in env.items() if k != "CUPY_GPU_MEMORY_LIMIT"}
         code, _ = run_logged([sys.executable, "-m", "namgpu.init.slab_init", "save", "--case", case, "--case-dir",
                               str(case_dir), "--source", source, "--hours", str(hours), "--out", str(init_dir),
-                              "--managed"], dict(env, CUDA_VISIBLE_DEVICES=cards[0]), out / "init-save.log", sampler)
+                              "--managed"], dict(save_env, CUDA_VISIBLE_DEVICES=cards[0]), out / "init-save.log", sampler)
         done("init-save", rc=code)
         if code:
             _rm_init(init_tmp, rec)
@@ -715,17 +817,35 @@ def main(argv=None) -> int:
     return code
 
 
-def _pool_cap(env: dict, rec: dict, pick: dict) -> None:
+def _pool_cap(env: dict, rec: dict, pick: dict, free_gib=None) -> None:
     """Cap the CuPy pool at the pre-flight's pool_limit for the memory path the forecast takes on the card (CuPy frees
     its cached blocks and retries at the cap, so the run stays inside what was checked). No cap when the path is
     unknown (domain.vram_estimate gives pool_limit_bytes None): a cap from the wrong path's model killed the Milton
     12 km parent on a 96 GB card (2026-11-05)."""
     rec["memory_path"] = pick.get("memory_path")
+    if pick.get("memory_path_switched"):
+        env["NAMGPU_MEMORY_PATH"] = "fit"         # domain._paths_to_try: the forecast must take the path that was checked
+        rec["memory_path_switched"] = pick["memory_path_switched"]
     if pick.get("pool_limit_bytes"):
         env["CUPY_GPU_MEMORY_LIMIT"] = str(pick["pool_limit_bytes"])
         rec["pool_limit_gib"] = pick["pool_limit_gib"]
+        # init (start, boundaries, TDFI tables) is not in the estimate: a nest from a parent's history builds its
+        # boundary strips there, past the forecast's cap (CONUS 3 km on one card: init-gfs-bocos at 66.4 of a 66.6 GiB
+        # cap; Alaska beside the 12 km parent: 38.6 of 38.7; suite proof 2026-11-06). So init may use what the card has
+        # free now, less 1 GiB, and devmem.forecast_start drops the ceiling to the forecast's cap at the first step.
+        if free_gib:
+            room = float(free_gib) - 1.0
+            if domain.card_share_gib() is not None:
+                # a suite share is the run's whole reservation on the card: the context and the local-memory
+                # reservation sit outside the pool, so the init pool may use the share less those
+                room = float(free_gib) - pick.get("lmem_gib", 0.0) - pick.get("fixed_gib", 0.0) - 0.25
+            init_limit = max(int(pick["pool_limit_bytes"]), int(room * 2**30))
+            env["CUPY_GPU_MEMORY_LIMIT"] = str(init_limit)
+            env["NAMGPU_FORECAST_POOL_LIMIT"] = str(pick["pool_limit_bytes"])
+            rec["init_pool_limit_gib"] = round(init_limit / 2**30, 2)
     else:
         env.pop("CUPY_GPU_MEMORY_LIMIT", None)
+        env.pop("NAMGPU_FORECAST_POOL_LIMIT", None)
         rec["pool_limit_gib"] = None
         rec["pool_limit_why_none"] = "memory path unknown (no card size from nvidia-smi, no NAMGPU_MEMORY_PATH)"
 

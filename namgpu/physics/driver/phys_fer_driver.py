@@ -20,6 +20,11 @@ Sequence (one call per microphysics step), all on ctx.stream:
         JTSLOC..JTELOC from the GSMDRIVE limits (below).
   3. post kernel: TRAIN and T update from TH_PHY and PI_PHY (USE_RADAR branch optional).
   4. precip kernel: PREC, ACPREC, ACPREC_TOT from RAINNCV.
+  5. SNOWNC_TOT += RAINNCV * SR (mm), B1 interior as step 4: the grid-scale snowfall since the start, WRF's
+     SNOWNC (WRF's microphysics driver sets SNOWNCV = RAINNCV * SR for the Ferrier schemes). A port addition
+     for the history's SNOWNC (snowfall maps): NMMB keeps only the land-surface bucket ACSNOW, which
+     drv-bucket-reset empties every 3 h and Noah fills over land and sea ice only. Nothing in the forecast
+     reads it, so the forecast's own fields are unchanged.
 
 Reads:   T, Q, PD, DSG2, SGML2 (state tables, 1-D DSG2/SGML2 are [LM]); PDSG1, PSGML1 (grid
          vertical constants, cached in ctx.tables under "pdsg1"/"psgml1" so the vertical-coordinate
@@ -48,6 +53,18 @@ from namgpu import kernels
 from namgpu.physics.fer_hires import phys_fer_fer_hires, phys_fer_init
 
 UNIT = "phys_fer_driver"
+
+_SNOW_KERNEL = None
+
+
+def _snow_accumulate(rainncv, sr, acc):
+    """acc += rainncv * sr in place on the current stream (one elementwise launch, no allocation)."""
+    global _SNOW_KERNEL
+    if _SNOW_KERNEL is None:
+        import cupy as cp  # noqa: PLC0415
+        _SNOW_KERNEL = cp.ElementwiseKernel("float32 r, float32 s", "float32 acc", "acc += r * s",
+                                            "phys_fer_driver_snownc")
+    _SNOW_KERNEL(rainncv, sr, acc)
 K_PREP = "phys_fer_driver_prep"
 K_POST = "phys_fer_driver_post"
 K_PRECIP = "phys_fer_driver_precip"
@@ -91,6 +108,10 @@ def run(ctx, use_radar: bool = False, nprecip: int | None = None):
     """GSMDRIVE over row bands (band.py): FER_HIRES columns are independent, so DZ8W, RHO_PHY, P_PHY, PI_PHY and
     TH_PHY exist for one band at a time. Same result bit for bit. With bands the returned dict holds the arrays
     that live in the State (the band-local work arrays are gone by then)."""
+    from namgpu.steps.drv_tracer_index import family
+    if family(ctx.cfg.microphysics) == "thompson":      # GSMDRIVE CASE ('thompson'): ArWen scheme (modernise)
+        from namgpu.physics.arwen_mp import phys_mp_arwen
+        return phys_mp_arwen.run(ctx, use_radar=use_radar, nprecip=nprecip)
     from namgpu.physics import band
     from namgpu.state import PHYS_SCRATCH, UNIT_SCRATCH
     uid = "phys-fer-driver"
@@ -132,6 +153,7 @@ def _run(ctx, use_radar: bool = False, nprecip: int | None = None):
     lowlyr = st.add("LOWLYR", s2, dtype="int32")
     rainnc = st.add("RAINNC", s2)
     rainncv = st.add("RAINNCV", s2)
+    snownc_tot = st.add("SNOWNC_TOT", s2)
     # The state table's MPRATES row is rank 4 with the tracer count in place of D_SS; FER_HIRES needs D_SS.
     mp_shape = (D_SS, lm, jm, im)
     if "MPRATES" not in st.fields or tuple(st.fields["MPRATES"].shape) != mp_shape:
@@ -182,6 +204,9 @@ def _run(ctx, use_radar: bool = False, nprecip: int | None = None):
             np.int32(im), np.int32(jm),
             rainncv, st["PREC"], st["ACPREC"], st["ACPREC_TOT"],
         ))
+
+        # 5. grid-scale snowfall since the start (module docstring), same B1 interior as the precip kernel
+        _snow_accumulate(rainncv[1:-1, 1:-1], st["SR"][1:-1, 1:-1], snownc_tot[1:-1, 1:-1])
 
     return {"DZ8W": dz8w, "RHO_PHY": rho_phy, "P_PHY": p_phy, "PI_PHY": pi_phy,
             "TH_PHY": th_phy, "LOWLYR": lowlyr, "RAINNC": rainnc, "RAINNCV": rainncv,

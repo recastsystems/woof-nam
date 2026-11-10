@@ -165,36 +165,50 @@ def ensure_static(case_dir: Path, start: datetime, source: str, card: str | None
             src.unlink(missing_ok=True)
             rec.update(action="built", file=str(gfs_start.STATIC_NPZ), from_cycle=f"{cyc:%Y%m%d%H}")
     else:
-        npz = config.static_npz(config.load())
-        if npz is None:
+        base = config.static_npz(config.load(), base=True)
+        if base is None:
             raise SystemExit(f"woof-nam: configfile {row['configfile_path']} has no static_npz key")
+        # one file per month (<stem>.mMM.npz), built under a lock with a per-process part name, and the run reads that
+        # file (NAMGPU_STATIC_NPZ): the single shared file was rebuilt in place whenever a run of another month started,
+        # so two runs started together wrote one .part file (BadZipFile 'VEG.npy', 2026-11-09 04:44Z)
+        import fcntl
         from namgpu.init.static_build import soil_set
-        month = built_month(npz) if npz.is_file() else None
-        want = soil_set()
-        have = built_meta(npz).get("soil_set", "wrf") if npz.is_file() else None
-        if npz.is_file() and month == start.month and have == want:
-            rec.update(action="cached", file=str(npz), soil_set=have)
-        else:
-            why = ("missing" if not npz.is_file() else
-                   f"built for month {month}, start is month {start.month}" if month != start.month else
-                   f"built from soil set {have}, selected {want}")
-            log(f"static: building {npz.name} from WPS_GEOG for {start:%Y-%m-%d} ({why})")
-            part = npz.with_name(npz.stem + ".part.npz")
-            rc = _child("namgpu.init.static_build", ["--config", row["configfile_path"], "--date",
-                                                     f"{start:%Y-%m-%dT%H}", "--out", str(part)], card)
-            if rc != 0 or not part.is_file():
-                raise SystemExit(f"woof-nam: static build failed (exit {rc})")
-            os.replace(part, npz)
-            rec.update(action="built", file=str(npz), soil_set=want)
+        npz = base.with_name(f"{base.stem}.m{start.month:02d}.npz")
+        npz.parent.mkdir(parents=True, exist_ok=True)
+        with open(base.with_name(base.stem + ".lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            month = built_month(npz) if npz.is_file() else None
+            want = soil_set()
+            have = built_meta(npz).get("soil_set", "wrf") if npz.is_file() else None
+            if npz.is_file() and month == start.month and have == want:
+                rec.update(action="cached", file=str(npz), soil_set=have)
+            else:
+                why = ("missing" if not npz.is_file() else
+                       f"built for month {month}, start is month {start.month}" if month != start.month else
+                       f"built from soil set {have}, selected {want}")
+                log(f"static: building {npz.name} from WPS_GEOG for {start:%Y-%m-%d} ({why})")
+                part = npz.with_name(f"{npz.stem}.part{os.getpid()}.npz")
+                rc = _child("namgpu.init.static_build", ["--config", row["configfile_path"], "--date",
+                                                         f"{start:%Y-%m-%dT%H}", "--out", str(part)], card)
+                if rc != 0 or not part.is_file():
+                    raise SystemExit(f"woof-nam: static build failed (exit {rc})")
+                os.replace(part, npz)
+                pp = part.with_name(part.name + ".PROVENANCE.json")
+                if pp.is_file():
+                    os.replace(pp, npz.with_name(npz.name + ".PROVENANCE.json"))
+                rec.update(action="built", file=str(npz), soil_set=want)
+        os.environ["NAMGPU_STATIC_NPZ"] = str(npz)
     rec["seconds"] = round(time.perf_counter() - t0, 1)
     return rec
 
 
-def bc_hours(hours: float) -> int:
-    """Hours of lateral boundaries a run of `hours` needs: at least 6, rounded up to the 3-hourly GFS steps
-    (boco.NNNN starts every 3 h; a run of h hours reads the files that start before h)."""
+def bc_hours(hours: float, interval_h: int = 3) -> int:
+    """Hours of lateral boundaries a run of `hours` needs: at least 6, rounded up to the boundary interval (3 h for
+    GFS, IFS, ERA5; 6 h for the AI forecasts aifs and aigfs, which publish every 6 h). boco.NNNN starts every
+    interval_h; a run of h hours reads the files that start before h."""
+    k = int(interval_h)
     h = max(6, math.ceil(float(hours)))
-    return 3 * math.ceil(h / 3)
+    return k * math.ceil(h / k)
 
 
 def start_of(case_dir: Path) -> datetime:

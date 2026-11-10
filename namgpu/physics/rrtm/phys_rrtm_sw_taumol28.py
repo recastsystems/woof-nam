@@ -73,13 +73,14 @@ def alloc_outputs(nlay: int, jm: int, im: int):
     }
 
 
-def taumol28(inp: dict, out: dict, tab: dict, stream=None):
+def taumol28(inp: dict, out: dict, tab: dict, stream=None, kmin_col=None):
     """One launch over every (i, j) column. inp/out/tab hold device arrays in CONTRACT layout."""
     import cupy as cp
 
     nlay, jm, im = inp["colmol"].shape
     # MINVAL(laytrop) as a device int32 scalar, so the kernel reads it without a host sync.
-    kmin = cp.min(inp["laytrop"]).astype(cp.int32).reshape(1)
+    # kmin_col: per-column window minimum ([JM*IM] int32, sw_seam.window_kmins) when rrtm-call batches windows
+    kmin = cp.min(inp["laytrop"]).astype(cp.int32).reshape(1) if kmin_col is None else kmin_col
     kern = kernels.get(UNIT, KERNEL)
     scope = stream if stream is not None else contextlib.nullcontext()
     with scope:
@@ -92,6 +93,7 @@ def taumol28(inp: dict, out: dict, tab: dict, stream=None):
             tab["rayl"], tab["strrat28"],
             np.int32(nlay), np.int32(im), np.int32(jm),
             out["taug"], out["taur"],
+            np.int32(0 if kmin_col is None else 1),
         ))
     return out
 

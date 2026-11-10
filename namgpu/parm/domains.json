@@ -6,23 +6,107 @@
   "conus12": {
    "title": "NAM 12 km CONUS parent (954 x 835 x 60)",
    "configfile": "nam_configfile",
-   "sources": ["native", "gfs"],
+   "sources": [
+    "native",
+    "gfs"
+   ],
+   "static": "nam-analysis",
+   "managed_init": false
+  },
+  "conus12-rrtmgp": {
+   "title": "NAM 12 km CONUS parent (954 x 835 x 60) with RTE+RRTMGP radiation (shortwave/longwave rrtmgp) in place of the GFS-package RRTM",
+   "configfile": "nam_configfile_rrtmgp",
+   "sources": [
+    "native",
+    "gfs"
+   ],
    "static": "nam-analysis",
    "managed_init": false
   },
   "conus4": {
    "title": "4 km CONUS (1371 x 1101 x 60, no parameterized convection)",
    "configfile": "nam_configfile_4km",
-   "sources": ["gfs"],
+   "sources": [
+    "gfs"
+   ],
    "static": "geog",
    "managed_init": true
   },
   "conus5": {
    "title": "5 km CONUS (1097 x 881 x 60, no parameterized convection)",
    "configfile": "nam_configfile_5km",
-   "sources": ["gfs"],
+   "sources": [
+    "gfs"
+   ],
    "static": "geog",
    "managed_init": true
+  },
+  "conus7p6": {
+   "title": "7.6 km CONUS (723 x 581 x 60, NAM 12 km physics: BMJ convection, GWD)",
+   "configfile": "nam_configfile_7p6km",
+   "sources": [
+    "gfs"
+   ],
+   "static": "geog",
+   "managed_init": false,
+   "fit_rrtm_rows": 32
+  },
+  "na7p6": {
+   "title": "NAM North America footprint at 7.6 km (1506 x 1318 x 60; the 12 km parent corners and pole, NAM 12 km physics keys: BMJ convection, GWD)",
+   "configfile": "nam_configfile_na7p6",
+   "sources": [
+    "gfs"
+   ],
+   "static": "geog",
+   "managed_init": false,
+   "fit_rrtm_rows": 32
+  },
+  "conus12-suite": {
+   "title": "NAM 12 km CONUS parent of the suite (954 x 835 x 60): conus12 plus the parent hand-off set in its history (woof-nam suite; one card)",
+   "configfile": "nam_configfile_suite12",
+   "sources": [
+    "native",
+    "gfs"
+   ],
+   "static": "nam-analysis",
+   "managed_init": false
+  },
+  "conus12-mp28": {
+   "title": "NAM 12 km CONUS parent (954 x 835 x 60), aerosol-aware Thompson (ArWen mp 28) microphysics, species advected",
+   "configfile": "nam_configfile_mp28",
+   "sources": [
+    "native",
+    "gfs"
+   ],
+   "static": "nam-analysis",
+   "managed_init": false
+  },
+  "conus12-mp8": {
+   "title": "NAM 12 km CONUS parent (954 x 835 x 60), Thompson (ArWen mp 8) microphysics, species advected",
+   "configfile": "nam_configfile_mp8",
+   "sources": [
+    "native",
+    "gfs"
+   ],
+   "static": "nam-analysis",
+   "managed_init": false
+  },
+  "conus12-p3": {
+   "title": "NAM 12 km CONUS parent (954 x 835 x 60), P3 one-category (ArWen mp 50) microphysics, species advected",
+   "configfile": "nam_configfile_p3",
+   "sources": [
+    "native",
+    "gfs"
+   ],
+   "static": "nam-analysis",
+   "managed_init": false
+  },
+  "sref16": {
+   "title": "SREF-shape 16 km North America (716 x 627 x 60, BMJ convection; the NMMB half of the SREF mock)",
+   "configfile": "nam_configfile_sref16",
+   "sources": ["gfs", "gefs", "era5", "ifs-0p25", "ifs"],
+   "static": "geog",
+   "managed_init": false
   }
  },
  "static_kinds": {
