@@ -28,7 +28,7 @@ Products (CF variable, from the history fields):
   wind10                  ws10m  |U10, V10| (m/s, drawn in kt)
   wind850                 ws850  |U, V| at 850 hPa, log-p linear between the bracketing layers of PRES;
                                  blank where 850 hPa is below ground
-  mslp                    mslp   MSLP (NMMB QUASIPOST membrane MSLP, Pa -> hPa)
+  mslp                    mslp   MSLET, the membrane sea-level pressure (namgpu/products/memslp.py), Pa -> hPa
   qpf_1h                  qpf1h  RAINNC + RAINC difference from the history one hour earlier (mm)
   qpf_6h                  qpf6h  RAINNC + RAINC difference from the history six hours earlier (mm)
 A product whose input is not in a frame is SKIPPED with the reason (composite reflectivity before the
@@ -176,7 +176,7 @@ TABLE = {
 
 # history variables each product reads (the read takes only these, not every 3-D field of the file)
 NEEDS = {"composite_reflectivity": ("COMPOSITE",), "t2m": ("T2",), "d2m": ("Q2", "PSFC"),
-         "wind10": ("U10", "V10"), "wind850": ("U", "V", "PRES"), "mslp": ("MSLP",),
+         "wind10": ("U10", "V10"), "wind850": ("U", "V", "PRES"), "mslp": (),
          "qpf_1h": ("RAINNC", "RAINC"), "qpf_6h": ("RAINNC", "RAINC"), "w_max": ("W",)}
 WINDOW_H = {"qpf_1h": 1, "qpf_6h": 6}   # accumulation products: hours back to the frame they difference
 
@@ -187,7 +187,8 @@ def _parse(argv):
         description="Draw weather maps from WOOF-NAM history files (wrfout_d01_*) with gpuwm's Rust "
                     "renderer: composite reflectivity, 2 m temperature and dewpoint, 10 m and 850 hPa "
                     "wind, MSLP and 1 h precipitation. A forecast draws its own maps when it ends; use "
-                    "this to redraw them. Host only, no GPU.",
+                    "this to redraw them. The MSLP map's MSLET is computed on the GPU when one is visible, "
+                    "else on the host.",
         epilog="example: woof-nam maps runs/2025-03-14_12z/wrfout_d01_* --out runs/2025-03-14_12z/maps",
         formatter_class=HelpFormatter)
     ap.add_argument("files", nargs="+", type=Path, help="history files (wrfout_d01_<valid time>)")
@@ -494,10 +495,12 @@ def fields_for(prevs, cur, products):
             out[var] = (np.hypot(_at_pressure(f["U"], f["PRES"], 85000.0),
                                  _at_pressure(f["V"], f["PRES"], 85000.0)), "m s-1")
         elif prod == "mslp":
-            if "MSLP" not in f:
-                skipped.append((prod, f"{cur[3].name}: no MSLP in the history (io-quasipost-driver did not run for it)"))
+            # the awphys MSLET (namgpu/products/memslp.py), set by _prep_frame; not the history MSLP, the in-run
+            # QUASIPOST field, which sits up to about 1 hPa under NCEP's MSLET over high terrain
+            if f.get("MSLET") is None:
+                skipped.append((prod, f"{cur[3].name}: no MSLET (the history lacks T, QVAPOR, PRES, PINT or HGT)"))
                 continue
-            out[var] = (f["MSLP"] / 100.0, "hPa")
+            out[var] = (f["MSLET"] / 100.0, "hPa")
         elif prod == "w_max":
             if "W" not in f:
                 skipped.append((prod, f"{cur[3].name}: no W in the history"))
@@ -557,6 +560,76 @@ def _follow_of(path):
         return window.read_follow(nc)
 
 
+def _mslet_file(path, work) -> Path:
+    return Path(work) / f"mslet_{Path(path).name.replace(':', '-')}.npy"
+
+
+def _mslet(path, work, save=False):
+    """MSLET (Pa) on the model grid for one history frame (namgpu.products.memslp, the awphys record's
+    computation), or None when the history lacks an input. render() computes it in its own process on the device
+    (save=True: left in the work folder) as it hands the frames out; a worker reads that file, or computes it itself
+    when called without render (the 0.1.0 call)."""
+    out = _mslet_file(path, work)
+    if not save and out.is_file():
+        return np.load(out)
+    import netCDF4  # noqa: PLC0415
+    from namgpu.products import memslp  # noqa: PLC0415
+    with netCDF4.Dataset(path) as nc:
+        a = memslp.from_history(nc)
+    if save and a is not None:
+        np.save(out, a)
+    return a
+
+
+def _mslet_job(path, work) -> int:
+    """In the helper process of _MsletStage: one frame's MSLET saved in the work folder. Returns the helper's PID."""
+    _mslet(path, work, save=True)
+    return os.getpid()
+
+
+class _MsletStage:
+    """The MSLET of render()'s frames, one frame per call, saved in the work folder for the frame workers.
+
+    A caller that has CuPy loaded (a forecast process, which holds its own CUDA context) computes it in place, as
+    before. A caller that has not (the door's maps tail, `woof-nam maps`) computes it in ONE helper process, which
+    ends with close(): the caller opens no CUDA context, and nothing of the maps stays on the card after them.
+
+    Breakage it prevents: the one-card door gives its card back and re-executes itself as the maps tail so that no
+    CUDA context is left in its process, and then render() computed MSLET in that process. The door's PID was back
+    on the card 3 s after its release: 1,480 MiB while the maps were prepared and the GRIB2 follower still needed
+    the card, then 500 MiB (the context) through the rest of the maps, the column store and the wait, 660 s in all
+    (36 h arctic run of the 0.2.1 candidate a3f8346, 2026-11-11, 324 of 325 nvidia-smi samples)."""
+
+    def __init__(self, work):
+        self.work = str(work)
+        self.inline = "cupy" in sys.modules
+        self.pids = set()            # the processes that computed (tests read it)
+        self._ex = None
+
+    def __call__(self, path):
+        if self.inline:
+            _mslet(path, self.work, save=True)
+            self.pids.add(os.getpid())
+            return
+        if self._ex is None:
+            import multiprocessing as mp  # noqa: PLC0415
+            from concurrent.futures import ProcessPoolExecutor  # noqa: PLC0415
+            # spawn: a clean interpreter, as the frame workers get
+            self._ex = ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn"))
+        self.pids.add(self._ex.submit(_mslet_job, str(path), self.work).result())
+
+    def close(self):
+        if self._ex is not None:
+            self._ex.shutdown(wait=True)         # the helper ends here: its CUDA context goes with it
+            self._ex = None
+        elif self.inline:
+            try:
+                import cupy as cp  # noqa: PLC0415
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception:  # noqa: BLE001 - no device: it ran on numpy
+                pass
+
+
 def _prep_frame(job):
     """One drawn frame: read the variables its products need (and the earlier frames' rain for the
     accumulation products), derive the CF fields and write the frame's CF file and its CF table (the table
@@ -576,6 +649,8 @@ def _prep_frame(job):
         prev_paths = {1: prev_paths} if prev_paths is not None else {}
     path = Path(path)
     valid, start, f = _read(path, set(need))
+    if "mslp" in products:
+        f["MSLET"] = _mslet(path, work)
     prevs = {}
     fol = _follow_of(path) if prev_paths else None
     for n, pp in (prev_paths or {}).items():
@@ -657,14 +732,31 @@ def render(argv=None) -> dict:
     written, failures, skipped = [], [], []
     jobs = []
     workers = max(1, min(len(preps), _cores.usable() // 2, 48))
-    if workers == 1:
-        results = [_prep_frame(p) for p in preps]
-    else:
-        import multiprocessing as mp  # noqa: PLC0415
-        from concurrent.futures import ProcessPoolExecutor  # noqa: PLC0415
-        # spawn: the caller may hold a CUDA context, which a forked child must not inherit
-        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn")) as ex:
-            results = list(ex.map(_prep_frame, preps))
+    # the MSLP map's MSLET is computed on the device when CuPy sees one (one CUDA context, not one per worker), one
+    # frame at a time as the frames go to the workers, so it overlaps their reads. _MsletStage: in this process only
+    # when it already has CuPy loaded, else in one helper process that ends with the last frame
+    mslet_stage = _MsletStage(work) if "mslp" in products else None
+    try:
+        if workers == 1:
+            results = []
+            for p in preps:
+                if mslet_stage is not None:
+                    mslet_stage(p[0])
+                results.append(_prep_frame(p))
+        else:
+            import multiprocessing as mp  # noqa: PLC0415
+            from concurrent.futures import ProcessPoolExecutor  # noqa: PLC0415
+            # spawn: the caller may hold a CUDA context, which a forked child must not inherit
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn")) as ex:
+                futs = []
+                for p in preps:
+                    if mslet_stage is not None:
+                        mslet_stage(p[0])
+                    futs.append(ex.submit(_prep_frame, p))
+                results = [fu.result() for fu in futs]
+    finally:
+        if mslet_stage is not None:
+            mslet_stage.close()
     frame = None
     moving = len({r[6] for r in results}) > 1          # a storm-following window: each frame has its own
     if a.bounds == "union" and results:

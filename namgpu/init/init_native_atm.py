@@ -91,8 +91,9 @@ def warm_start(ctx):
     F_ICE, F_RAIN, F_RIMEF) and TKE. A cold CW = 0, Q2 = 0.02 start would throw that away and spin
     clouds up from nothing, which the archived NAM forecast did not do. So, where sources.py found
     them (ctx.tables["native_warm"]): CW = TCOND, F_ICE = FICE, F_RAIN = FRAIN, F_RIMEF = max(RIME, 1),
-    Q2 = max(2 TKE, 0.02) (NMMB Q2 is twice the TKE; 0.02 is the EPSQ2 floor,
-    module_INIT_READ_BIN.F90:237-240). Sources without these records (GFS) keep the cold-start values.
+    Q2 = max(TKE record, 0.02) (the analysis file's TKE record is the NMMB q2 itself, sources.NATIVE_TKE_TO_Q2;
+    0.02 is the EPSQ2 floor, module_INIT_READ_BIN.F90:237-240). Sources without these records (GFS) keep the
+    cold-start values.
     """
     from namgpu.init import sources  # noqa: PLC0415
     sw = ctx.tables.get("source_warm")

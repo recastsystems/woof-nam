@@ -15,9 +15,9 @@ never a new code path.
   hiresf       any other nest: the hiresf record set on a Lambert box around the nest at the nest's spacing
 
 The nest grids are NOAA's own (ush/nam_prdgen_nest.sh, wgrib2 -new_grid; checked against the decoded 2026-11-03
-06Z files). NCEP regridded each nest's native post output with nearest-neighbour interpolation, except APCP, WEASD
+06Z files). NCEP regridded each nest's native-grid output with nearest-neighbour interpolation, except APCP, WEASD
 and SNOD (budget), turned the winds grid-relative, and left points outside the nest missing (bitmap): the frame
-here does the same, before the post, so each column's records are the nest column's.
+here does the same before the products are computed, so each column's records are the nest column's.
 """
 from __future__ import annotations
 
@@ -52,7 +52,11 @@ class OutGrid:
     radius: float = R_NCEP
     name: str = ""
 
-    # ---- forward / inverse on the sphere (Snyder 1987, PP 1395: 15-1..15-4, 21-1..21-4, 7-1..7-4)
+    # ---- forward / inverse on the sphere (Snyder 1987, USGS PP 1395). Lambert conformal: (14-1), (14-2), (14-4),
+    # (15-1), (15-1a), (15-2), (15-3), one standard parallel n = sin(phi1) (p. 107); inverse (14-9), (14-10),
+    # (14-11), (15-5). Here the origin is the pole of the cone (rho0 = 0), so y = -rho cos(theta). North polar
+    # stereographic: (21-5), (21-6), (21-8), (20-9), with k0 = (1 + sin LaD)/2 from (21-7) so k = 1 at LaD; inverse
+    # (20-14) at phi1 = 90 deg, (20-16), (20-18), (21-15). Mercator: 7-1..7-4.
     def _lcc(self):
         l1, l2 = self.latin1 * DEG, self.latin2 * DEG
         if abs(l1 - l2) < 1e-9:
@@ -225,22 +229,27 @@ def _corners(lat, lon):
 
 # NCEP's fire-weather master grids (sorc/nam_firewx_gridspecs.fd/firewx_gridspecs.f, GRD): CONUS Lambert 4289 x 2753,
 # La1 20.192 Lo1 -121.554, LoV -95, Latin 25, 1270 m; Alaska polar stereographic 3297 x 2209, La1 40.530 Lo1 -178.571,
-# LoV -150, 1488 m (true at 60 N), 100 points of padding.
-FIREWX_CONUS = OutGrid("lambert", 4289, 2753, 20.192, 238.446, 1270.0, 1270.0, lov=265.0, latin1=25.0, latin2=25.0,
-                       radius=6371200.0)
-FIREWX_ALASKA = OutGrid("polar", 3297, 2209, 40.530, 181.429, 1488.0, 1488.0, lov=210.0, lad=60.0, radius=6371200.0)
+# LoV -150, 1488 m (true at 60 N), 100 points of padding. They are NCEP grids 90 and 92 of Office Note 388, Table B,
+# taken on the sphere of NCEP's GRIB2 grid definitions (shape of earth 6), as the output grids are.
+FIREWX_CONUS = OutGrid("lambert", 4289, 2753, 20.192, 238.446, 1270.0, 1270.0, lov=265.0, latin1=25.0, latin2=25.0)
+FIREWX_ALASKA = OutGrid("polar", 3297, 2209, 40.530, 181.429, 1488.0, 1488.0, lov=210.0, lad=60.0)
 
 
 def _ij(g: OutGrid, lat, lon):
-    """1-based fractional (i, j) of a point on a master grid (W3FB11 / W3FB06 convention)."""
+    """The 1-based fractional (i, j) of the point (lat, lon) on grid g: its projected (x, y) less those of the first
+    point (La1, Lo1), over Dx and Dy (WMO-No. 306 GRIB2 templates 3.30 and 3.20: point (1, 1) is La1/Lo1, and with
+    scan 0x40 i runs along +x and j along +y). Scalars give floats; arrays give arrays."""
     x0, y0 = g.forward(g.la1, g.lo1)
     x, y = g.forward(lat, lon)
-    return 1.0 + (x - x0) / g.dx, 1.0 + (y - y0) / g.dy
+    i, j = 1.0 + (x - x0) / g.dx, 1.0 + (y - y0) / g.dy
+    if np.ndim(i) == 0:
+        return float(i), float(j)
+    return i, j
 
 
-# NOAA's decoded fire-weather grids for NCEP's last production points (2026-10-20 to 11-03, every day sampled): the
-# rule below lands within one 1.27 km master cell of these from a 333 x 333 nest centred on the point, so the exact
-# boxes NOAA wrote are kept for those two centres (lat, lon east) and the rule serves any other point.
+# NOAA's decoded fire-weather grids for NCEP's last production points (2026-10-20 to 11-03, every day sampled), kept
+# for those two centres (lat, lon east) so a caller with only the centre gets NOAA's box; the rule below serves any
+# other point (from the nest's own corners, ncep_firewx.firewx_output_grid gives these two boxes exactly).
 FIREWX_KNOWN = {
     (42.0, 237.7): OutGrid("lambert", 646, 389, 39.182, 233.507, 1270.0, 1270.0, lov=265.0, latin1=25.0, latin2=25.0,
                            name="firewxnest"),
@@ -252,7 +261,8 @@ FIREWX_KNOWN = {
 def firewx_grid(lat, lon, alaska: bool | None = None) -> OutGrid:
     """NCEP's fire-weather output grid for a nest with these point coordinates: CONUS: the box of the 1.27 km master
     grid spanning the bounding box (min/max lat and lon) of the nest's four corners, its SW corner the master point
-    at the truncated indices; Alaska: the four corners' master indices, padded by 100 points (firewx_gridspecs.f)."""
+    at the floor of the fractional indices; Alaska: the four corners' master indices (floor), padded by 100 points
+    (firewx_gridspecs.f)."""
     corners = _corners(lat, lon)
     ny, nx = np.shape(lat)
     cla, clo = float(lat[ny // 2, nx // 2]), float(lon[ny // 2, nx // 2]) % 360.0
@@ -267,15 +277,15 @@ def firewx_grid(lat, lon, alaska: bool | None = None) -> OutGrid:
         la_ne, lo_ne = max(c[0] for c in corners), max(c[1] for c in corners)
         xs, ys = _ij(m, la_sw, lo_sw)
         xn, yn = _ij(m, la_ne, lo_ne)
-        isw, jsw, ine, jne = int(xs), int(ys), int(xn), int(yn)
+        isw, jsw, ine, jne = math.floor(xs), math.floor(ys), math.floor(xn), math.floor(yn)
         la, lo = m.latlon_ij(isw - 1.0, jsw - 1.0)
         la1, lo1 = round(float(la), 3), round(float(lo), 3)
         return OutGrid("lambert", ine - isw + 1, jne - jsw + 1, la1, lo1, m.dx, m.dy, lov=m.lov, latin1=m.latin1,
                        latin2=m.latin2, name="firewxnest")
     m = FIREWX_ALASKA
     ij = [_ij(m, la, lo) for la, lo in corners]
-    i0, i1 = min(int(a) for a, _ in ij) - 100, max(int(a) for a, _ in ij) + 100
-    j0, j1 = min(int(b) for _, b in ij) - 100, max(int(b) for _, b in ij) + 100
+    i0, i1 = min(math.floor(a) for a, _ in ij) - 100, max(math.floor(a) for a, _ in ij) + 100
+    j0, j1 = min(math.floor(b) for _, b in ij) - 100, max(math.floor(b) for _, b in ij) + 100
     la, lo = m.latlon_ij(i0 - 1.0, j0 - 1.0)
     return OutGrid("polar", i1 - i0 + 1, j1 - j0 + 1, round(float(la), 3), round(float(lo), 3), m.dx, m.dy, lov=m.lov,
                    lad=m.lad, name="firewxnest")

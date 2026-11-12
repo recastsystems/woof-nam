@@ -8,9 +8,9 @@ These wrappers are validation surfaces for the leaf ports, not a runtime path:
 Noah-MP is not dispatchable and ``sf_surface_physics=4`` stays blocked.
 
 ``noahmp_thermal.cu`` is compiled **after** ``noahmp_leaves.cu``.  PHASECHANGE
-and FRH2O need glibc 2.39's ``powf`` and ``logf`` on the device, and there must
-be exactly one transcription of those: two copies could drift and only one of
-them would be audited against ``glibc-libm-fp32.csv``.  Composing the two
+and FRH2O need the reference libm's ``powf`` and ``logf`` on the device, and there must
+be exactly one implementation of those: two copies could drift and only one of
+them would be audited against gpuwm's pinned FP32 libm fixture.  Composing the two
 sources rather than duplicating the tables is what keeps that single copy.
 """
 
@@ -27,7 +27,7 @@ from namgpu.third_party.arwen_noahmp.core.kernels import _preamble
 
 _KDIR = Path(__file__).resolve().parent / "kernels"
 
-# The glibc transcendental block this group borrows lives in noahmp_leaves.cu.
+# The reference libm transcendental block this group borrows lives in noahmp_leaves.cu.
 _LIBM_SOURCE = _KDIR / "noahmp_leaves.cu"
 _THERMAL_SOURCE = _KDIR / "noahmp_thermal.cu"
 
@@ -141,7 +141,7 @@ def evaluate_thermal(leaf: str, x, ix=None):
 # THERMOPROP lives in noahmp_leaves.cu and its entry point is spelled
 # ``noahmp_leaf_thermoprop`` rather than ``noahmp_thermal_*``; it is reached
 # through the same composed translation unit, so there is still exactly one
-# device glibc libm on the path.
+# device the reference libm on the path.
 
 def _thermoprop_kernel():
     return thermal_module().get_function("noahmp_leaf_thermoprop")

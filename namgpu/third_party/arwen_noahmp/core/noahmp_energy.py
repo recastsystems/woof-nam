@@ -52,17 +52,17 @@ either, so there is no fixture that could hold a transcription of them to
 
 Two libm questions, one of which is a trap
 ------------------------------------------
-* ``TANH`` at :2072 **is** a trap.  It is glibc's ``tanhf``, still the 1993
+* ``TANH`` at :2072 **is** a trap.  The reference libm's ``tanhf`` is the 1993
   SunPro ``expm1f``-based routine, and over the 204,064,836 FP32 inputs in
   [1e-6, 22] it disagrees with ``(float)tanh((double)x)`` on 23.8% of them.
-  The snow-cover fraction cannot be reached through an FP64 shim.  The
-  transcription lives in :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm` with the rest of the
-  glibc FP32 surface, verified against the live glibc 2.39 over 1,106,247,680
+  The snow-cover fraction cannot be reached through an FP64 shim.  Our FP32
+  ``tanhf`` lives in :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm` with the rest of the
+  FP32 routines, verified against the reference libm over 1,106,247,680
   inputs with zero mismatches.
 * ``UU**2.0`` at :2057 **is not**, though it looks like one.  The exponent is
   a REAL literal, so gfortran emits ``powf`` rather than a multiply (``nm -u``
   on a two-line probe shows the undefined symbol), but swept over the
-  167,177,618 FP32 values in [1e-3, 1e3] glibc's ``powf(x, 2.0f)`` is
+  167,177,618 FP32 values in [1e-3, 1e3] the reference libm's ``powf(x, 2.0f)`` is
   bit-identical to ``x*x`` on every one.  The ``powf`` spelling is kept
   because it is what the Fortran compiles to, not because it is observable;
   the measurement is recorded so the question is not re-derived.

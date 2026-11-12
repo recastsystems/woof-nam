@@ -278,6 +278,14 @@ def load(ctx, src) -> dict:
     import cupy as cp
     from namgpu import slab as slabmod
     src = Path(src)
+    # every owner array is memory-mapped at once, one descriptor each: a 12 km restart set holds about 1,600, past the
+    # usual soft limit of 1024 (woof-nam run --resume: OSError Too many open files, 2026-11-11). Raise the soft limit
+    # to the hard one, as the nest doors already did for their two saved inits.
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = hard if hard != resource.RLIM_INFINITY else 1 << 20
+    if soft != resource.RLIM_INFINITY and soft < want:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
     with open(src / "skeleton.pkl", "rb") as f:
         d = pickle.load(f)
     if d["format"] != FORMAT:

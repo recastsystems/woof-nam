@@ -45,8 +45,8 @@ where gfortran rounds, expressions are grouped by Fortran's
 left-to-right associativity, and the libm calls -- ``EXP`` in
 SNOW_AGE/SNOWALB_CLASS/COMPACT/BDFALL, ``LOG``/``ATAN``/``**0.25`` in
 SFCDIF1, ``**2.``/``**0.25`` real-exponent powers, ``**3``/``**4``
-integer powers -- go through :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`'s glibc 2.39
-transcriptions and the ``powi3``/``powi4`` multiply expansions, exactly
+integer powers -- go through :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`'s FP32
+routines and the ``powi3``/``powi4`` multiply expansions, exactly
 as the sibling leaf ports do.  ``SQRT`` is correctly rounded on both
 sides and stays ``math.sqrt`` on a rounded operand.
 

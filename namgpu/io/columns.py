@@ -6,7 +6,8 @@
 The store reader takes WRF's conventions, which the WOOF-NAM history does not use (io_history_fields.py): WRF's
 C-grid U, V and W (one more point along x, y and z), pressure and geopotential as perturbation plus base (P + PB,
 PH + PHB) and the grid-to-earth rotation (COSALPHA, SINALPHA). So each history file is first written as a WRF view
-in a scratch folder (default /dev/shm), the store is written from the view, and the view is deleted:
+in a scratch folder (NAMGPU_SHM, default /dev/shm; <out>/.scratch on disk when that has no room), the store is
+written from the view, and the view is deleted:
   - U, V, W: the history's earth-relative winds and W at mass points, averaged to the cell faces (the end faces
     take the end values); the reader averages them back to mass points, so a sounding's wind is a 1-2-1 average
     of three neighbouring columns along that component's axis (U along x, V along y, W in the vertical);
@@ -14,7 +15,8 @@ in a scratch folder (default /dev/shm), the store is written from the view, and 
   - COSALPHA = 1, SINALPHA = 0 (the winds are earth-relative already);
   - every other field as written.
 The output is `<out>/d01/<YYYYMMDDTHHMMSSZ>.wcol`, the layout WOOF's worker reads (it takes a store the engine
-wrote beside the history as it is). Frames run in parallel processes, one per frame, with the cores shared out.
+wrote beside the history as it is). Frames run in parallel processes, one per frame as far as cores, host
+memory and the scratch folder allow, with the cores shared out.
 """
 from __future__ import annotations
 
@@ -89,11 +91,27 @@ def wrf_view(src: Path, dst: Path) -> Path:
     return dst
 
 
-def _one(frame: str, out: str, scratch: str, threads: int, exe: str) -> dict:
-    """View + store for one history file, in its own process."""
+PREFIX = "woof-nam-columns-"
+
+
+def _one(frame: str, out: str, scratch: str, threads: int, exe: str, owner: int | None = None,
+         alt: str | None = None, need: int = 0) -> dict:
+    """View + store for one history file, in its own process. The view folder is named after the parent
+    (woof-nam-columns-<owner>-*), so the parent removes it whatever ends this worker. Before the view is written the
+    scratch folder's room is read again: with less than `need` bytes free (the view's size) the view goes to `alt`
+    (the disk scratch beside the store) instead, and the record says so."""
+    from namgpu.io import scratch as scr
     t0 = time.perf_counter()
     name = Path(frame).name
-    with tempfile.TemporaryDirectory(prefix="woof-nam-columns-", dir=scratch) as tmp:
+    note = None
+    if alt and need and scratch and scratch != alt and scr.free_bytes(scratch) < need:
+        note = (f"{scratch} had {scr.free_bytes(scratch) / 1e9:.1f} GB free for a {need / 1e9:.1f} GB view: "
+                f"view written in {alt}")
+        scratch = alt
+    if scratch:
+        Path(scratch).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"{PREFIX}{owner if owner is not None else os.getppid()}-",
+                                     dir=scratch) as tmp:
         view = wrf_view(Path(frame), Path(tmp) / name)
         t1 = time.perf_counter()
         req = Path(tmp) / "request.json"
@@ -101,6 +119,8 @@ def _one(frame: str, out: str, scratch: str, threads: int, exe: str) -> dict:
                                    "out": str(out), "tile": 16, "threads": threads}))
         r = subprocess.run([exe, "--columns", str(req)], capture_output=True, text=True)
     rec = {"frame": name, "rc": r.returncode, "view_s": round(t1 - t0, 2), "store_s": round(time.perf_counter() - t1, 2)}
+    if note:
+        rec["note"] = note
     for line in r.stdout.splitlines():
         if line.startswith("COLUMNS "):
             path, *fields = line[len("COLUMNS "):].rsplit(" ", 2)
@@ -121,21 +141,238 @@ def frames_of(paths: list[Path]) -> list[Path]:
     return out
 
 
-def write(frames: list[Path], out: Path, workers: int | None = None, scratch: str | None = None) -> dict:
-    """The store for `frames` under `out` (<out>/<domain>/<stamp>.wcol). Returns {"files", "seconds", "failed"}."""
-    from gpuwm.soundings import binary
-    exe = str(binary())
+def _meminfo_available() -> int | None:
+    """MemAvailable from /proc/meminfo in bytes (None where there is no /proc)."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _cgroup_headroom(proc_cgroup: str = "/proc/self/cgroup", root: str = "/sys/fs/cgroup") -> int | None:
+    """Bytes this process's cgroup (v2) and each cgroup above it can still take before its memory.max: the smallest
+    of max - (current - reclaimable file cache). Shared memory (/dev/shm, where the views are written) is charged
+    and is not reclaimable, so it counts as used. None with no limit anywhere, or no cgroup v2."""
+    try:
+        rel = next((ln.split("::", 1)[1] for ln in Path(proc_cgroup).read_text().splitlines() if ln.startswith("0::")),
+                   None)
+    except OSError:
+        return None
+    if rel is None:
+        return None
+    best = None
+    d = Path(root + rel.rstrip("/")) if rel.strip("/") else Path(root)
+    while True:
+        try:
+            mx = (d / "memory.max").read_text().strip()
+            if mx != "max":
+                cur = int((d / "memory.current").read_text())
+                stat = dict(ln.split() for ln in (d / "memory.stat").read_text().splitlines() if ln.count(" ") == 1)
+                cache = max(0, int(stat.get("file", 0)) - int(stat.get("shmem", 0)))
+                room = max(0, int(mx) - (cur - cache))
+                best = room if best is None else min(best, room)
+        except (OSError, ValueError):
+            pass
+        if d == Path(root) or Path(root) not in d.parents:
+            break
+        d = d.parent
+    return best
+
+
+def _mem_available() -> int | None:
+    """Memory the workers can use: MemAvailable, or the room left under the cgroup's memory.max when that is
+    smaller. Breakage it prevents: in a login session capped at 80 GiB on a 123 GB host the count followed the host's
+    MemAvailable, and beside the run's GRIB2 follower the kernel killed two workers at the cap (BrokenProcessPool,
+    no store; arctic-front 0.2.1 candidate run)."""
+    vals = [v for v in (_meminfo_available(), _cgroup_headroom()) if v is not None]
+    return min(vals) if vals else None
+
+
+# The WRF view is the history uncompressed with U, V, W one point longer and P, PB, PHB, COSALPHA, SINALPHA added:
+# 4.27 GB (view_bytes) for the 1.24 GB 12 km hour 0 of the arctic-front run (3.60 GB uncompressed; fix/shm-leftovers
+# proof run, 2026-11-11). The 2.5-3.0 GB views left by the candidate's broken pool were cut short by the kill. Used
+# only when the header cannot be read.
+VIEW_RATIO = 3.4
+
+
+def view_bytes(frames: list[Path]) -> int:
+    """Bytes of the largest frame's WRF view, from its header (every variable uncompressed, the staggered winds one
+    point longer, the five added fields), 2 % over for the file's own structure."""
+    import numpy as np
+    if not frames:
+        return 0
+    big = max(frames, key=lambda f: f.stat().st_size)
+    try:
+        import netCDF4
+        with netCDF4.Dataset(big) as a:
+            n = 0
+            for name, v in a.variables.items():
+                shape = list(v.shape)
+                if name in STAGGER and v.ndim == 4:
+                    shape[STAGGER[name][1]] += 1
+                try:
+                    item = np.dtype(v.dtype).itemsize
+                except TypeError:
+                    item = 1
+                n += int(np.prod(shape)) * item
+            for src, k in (("PRES", 2), ("PH", 1), ("HGT", 2)):    # P + PB, PHB, COSALPHA + SINALPHA
+                if src in a.variables:
+                    n += k * int(np.prod(a.variables[src].shape)) * 4
+        return int(n * 1.02) + (1 << 20)
+    except Exception:  # noqa: BLE001 - no netCDF4, or not a netCDF file
+        return int(VIEW_RATIO * big.stat().st_size)
+
+
+def auto_workers(frames: list[Path], cores: int, scratch: str | None, mem_available: int | None = None,
+                 scratch_free: int | None = None, view: int | None = None) -> int:
+    """Frames written at once: one per frame, bounded by the cores, by memory and by the room on the scratch folder.
+    A worker holds its WRF view on scratch and about as much again in its own memory while it builds the view (a
+    worker the kernel killed at the session's memory.max had 2.84 GB anon beside a view still being written,
+    arctic-front 0.2.1 candidate, 2026-11-11 08:47Z). So a worker counts one view of memory, two when the scratch is tmpfs (its
+    pages are memory, charged to the same cgroup), and one view of the scratch folder's FREE room (free space, less
+    what NAMGPU_SHM_CAP_MIB leaves the package). Breakage it prevents: the bound counted three compressed history
+    files of memory and one compressed file of scratch, so 16 workers wrote 16 views (45 GB of /dev/shm) beside the
+    GRIB2 follower, the kernel killed two at the session's 80 GiB cap, and the store ended in BrokenProcessPool.
+    Before any bound the count was fixed at 4, and the 13-frame store of a 7.6 km run took 281 s on 1 to 4 cores of
+    a 96-core host (release check 2026-11-09)."""
+    from namgpu.io import scratch as scr
+    if not frames:
+        return 1
+    view = max(1, view if view is not None else view_bytes(frames))
+    n = min(len(frames), max(1, cores))
+    ram = bool(scratch) and scr.in_ram(scratch)
+    avail = _mem_available() if mem_available is None else mem_available
+    if avail:
+        n = min(n, max(1, int(avail * 0.6) // ((2 if ram else 1) * view)))
+    if scratch_free is None and scratch:
+        scratch_free = scr.free_bytes(scratch)
+    if scratch_free is not None and scratch:
+        n = min(n, max(1, int(scratch_free * 0.9) // view))
+    return max(1, n)
+
+
+def _pool_context():
+    """The workers' start method: forkserver (spawn where there is none), on every Python. A forked worker inherits
+    this process's SIGTERM handler, which turns the pool's own terminate() into an exception the worker catches and
+    outlives, so a pool broken by a killed worker never finished shutting down; it also inherits both ends of the
+    pool's pipes and the state of every thread's locks. The forkserver's socket goes in a short folder when TMPDIR is
+    long (namgpu.cores.pool_context)."""
+    from namgpu import cores as _cores  # noqa: PLC0415
+    return _cores.pool_context()
+
+
+def _kill_pool(ex) -> None:
+    """Stop a pool's worker processes now (a signal or an error in this process): shutdown() would wait for them."""
+    for p in list((getattr(ex, "_processes", None) or {}).values()):
+        try:
+            p.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+    ex.shutdown(wait=False, cancel_futures=True)
+
+
+def write(frames: list[Path], out: Path, workers: int | None = None, scratch: str | None = None,
+          exe: str | None = None, log=None) -> dict:
+    """The store for `frames` under `out` (<out>/<domain>/<stamp>.wcol). Returns {"files", "seconds", "failed"}.
+
+    Scratch: the views go to `scratch` (default NAMGPU_SHM, else /dev/shm) while it has room for them, else to the
+    disk folder <out>/.scratch (one line says so). Whatever ends a worker or this process (the OOM killer, a broken
+    pool, an error, SIGTERM), every view folder of this run is removed before write returns or raises: the folders
+    are named after this process (woof-nam-columns-<pid>-*), and a later run removes those of a process that has
+    ended (scratch.sweep). A pool that breaks is run again for the frames it had not finished, with half the workers,
+    down to one."""
+    from concurrent.futures import as_completed
+    from concurrent.futures.process import BrokenProcessPool
+
+    from namgpu.io import scratch as scr
+    log = log or (lambda m: print(m, flush=True))
+    if exe is None:
+        from gpuwm.soundings import binary
+        exe = str(binary())
     t0 = time.perf_counter()
-    cores = os.cpu_count() or 2
-    workers = max(1, min(workers or 4, len(frames) or 1))
-    threads = max(1, cores // workers)
-    scratch = scratch or ("/dev/shm" if Path("/dev/shm").is_dir() else None)
+    # the cores this process may use (affinity set and cgroup quota), not the host's: under `taskset -c 0-11` on a
+    # 24-core host the store planned its workers and their threads for 24 cores (2026-11-11)
+    from namgpu import cores as coremod
+    cores = coremod.usable()
     out.mkdir(parents=True, exist_ok=True)
-    with ProcessPoolExecutor(workers) as ex:
-        recs = list(ex.map(_one, [str(f) for f in frames], [str(out)] * len(frames), [scratch] * len(frames),
-                           [threads] * len(frames), [exe] * len(frames)))
-    failed = [r for r in recs if r["rc"]]
-    return {"files": recs, "seconds": round(time.perf_counter() - t0, 2), "failed": len(failed),
+    alt = str(out / ".scratch")
+    if scratch is None:
+        r = scr.root()
+        scratch = str(r) if r is not None else None
+    for d in dict.fromkeys(x for x in (scratch, alt) if x and Path(x).is_dir()):
+        scr.sweep(d, log=log)
+    view = view_bytes(frames)
+    if scratch and frames and scr.free_bytes(scratch) < view * 1.05:
+        log(f"columns: {scratch} has {scr.free_bytes(scratch) / 1e9:.1f} GB free, under one "
+            f"{view / 1e9:.1f} GB view: the views go to {alt} (disk, slower)")
+        scratch = alt
+    workers = max(1, min(workers or auto_workers(frames, cores, scratch, view=view), len(frames) or 1))
+    threads = max(1, cores // workers)
+    owner = os.getpid()
+    owned_scratch = scratch
+    if owned_scratch:
+        scr.own(owned_scratch)         # the views carry this id: alive for a sweep in any PID namespace
+    recs: dict = {}
+    todo = list(frames)
+
+    def clean():
+        for d in dict.fromkeys(x for x in (scratch, alt) if x):
+            scr.remove_own(d, PREFIX, owner)
+        try:
+            Path(alt).rmdir()                 # only when empty
+        except OSError:
+            pass
+
+    import signal
+    import threading
+    old_term = None
+    if threading.current_thread() is threading.main_thread():
+        def _term(signum, _frame):
+            raise SystemExit(128 + signum)
+        old_term = signal.signal(signal.SIGTERM, _term)
+    try:
+        while todo:
+            broken = False
+            ex = ProcessPoolExecutor(workers, mp_context=_pool_context())
+            try:
+                futs = {ex.submit(_one, str(f), str(out), scratch, threads, exe, owner, alt, view): f for f in todo}
+                for fut in as_completed(futs):
+                    try:
+                        recs[futs[fut]] = fut.result()
+                    except BrokenProcessPool:
+                        broken = True
+            except BaseException:
+                _kill_pool(ex)
+                raise
+            ex.shutdown(wait=True)
+            clean()                           # a broken pool's other workers were terminated inside their views
+            todo = [f for f in todo if f not in recs]
+            if not broken or not todo:
+                break
+            if workers == 1:
+                for f in todo:
+                    recs[f] = {"frame": f.name, "rc": -9, "view_s": 0.0, "store_s": 0.0,
+                               "error": "its worker process ended abruptly with one worker left (killed: memory?)"}
+                break
+            workers = max(1, workers // 2)
+            threads = max(1, cores // workers)
+            log(f"columns: a worker process ended abruptly (the kernel's OOM killer or a signal); the pool's views "
+                f"are removed and {len(todo)} frames are written again with {workers} workers")
+    finally:
+        clean()
+        if owned_scratch:
+            scr.disown(owned_scratch)         # the views are gone: nothing of this store stays in the scratch folder
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+    for r in recs.values():
+        if r.get("note"):
+            log(f"columns: {r['frame']}: {r['note']}")
+    recs_l = [recs[f] for f in frames if f in recs]
+    failed = [r for r in recs_l if r["rc"]]
+    return {"files": recs_l, "seconds": round(time.perf_counter() - t0, 2), "failed": len(failed),
             "parallelism": f"{workers} processes x {threads} threads"}
 
 
@@ -150,7 +387,9 @@ def main(argv=None) -> int:
         formatter_class=HelpFormatter)
     ap.add_argument("paths", nargs="+", type=Path, help="a run folder (every wrfout_d01_*) or history files")
     ap.add_argument("--out", type=Path, default=None, help="store folder (default <run>/columns)")
-    ap.add_argument("--workers", type=int, default=4, help="frames written at once (default 4)")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="frames written at once (default: one per frame, bounded by cores, host memory and the "
+                         "scratch folder)")
     a = ap.parse_args(argv)
     frames = frames_of(a.paths)
     if not frames:

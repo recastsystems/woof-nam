@@ -38,11 +38,10 @@ inside the CPU chunk (npts). The wrapper uses the 1-based linear index over the 
 That equals the Fortran only for a single-chunk run. Recorded here and in the receipt. The project ruled bitwise
 out for this path.
 
-OPEN ITEM (not closed): random_setseed in the LGPL mersenne_twister.f is not verified. The Fortran caller
-comment says "advance random number generator by ipseed values" (1875-1882), and the kernel seeds without
-an advance. Closing it needs a clean-room check (a reader of the module, or a reviewer, who writes the
-seeding contract down without copying the code). Until then the seed path is unverified. The NAM 12 km
-run never reaches it (isubcsw = 0).
+OPEN ITEM: the seed path is not verified against NAM's stream. The Fortran caller's comment says "advance
+random number generator by ipseed values" (radsw_main_nmmb.f:1875-1882); the kernel seeds MT19937
+(Matsumoto and Nishimura 1998) with ipseed by the paper's initialisation, mt(0) = seed and
+mt(i) = 69069 * mt(i-1), and does not advance it. The NAM 12 km run never reaches this path (isubcsw = 0).
 
 run(ctx) does nothing when cfg.isubcsw is 0. For isubcsw == 1 the seed is ipsdsw0 + linear index
 with ipsdsw0 = 1 (radsw_main_nmmb.f:349, 693-695). For isubcsw == 2 the caller must put the seed array in

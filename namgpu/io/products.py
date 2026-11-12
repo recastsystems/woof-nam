@@ -14,7 +14,7 @@ What each file carries, and in what order, is the record table namgpu/products/a
 of NOAA's awphys file, in NOAA's order, with its discipline/category/parameter, fixed surfaces, statistic and the
 source of its plane (namgpu/products/spec.py documents the columns). Rows with no source yet are left out and
 named in the run index. The GRIB2 encoding is gpuwm's Rust exporter (`rw_rrfs_upp --profile-json`: the writer of
-NOAA-shaped UPP field sets, wx-core's GRIB2 writer, complex packing, every core), which computes the planes with
+NOAA-shaped field sets, wx-core's GRIB2 writer, complex packing, every core), which computes the planes with
 the WOOF post (rw-post) from one WRF-shaped grid-218 frame. woof-nam's part is that hand-off: the history fields,
 regridded from the NMMB rotated lat-lon grid to grid 218 (bilinear, namgpu/io/io_map_regrid.py tables on NCEP's
 own sphere) with the winds turned grid-relative as NCEP writes them.
@@ -27,7 +27,9 @@ inventory identity against NOAA's file.
     woof-nam products --run runs/2025-03-14_12z --follow        # while the forecast runs (woof-nam run --products)
     woof-nam products --compare cases/.../raw/nam/awphys24.grib2 runs/.../products/woof-nam.t12z.awphys24.tm00.grib2
 
-Reads the history only (no CUDA). Each hour runs as its own process; the exporter runs its own worker threads.
+Reads the history only (no CUDA context in this process); the writer needs a CUDA device (its derived records run
+on a card only, whatever --post-device says), and with none visible products stops before the first hour. Each hour
+runs as its own process; the exporter runs its own worker threads.
 The writer is woof-nam's pinned rw_rrfs_upp (namgpu/exporter.py): the first run downloads it from the woof-nam
 release and checks its SHA-256, or `woof-nam fetch-bridges` does that ahead of time.
 """
@@ -49,6 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
+from namgpu import cardgate
 from namgpu.products import hiresf_carriers as HC
 from namgpu.products import land_cloud as LC
 from namgpu.products import sets as PSETS
@@ -73,7 +76,7 @@ PASS_3D_NEST = ("F_RIMEF",)
 PASS_2D_NEST = ("RLWTOA",)
 # the frame carrier that is 0 off the model domain (rw_rrfs_upp mask_carrier: those points are missing, bitmap)
 MASK = "WOOF_VALID"
-# the NMM isobaric rule's inputs (rw_rrfs_upp isobaric_rule upp-nmm): the total w on the mid layers (W_TOT, NMMB's
+# the NMM isobaric rule's inputs (rw_rrfs_upp isobaric_rule nmm-isobaric): the total w on the mid layers (W_TOT, NMMB's
 # history 'vvel') and the model interface pressures (PINT), when the history has them
 PASS_NMM = ("W_TOT", "PINT")
 # categories and masks: the nearest source point, never a bilinear blend of class numbers
@@ -81,11 +84,49 @@ NEAREST = ("ISLTYP", "IVGTYP", "SM", "LANDMASK")
 # NAM's accumulation buckets (awphys): since the last 12 h reset and since the last 3 h reset. The hand-off carries
 # each window's total, differenced from the history file at the window start (RAINNC/RAINC are totals since the
 # start), as APCP_S12/ACPCP_S12/APCP_S3/ACPCP_S3 (kg m-2); the table labels them with the writer's since:Nh rules.
+# The snowfall water (WEASD, accumulation) has NAM's 12 h window only (0-1 ... 0-12 h, then 12-13 ...; NCEP's archived
+# awphys files): WEASD_S12, rebuilt from the model's 3 h snowfall bucket ACSNOW (kg m-2, emptied every PRECIPBUCKET = 3 h
+# by drv-bucket-reset after that hour's history is written) as the buckets that ended inside the window plus the
+# current one.
 BUCKETS_H = (12, 3)
+SNOW_BUCKET_H = 3
 NEED = ("T", "QVAPOR", "PRES", "PH", "U", "V", "HGT", "PSFC", "T2", "Q2", "U10", "V10", "RAINNC", "RAINC")
+# The convective scheme's rain at the output time, for the writer's surface visibility (rw_rrfs_upp NAM_VIS reads the
+# frame carrier CONV_CARRIER). The history's CPRATE is the BMJ precipitation of the last physics step, m of water per
+# DT*NPHS s (the same field and step the history reflectivity's convective term uses).
+CONV_RATE = "CPRATE"
+CONV_CARRIER = "NAM_CONV_PRATE"
+
+
+def conv_prate(cprate, ctx):
+    """The frame's NAM_CONV_PRATE (kg m-2 s-1): the history CPRATE (m of water per physics step) over the physics step
+    DT*NPHS (ctx["dtq2"], s, from the run's configfile: _run_ctx), times 1000 kg m-3; negative values (regrid
+    round-off) are 0. None when the history has no CPRATE or the step is unknown.
+
+    Breakage it fixes: the BMJ scheme rains without leaving rain water in the column, and the writer's visibility read
+    only the column's water, so a cell under convective rain had the visibility of clear air. Against NCEP's archived
+    NAM awphys files (2024-11-05 12Z, +12 h) the cells whose rain was convective in both read 22.9 km in woof-nam and
+    13.2 km in the NAM."""
+    if cprate is None or not ctx or not ctx.get("dtq2"):
+        return None
+    a = np.maximum(np.asarray(cprate, dtype=np.float32), np.float32(0.0))
+    return (a * np.float32(1000.0 / float(ctx["dtq2"]))).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------------------------- the hand-off
+
+
+def frame_q2(q_specific):
+    """The hand-off frame's Q2: the history Q2 (NMMB QSHLTR, a specific humidity) as a mixing ratio, q / (1 - q).
+
+    The frame is WRF-shaped and the WOOF post reads the WRF name Q2 as WRF's 2 m mixing ratio: it turns it into a
+    specific humidity (w / (1 + w)) for the 2 m SPFH record and derives the 2 m DPT and RH from it. Handed the
+    specific humidity itself, the WOOF post applied that conversion to a value that was already converted, so the 2 m
+    SPFH record read q / (1 + q): 1.2 % low on the 2024-11-05 12Z analysis (2 % at 20 g/kg), the 2 m dew point
+    0.13 K low on average and 0.3 K low over warm water, the 2 m RH 1.1 % low, at every hour, against NCEP's own
+    awphys file from the same state. The 3-D QVAPOR of the history is already a mixing ratio."""
+    q = np.asarray(q_specific, dtype=np.float64)
+    return (q / (1.0 - q)).astype(np.float32)
 
 _TABLES = None
 
@@ -327,16 +368,19 @@ def _stagger(a, axis):
 _WT = None
 
 
-# NCEP post constants for the skin temperature from NMMB's skin potential temperature (UPP INITPOST_NEMS:
-# TSK = THS (PINT(LM+1) / P1000)**CAPA)
-P1000, CAPA = 1.0e5, 0.28589641
 
 
 def _derived_tsk(s):
+    """Return the hand-off frame's TSK, the skin temperature (K), as a float32 [j, i] array, or None when the history lacks an input.
+
+    TSK = THS * (PSFC / 1e5) ** KAPPA: Poisson's equation at the surface pressure, THS being the surface potential
+    temperature (namgpu/io/poisson.py gives the sources and the exponent)."""
     if "THS" not in s.variables or "PSFC" not in s.variables:
         return None
-    ths, ps = (np.asarray(s[n][0], dtype=np.float64) for n in ("THS", "PSFC"))
-    return (ths * (ps / P1000) ** CAPA).astype(np.float32)
+    from namgpu.io import poisson
+    ths = np.asarray(s["THS"][0], dtype=np.float32)
+    psfc = np.asarray(s["PSFC"][0], dtype=np.float32)
+    return poisson.temperature(ths, psfc)
 
 
 def _derived_landmask(s):
@@ -364,7 +408,7 @@ def _interp_for(ps, name, mode=None):
 def _read_regrid(job):
     """Worker: read one history field and regrid it to the output grid (one field per process: the netCDF decode and
     the gather run on every core, not one). A namgpu.products.land_cloud (or hiresf_carriers) carrier name is
-    computed from the history on the model grid first (its NCEP post formula), then regridded."""
+    computed from the history on the model grid first (that module's formula), then regridded."""
     global _WT
     history, name = job[0], job[1]
     gkey = job[2] if len(job) > 2 else None
@@ -409,6 +453,7 @@ def _read_regrid_to(arg):
     map, instead of pickled back through the pool's pipe (a 3 km nest hour is 7 GB of arrays: received and unpickled
     one after the other in the main process, that was the frame's longest serial step after the pool)."""
     where, job = arg
+    _die_with_parent()
     name, got = _read_regrid(job)
     if got is None or where is None:
         return name, got
@@ -416,6 +461,45 @@ def _read_regrid_to(arg):
     path = os.path.join(where, f"{name}.npy")
     np.save(path, np.ascontiguousarray(a), allow_pickle=False)
     return name, (path, dims)
+
+
+_PDEATH_SET = False
+
+
+def _die_with_parent() -> None:
+    """In a field-pool worker (the pool's initializer, so also in a worker that never gets a job): a daemon thread
+    that ends the worker when the products process that made the pool has ended (checked every 2 s). Breakage it
+    prevents: a products process stopped by SIGKILL left its field workers and their forkserver running for good (nam-differences-2, the CPU products job stopped at 12:21Z on
+    2026-11-11: 13 processes removed by hand). Nothing else ends them: a forkserver child holds the forkserver's
+    "alive" pipe and both ends of the pool's call queue, so the forkserver never sees its clients go, the workers never
+    read an end of file, and a parent-death signal (bound to the forkserver) never fires."""
+    global _PDEATH_SET
+    if _PDEATH_SET:
+        return
+    _PDEATH_SET = True
+    import multiprocessing
+    import threading
+    parent = multiprocessing.parent_process()
+    pid = getattr(parent, "pid", None)
+    if not pid:
+        return
+
+    def watch():
+        while True:
+            time.sleep(2.0)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                os._exit(1)
+            except OSError:              # alive, someone else's (EPERM): keep going
+                continue
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    if f.read().rsplit(")", 1)[1].split()[0] == "Z":     # ended, not yet reaped
+                        os._exit(1)
+            except (OSError, IndexError):
+                pass
+    threading.Thread(target=watch, name="products-parent-watch", daemon=True).start()
 
 
 def _mapped(v):
@@ -439,15 +523,14 @@ def _job_order(jobs, three_d) -> list:
 def _frame_shm(history: Path, est_bytes: int):
     """A fresh folder in host RAM for one frame's regridded fields ($NAMGPU_PRODUCTS_SHM, default /dev/shm), or None
     with a printed line when it has no room (the fields then come back through the pool's pipe, as before)."""
-    root = Path(os.environ.get("NAMGPU_PRODUCTS_SHM", "/dev/shm"))
-    try:
-        free = shutil.disk_usage(root).free
-    except OSError:
-        free = 0
+    from namgpu.io import scratch as scr
+    root = Path(os.environ.get("NAMGPU_PRODUCTS_SHM", "") or str(scr.root() or "/dev/shm"))
+    free = scr.free_bytes(root)        # free space, less what NAMGPU_SHM_CAP_MIB leaves the package
     if free < 2 * est_bytes:
         print(f"woof-nam products: {history.name}: {root} has {free / 1e9:.1f} GB free, under twice this frame's "
               f"{est_bytes / 1e9:.1f} GB: its fields come back through the pool's pipe (slower)", flush=True)
         return None
+    scr.own(root)                      # this process is alive for a sweep in any PID namespace (scratch.own)
     return tempfile.mkdtemp(prefix=f"woof-nam-frame-{os.getpid()}-", dir=root)
 
 
@@ -461,14 +544,59 @@ PTYPE_CARRIERS = ("NAM_CRAIN", "NAM_CSNOW", "NAM_CFRZR", "NAM_CICEP")
 
 def _ptype_carriers(history: Path, gkey=None, cctx=None) -> dict:
     names = [n for n in PTYPE_CARRIERS if n in LC.CARRIERS]
-    out = dict(map(_read_regrid, [(str(history), n, gkey, cctx) for n in names]))
-    try:
-        import cupy as cp
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
-    except Exception:  # noqa: BLE001 - no CuPy or no device: the classification ran on numpy
-        pass
+    # card work: behind the run's card gate (it waits while the forecast claims the card), until the pool is emptied
+    with cardgate.hold(Path(history).parent):
+        try:
+            out = dict(map(_read_regrid, [(str(history), n, gkey, cctx) for n in names]))
+        finally:
+            _free_pools()
     return out
+
+
+def _mslet_carrier(history: Path, t, ps):
+    """The frame's MSLP carrier, (plane on the output grid, dims) or None: MSLET, the membrane sea-level pressure
+    (namgpu.products.memslp), from this history's state, here in the main process (on the device when CuPy sees one,
+    as the type carriers; the pool is emptied after), then regridded as every continuous field of the set. rw_rrfs_upp
+    writes it as MSLET (carrier MSLP) and takes the 1000 hPa height from it. The history MSLP, the model's in-run
+    QUASIPOST membrane field (the tracker's), is not used: it sits under NCEP's MSLET over high ground (NAM analysis
+    2024-11-05 12Z, +3 h on grid 218, mean absolute difference 0.52 hPa at 1,500-2,500 m and 0.91 above; this
+    carrier: 0.09 and 0.08). A history without T, QVAPOR, PRES, PINT or HGT gives None: MSLET is left out and named in
+    the index, never the QUASIPOST field."""
+    import netCDF4
+    from namgpu.products import memslp
+
+    def free():
+        try:
+            import cupy as cp
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:  # noqa: BLE001 - no CuPy or no device: it ran on numpy
+            pass
+    # on a full shared card it waits and reruns on the GPU, as the writer does (_card_wait)
+    counted = reruns = 0
+    while True:
+        err = None
+        # card work: behind the run's card gate, held only while this attempt has memory on the card (not while it
+        # waits to rerun: the forecast's claim waits for every hold to end)
+        with cardgate.hold(Path(history).parent):
+            try:
+                with netCDF4.Dataset(history) as s:
+                    a = memslp.from_history(s)
+            except Exception as e:  # noqa: BLE001 - CuPy's OutOfMemoryError or a CUDA allocation error
+                err = e
+            free()
+        if err is None:
+            break
+        if counted >= OOM_RETRIES or not (type(err).__name__ == "OutOfMemoryError" or _is_oom(str(err).lower())):
+            raise err
+        c, why, _ = _card_wait(Path(history).parent, f"MSLET of {Path(history).name}", counted)
+        counted += c
+        reruns += 1
+        print(f"woof-nam products: {Path(history).name}: MSLET out of GPU memory, rerun {reruns} ({why})",
+              file=sys.stderr, flush=True)
+    if a is None:
+        return None
+    return _interp_for(ps, "MSLP")(t, a), ("Time", "south_north", "west_east")
 
 
 def frame_carriers(ps) -> list:
@@ -496,8 +624,11 @@ def wrf_frame(history: Path, dst: Path, pool=None, t=None, f=None, ps=None, gkey
             raise RuntimeError(f"{history.name}: products need {missing} (history written with --history-fields "
                                f"full or products has them)")
         names = list(dict.fromkeys(PASS_3D + ("PRES", "PH", "U", "V", "W") + PASS_2D + ("U10", "V10")
-                                   + WIND_2D_EXTRA + PASS_NMM + ((PASS_3D_NEST + PASS_2D_NEST) if nest else ())))
+                                   + WIND_2D_EXTRA + PASS_NMM + (CONV_RATE,)
+                                   + ((PASS_3D_NEST + PASS_2D_NEST) if nest else ())))
         names = [n for n in names if n in s.variables or n in DERIVED]
+    # the frame's MSLP is MSLET (_mslet_carrier), computed in this process, not the history's MSLP
+    names = [n for n in names if n != "MSLP"]
     carriers = [n for n in frame_carriers(ps) if n not in PTYPE_CARRIERS]      # the field pool's share
     if gkey is None:
         jobs = [(str(history), n) for n in names] + [(str(history), n) for n in carriers]
@@ -524,8 +655,10 @@ def _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm) 
     # the main process meanwhile, then the pool's results are collected
     it = pool.map(_read_regrid_to, [(shm, j) for j in jobs]) if pool is not None else map(_read_regrid, jobs)
     ptype = _ptype_carriers(history, gkey, cctx)
+    mslet = _mslet_carrier(history, t, ps)
     got = {name: _mapped(v) for name, v in it}
     got.update(ptype)
+    got["MSLP"] = mslet
     with netCDF4.Dataset(history) as s:
         get = lambda n: got[n][0]  # noqa: E731
         lat, lon = t["lat"].astype(np.float32), t["lon"].astype(np.float32)
@@ -566,9 +699,9 @@ def _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm) 
             put("XLONG", S2, lon)
             for n in PASS_2D:
                 if got.get(n) is not None and got[n][1] == S2:
-                    put(n, S2, get(n))
-            # NAM QSHLTR is specific humidity. The new Rust LCL record reads
-            # this explicit carrier; existing records keep their original Q2.
+                    put(n, S2, frame_q2(get(n)) if n == "Q2" else get(n))
+            # NAM QSHLTR is specific humidity. The Rust LCL record reads this explicit carrier; the frame's Q2
+            # (above) is the same field as a mixing ratio, which is what the WOOF post takes the WRF name Q2 to be.
             put("NAM_Q2_SPECIFIC", S2, get("Q2"))
             u10, v10 = to_grid(get("U10"), get("V10"))
             put("U10", S2, u10)
@@ -587,6 +720,12 @@ def _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm) 
                 put(MASK, S2, t["valid"].astype(np.float32))
             for name, plane in _buckets(history, s, get, t, ps).items():
                 put(name, S2, plane)
+            # the convective rain at the output time for the writer's visibility (conv_prate); the physics step is
+            # the run's (a nest's cctx, else the configfile beside the parent run)
+            conv = conv_prate(got[CONV_RATE][0] if got.get(CONV_RATE) is not None else None,
+                              cctx if (cctx or {}).get("dtq2") else _run_ctx(Path(history).parent))
+            if conv is not None:
+                put(CONV_CARRIER, S2, conv)
             for name in frame_carriers(ps):           # soil, land, snow, flux, radiation, cloud, type, nest records
                 if got.get(name) is not None:
                     put(name, ("Time",) + got[name][1], got[name][0])
@@ -605,7 +744,7 @@ def _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm) 
             if got.get("W") is not None:
                 put("W", ("Time", "bottom_top_stag", "south_north", "west_east"), _stagger(get("W"), 0))
             # NMMB holds w on the mid layers: the exporter takes DZDT and omega from it there as it is (destaggering
-            # the interface copy above would smooth it 1-2-1). NAM's post reads the total w (W + BARO, history W_TOT);
+            # the interface copy above would smooth it 1-2-1). the products use the total w (W + BARO, history W_TOT);
             # a history written before W_TOT was carried has only the bare W, and the run index says so.
             w_src = "W_TOT" if got.get("W_TOT") is not None else ("W" if got.get("W") is not None else None)
             if w_src is not None:
@@ -674,8 +813,10 @@ def _wrf_frame_write(history, dst, pool, t, f, ps, gkey, cctx, nest, jobs, shm) 
         valid = datetime.strptime(str(netCDF4.chartostring(np.asarray(s["Times"][0]))), "%Y-%m-%d_%H:%M:%S")
         start = datetime.strptime(s.START_DATE, "%Y-%m-%d_%H:%M:%S")
     notes = []
+    if conv is None and got.get(CONV_RATE) is not None:
+        notes.append("VIS without the convective rain term: no nam_configfile beside the run gives the physics step")
     if w_src != "W_TOT":
-        notes.append(f"DZDT/VVEL from the history's {w_src or 'no'} w: it has no W_TOT (W + BARO, the w NAM's post reads)")
+        notes.append(f"DZDT/VVEL from the history's {w_src or 'no'} w: it has no W_TOT (W + BARO, the total vertical velocity)")
     if got.get("PINT") is None:
         notes.append("isobaric heights over interface pressures rebuilt from PRES/PSFC: the history has no PINT")
     return {"valid": valid, "start": start, "notes": notes}
@@ -712,7 +853,10 @@ def _buckets(history: Path, s, get, t, ps=None) -> dict:
     if lead_s <= 0:
         # the initial time: every bucket is empty (NAM writes its accumulations there as 0-0 h zeros)
         z = np.zeros(t["wx"].shape, np.float32)
-        return {f"{v}_S{h}": z for h in BUCKETS_H for v in ("APCP", "ACPCP")}
+        out = {f"{v}_S{h}": z for h in BUCKETS_H for v in ("APCP", "ACPCP")}
+        if "ACSNOW" in s.variables:
+            out["WEASD_S12"] = z
+        return out
     start = _dt.strptime(s.START_DATE, "%Y-%m-%d_%H:%M:%S")
     tot_now = get("RAINNC") + get("RAINC")
     out = {}
@@ -731,7 +875,33 @@ def _buckets(history: Path, s, get, t, ps=None) -> dict:
             tot0 = nc0 + conv0
         out[f"APCP_S{hours}"] = np.maximum(tot_now - tot0, 0.0).astype(np.float32)
         out[f"ACPCP_S{hours}"] = np.maximum(get("RAINC") - conv0, 0.0).astype(np.float32)
+    snow = _snow_bucket_12(history, s, t, lead_s, start)
+    if snow is not None:
+        out["WEASD_S12"] = snow
     return out
+
+
+def _snow_bucket_12(history: Path, s, t, lead_s: int, start):
+    """Snowfall water (kg m-2) since the last 12 h reset (NAM's WEASD accumulation record, awphys row 334). The model
+    keeps snowfall only in ACSNOW, a 3 h bucket (kg m-2: the Noah driver adds FFROZP PRCP DT, phys_noah_driver.cu) emptied after the history write at every multiple of 3 h; so the
+    window's total is ACSNOW of each history file at a 3 h mark after the window start and up to the current 3 h
+    bucket's start, plus this file's ACSNOW. Left out (None) when the history has no ACSNOW or a needed file is
+    missing, never filled."""
+    import netCDF4
+    if "ACSNOW" not in s.variables:
+        return None
+    b12 = ((lead_s - 1) // (12 * 3600)) * (12 * 3600)
+    b3 = ((lead_s - 1) // (SNOW_BUCKET_H * 3600)) * (SNOW_BUCKET_H * 3600)
+    tot = np.asarray(s["ACSNOW"][0], dtype=np.float64)
+    for mark in range(b12 + SNOW_BUCKET_H * 3600, b3 + 1, SNOW_BUCKET_H * 3600):
+        f0 = history.with_name(f"wrfout_d01_{start + timedelta(seconds=mark):%Y-%m-%d_%H:%M:%S}")
+        if not f0.is_file():
+            return None
+        with netCDF4.Dataset(f0) as s0:
+            if "ACSNOW" not in s0.variables:
+                return None
+            tot = tot + np.asarray(s0["ACSNOW"][0], dtype=np.float64)
+    return np.maximum(_regrid(t, tot.astype(np.float32)), 0.0).astype(np.float32)
 
 
 def _buckets_nest(history: Path, s, t, ps) -> dict:
@@ -987,22 +1157,157 @@ class _Hour:
     """One history hour in flight: its hand-off frame is written, its writer process is running."""
 
     def __init__(self, history: Path, out: Path, work: Path, when: dict, t0: float, t_frame: float, proc, cmd=None,
-                 set_name: str = "awphys", file_name: str | None = None):
+                 set_name: str = "awphys", file_name: str | None = None, gate=None, stamps: dict | None = None):
         self.history, self.out, self.work, self.when = history, out, work, when
         self.t0, self.t_frame, self.proc, self.cmd = t0, t_frame, proc, cmd
         self.set_name, self.file_name = set_name, file_name or FILE_NAME
+        self.gate = gate or cardgate.Hold()       # the writer's place on the card (cardgate), until it has exited
+        self.stamps = stamps if stamps is not None else _stamps(history)
+
+
+def _stamps(history: Path) -> dict:
+    """Where an hour's time goes, in wall-clock seconds after its history file was written (its mtime): the per-hour
+    stamps of products.log and the hour's index row. Measured first, so the lag of each GRIB2 file behind its history
+    hour can be split into the follower's queue, its frame, its card waits and its writer."""
+    try:
+        seen = Path(history).stat().st_mtime
+    except OSError:
+        seen = time.time()
+    return {"history": seen, "taken": round(time.time() - seen, 2)}
+
+
+def _stamp(h_or_stamps, key: str) -> None:
+    s = h_or_stamps.stamps if hasattr(h_or_stamps, "stamps") else h_or_stamps
+    s[key] = round(time.time() - s["history"], 2)
+
+
+def stamps_line(name: str, s: dict) -> str:
+    """One products.log line: where the time of this hour's file went, seconds after its history file."""
+    parts = [f"taken +{s.get('taken', 0):.1f}"]
+    for k, label in (("frame_end", "frame done"), ("writer_start", "writer started"), ("writer_end", "writer done"),
+                     ("placed", "in place")):
+        if k in s:
+            parts.append(f"{label} +{s[k]:.1f}")
+    if s.get("reruns"):
+        parts.append(f"{s['reruns']} reruns, {s.get('rerun_wait_s', 0):.1f} s waiting for card memory")
+    return f"{name}: stamps (s after its history file): " + ", ".join(parts)
 
 
 # A writer that dies on a full shared card (CUDA out of memory in its post or extras upload) is rerun on the GPU,
 # never dropped and never moved to the CPU (the GPU stage has no CPU fallback): after a wait until the card has room.
 # Every rerun is logged and named in the hour's index row (`writer_retries`); a card that stays full fails the hour.
-OOM_MARKERS = ("out of memory", "OUT_OF_MEMORY", "cudaErrorMemoryAllocation")
+# "bytes free, the frame needs about" is the writer's own refusal when the card has no room for its post
+# (rw-post group_e cuda.rs); it is the same full card, so it is rerun the same way (arctic-front 0.2.1 candidate run
+# on a 32 GB card: two hours failed on it at once while the forecast held the card).
+OOM_MARKERS = ("out of memory", "OUT_OF_MEMORY", "cudaErrorMemoryAllocation", "bytes free, the frame needs about")
 OOM_RETRIES = int(os.environ.get("NAMGPU_PRODUCTS_OOM_RETRIES", "20"))
 OOM_WAIT_S = float(os.environ.get("NAMGPU_PRODUCTS_OOM_WAIT_S", "30"))
+# While this run's forecast is on the card, a refused stage waits for the forecast's next release of memory (after a
+# radiation call or a history hour: every few seconds on the 12 km grid) and reruns then; that refusal is not one of
+# the hour's OOM_RETRIES (namgpu.cardgate says what broke with the fixed sleep). A forecast that gives nothing back
+# for this long counts as a try, as a card held by someone else does.
+RELEASE_WAIT_S = float(os.environ.get("NAMGPU_PRODUCTS_RELEASE_WAIT_S", "120"))
+
+# The follower's heartbeat, <run>/products.state.json: {"pid", "state", "since", "beat"}. Written when the follower
+# starts, when it takes an hour, and about every 5 s while one of its stages waits for card memory. The run that waits
+# for its follower (run_forecast.products_wait) counts a new beat as progress. Breakage it prevents: that wait counted
+# only new files in products/ and new lines in products.log, so a follower alive and waiting for a full card for
+# --products-stall-s (900 s) was stopped and the run exited 1. A beat is written by the waits themselves, never by a
+# free-running thread: a follower that hangs stops beating and is still stopped.
+STATE_FILE = "products.state.json"
+_BEAT = {"path": None, "state": "starting", "since": 0.0}
+_BEAT_LOCK = __import__("threading").Lock()
+
+
+def beat(state: str | None = None) -> None:
+    """Rewrite the follower's heartbeat (state: what it does now; None keeps the last). Never raises."""
+    p = _BEAT.get("path")
+    if p is None:
+        return
+    with _BEAT_LOCK:
+        now = time.time()
+        if state is not None and state != _BEAT["state"]:
+            _BEAT["state"], _BEAT["since"] = state, now
+        doc = {"pid": os.getpid(), "state": _BEAT["state"], "since": round(_BEAT["since"], 3), "beat": round(now, 3)}
+        try:
+            tmp = p.with_name(p.name + f".tmp{os.getpid()}")
+            tmp.write_text(json.dumps(doc) + "\n")
+            os.replace(tmp, p)
+        except OSError:
+            pass
+
+
+def _sleep_beating(seconds: float) -> None:
+    end = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(5.0, left))
+        beat()
+
+
+def _card_wait(run_dir, what: str, counted: int) -> tuple[int, str, float]:
+    """After `what` was refused card memory: wait until a rerun may fit. Returns (1 when this refusal counts as one of
+    the hour's OOM_RETRIES else 0, the log words, seconds waited). While this run's forecast is on the card the wait
+    ends at its next release of memory and does not count (cardgate); otherwise (the forecast has ended or is gone, a
+    run with no gate, or a forecast that gave nothing back for RELEASE_WAIT_S) it is the fixed OOM_WAIT_S and counts."""
+    t0 = time.monotonic()
+    st = cardgate.forecast_state(run_dir) if run_dir is not None else None
+    if st is not None and st["state"] == "running":
+        beat(f"waiting for card memory ({what}) until the forecast gives memory back")
+        how = cardgate.wait_release(run_dir, st["releases"], RELEASE_WAIT_S, beat=beat)
+        dt = time.monotonic() - t0
+        if how in ("released", "ended"):
+            beat("working")
+            return 0, f"waited {dt:.1f} s for the forecast to give card memory back ({how}); not counted", dt
+        if how == "timeout":
+            beat("working")
+            return 1, (f"waited {dt:.0f} s and the forecast gave no memory back; try {counted + 1} of "
+                       f"{OOM_RETRIES}"), dt
+    beat(f"waiting for card memory ({what}), {OOM_WAIT_S:.0f} s")
+    _sleep_beating(OOM_WAIT_S)
+    beat("working")
+    dt = time.monotonic() - t0
+    return 1, f"waited {dt:.0f} s; try {counted + 1} of {OOM_RETRIES}", dt
 
 
 def _is_oom(text: str) -> bool:
     return any(m in (text or "") for m in OOM_MARKERS)
+
+
+def _is_oom_error(e: BaseException) -> bool:
+    return type(e).__name__ == "OutOfMemoryError" or _is_oom(str(e)) or _is_oom(str(e).lower())
+
+
+def _free_pools() -> None:
+    try:
+        import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:  # noqa: BLE001 - no CuPy or no device
+        pass
+
+
+def _start_hour_fits(start, name: str, log=None, run_dir=None):
+    """start() (an hour's hand-off frame and writer start), rerun after a wait when the frame runs out of GPU
+    memory on a full shared card, as the writer is (_card_wait: the forecast's next release while it runs, else
+    OOM_WAIT_S and one of OOM_RETRIES); any other error, or a card that stays full, fails the hour. Breakage it
+    prevents: a frame that met a full card failed its hour at once, so a 12 km run with --products on a 32 GB card
+    lost hours while its own forecast held the card (arctic-front 0.2.1 candidate run, +18 h and +30 h)."""
+    log = log or (lambda m: print(m, file=sys.stderr, flush=True))
+    counted = reruns = 0
+    while True:
+        try:
+            return start()
+        except Exception as e:  # noqa: BLE001 - CuPy's OutOfMemoryError or a CUDA allocation error
+            _free_pools()
+            if counted >= OOM_RETRIES or not _is_oom_error(e):
+                raise
+            c, why, _ = _card_wait(run_dir, f"frame of {name}", counted)
+            counted += c
+            reruns += 1
+            log(f"woof-nam products: {name}: frame out of GPU memory, rerun {reruns} ({why})")
 
 
 def _rerun_on_oom(h: "_Hour", stdout: str, stderr: str):
@@ -1010,16 +1315,24 @@ def _rerun_on_oom(h: "_Hour", stdout: str, stderr: str):
     reruns = []
     rc = h.proc.returncode
     cmd = list(h.cmd or [])
-    for attempt in range(OOM_RETRIES):
+    counted = 0
+    while counted < OOM_RETRIES:
         if not rc or not cmd or not _is_oom((stderr or "") + (stdout or "")):
             break
-        time.sleep(OOM_WAIT_S)
-        why = f"waited {OOM_WAIT_S:.0f} s"
-        print(f"woof-nam products: {h.history.name}: writer out of GPU memory, rerun {attempt + 1} ({why})",
+        h.gate.release()                       # the refused writer has exited: no place held while it waits
+        c, why, dt = _card_wait(h.history.parent, f"writer of {h.history.name}", counted)
+        counted += c
+        st = getattr(h, "stamps", None)
+        if st is not None:
+            st["reruns"] = st.get("reruns", 0) + 1
+            st["reruns_counted"] = counted
+            st["rerun_wait_s"] = round(st.get("rerun_wait_s", 0.0) + dt, 2)
+        print(f"woof-nam products: {h.history.name}: writer out of GPU memory, rerun {len(reruns) + 1} ({why})",
               file=sys.stderr, flush=True)
         reruns.append(why)
         shutil.rmtree(h.work / "grib2", ignore_errors=True)
         (h.work / "grib2").mkdir()
+        h.gate = cardgate.hold(h.history.parent)
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         rc, stdout, stderr = p.returncode, p.stdout, p.stderr
     return rc, stdout, stderr, reruns
@@ -1032,11 +1345,14 @@ def _start_hour(history: Path, out: Path, profile: str, device: str, bits: int, 
     ps = ps or PSETS.AWPHYS
     file_name = file_name or FILE_NAME
     t0 = time.perf_counter()
+    stamps = _stamps(history)
     work = Path(tempfile.mkdtemp(prefix=".products-", dir=out))
+    gate = cardgate.Hold()
     try:
         frame = work / history.name
         when = wrf_frame(history, frame, pool=pool, ps=ps, gkey=gkey, cctx=cctx)
         t_frame = time.perf_counter() - t0
+        _stamp(stamps, "frame_end")
         exp = work / "grib2"
         exp.mkdir()
         cmd = [str(_exporter()), "--out", str(exp), "--bits", str(int(bits)), "--post-device",
@@ -1044,19 +1360,36 @@ def _start_hour(history: Path, out: Path, profile: str, device: str, bits: int, 
                "--file-name", file_name, "--frames", str(frame)]
         if cctx and cctx.get("dt"):
             cmd[1:1] = ["--dt", str(float(cctx["dtq2"] or cctx["dt"]))]
+        # the writer's GPU post: behind the run's card gate (it waits here while the forecast claims the card) from
+        # its start until it has exited (_finish_hour)
+        gate = cardgate.hold(history.parent)
+        _stamp(stamps, "writer_start")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except BaseException:
+        gate.release()
         shutil.rmtree(work, ignore_errors=True)
         raise
-    return _Hour(history, out, work, when, t0, t_frame, proc, cmd, ps.name, file_name)
+    return _Hour(history, out, work, when, t0, t_frame, proc, cmd, ps.name, file_name, gate, stamps)
+
+
+def _writer_manifest(exp: Path) -> Path:
+    """The run manifest rw_rrfs_upp wrote in its output folder (exactly one *-manifest.json)."""
+    found = sorted(exp.glob("*-manifest.json"))
+    if len(found) != 1:
+        raise RuntimeError(f"{RW} left {len(found)} manifests in {exp} (expected one *-manifest.json)")
+    return found[0]
 
 
 def _finish_hour(h: _Hour, keep_work: bool = False) -> dict:
     """Wait for the hour's writer, move its file into place, write the .idx; the hour's index row."""
     keep_work = keep_work or os.environ.get("NAMGPU_PRODUCTS_KEEP", "") == "1"
     try:
-        stdout, stderr = h.proc.communicate()
-        rc, stdout, stderr, reruns = _rerun_on_oom(h, stdout, stderr)
+        try:
+            stdout, stderr = h.proc.communicate()
+            rc, stdout, stderr, reruns = _rerun_on_oom(h, stdout, stderr)
+        finally:
+            h.gate.release()                   # the writer has exited: its memory is back with the driver
+        _stamp(h, "writer_end")
         if rc:
             raise RuntimeError(f"{RW} exit {rc}: {(stderr or stdout).strip()[-800:]}")
         exp, out, when = h.work / "grib2", h.out, h.when
@@ -1065,7 +1398,8 @@ def _finish_hour(h: _Hour, keep_work: bool = False) -> dict:
         if not (exp / name).is_file():
             raise RuntimeError(f"{RW} wrote no {name} for {h.history.name}: {stdout[-400:]}")
         os.replace(exp / name, out / name)
-        manifest = json.loads((exp / "rrfs-upp-manifest.json").read_text())
+        # the writer's run manifest: the one *-manifest.json it writes beside the GRIB2 file
+        manifest = json.loads(_writer_manifest(exp).read_text())
         frame_rec = manifest["frames"][0]
         omitted = [{"shortname": f["shortname"], "name": f["pname"], "reason": f["reason"]}
                    for f in frame_rec.get("fields", []) if f.get("written", 0) < f.get("messages", 1)]
@@ -1074,11 +1408,13 @@ def _finish_hour(h: _Hour, keep_work: bool = False) -> dict:
         tmp_idx = out / (name + ".idx.part")
         tmp_idx.write_text("\n".join(idx_lines(recs, h.set_name)) + "\n")
         os.replace(tmp_idx, out / (name + ".idx"))
+        _stamp(h, "placed")
         return {"file": name, "history": h.history.name, "valid": f"{when['valid']:%Y-%m-%dT%H:%M:%SZ}",
                 "fhr": fhr, "bytes": (out / name).stat().st_size, "records": len(recs),
                 "frame_s": round(h.t_frame, 2), "writer_s": round(float(frame_rec.get("seconds") or 0.0), 2),
                 "writer_timings": frame_rec.get("timings"), "not_written": omitted,
                 "notes": when.get("notes", []), "writer_retries": reruns,
+                "stamps": {k: v for k, v in h.stamps.items() if k != "history"},
                 "seconds": round(time.perf_counter() - h.t0, 2)}
     finally:
         if not keep_work:
@@ -1126,6 +1462,23 @@ def _run_ctx(run_dir: Path) -> dict:
     return {}
 
 
+def _field_context():
+    """The field pool's start method: forkserver (spawn where there is none), on every Python. A forked worker
+    inherits the SIGTERM/SIGHUP handler (_stop_on_signal), so the stop signal it is sent becomes an exception it
+    catches and outlives, and it holds both ends of the pool's pipes, so it never reads an end of file. The forkserver's
+    socket goes in a short folder when TMPDIR is long (namgpu.cores.pool_context)."""
+    from namgpu import cores as _cores  # noqa: PLC0415
+    return _cores.pool_context()
+
+
+def field_workers() -> int:
+    """Processes of the frame's field pool (reads and regrids): half the cores this process may use
+    (namgpu.cores.usable: affinity set and cgroup quota), 2 to 16. It counted the host's cores, so a follower pinned
+    to 12 of 24 cores beside its forecast ran 12 field processes on them."""
+    from namgpu import cores
+    return max(2, min(16, cores.usable() // 2))
+
+
 def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, threads: int = 8,
         device: str = "gpu", bits: int = DEFAULT_BITS, table: Path | None = None, follow: bool = False,
         poll_s: float = 1.0, idle_timeout_s: float = 1800.0, until: Path | None = None,
@@ -1142,6 +1495,9 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
     run_dir = Path(run_dir)
     out = Path(out) if out else run_dir / "products"
     out.mkdir(parents=True, exist_ok=True)
+    if follow:                                 # the heartbeat the run's wait reads (STATE_FILE)
+        _BEAT["path"] = run_dir / STATE_FILE
+        beat("waiting for history")
     if set_name in (None, "auto"):
         set_name = detect_set(run_dir) or "awphys"
     ps = PSETS.get(set_name)
@@ -1199,6 +1555,8 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
             rows_out.append(r)
             print(f"{r['file']}: {r['records']} records, {r['bytes'] / 1e6:.1f} MB, frame {r['frame_s']} s, "
                   f"writer {r['writer_s']} s", flush=True)
+            if r.get("stamps"):
+                print(stamps_line(r["file"], r["stamps"]), flush=True)
         except Exception as e:  # noqa: BLE001
             errors.append(f"{h.history.name}: {type(e).__name__}: {e}")
             print("FAILED", errors[-1], flush=True)
@@ -1240,7 +1598,8 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
             pending.remove(item)
             done(item)
 
-    with ProcessPoolExecutor(max_workers=max(2, min(16, (os.cpu_count() or 8) // 2))) as fields, \
+    with ProcessPoolExecutor(max_workers=field_workers(), mp_context=_field_context(),
+                             initializer=_die_with_parent) as fields, \
             ThreadPoolExecutor(max_workers=in_flight + 1, thread_name_prefix="products-finish") as finisher:
         while True:
             harvest()
@@ -1251,8 +1610,10 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
                 try:
                     if want is not None and _xtime_hour(f) not in want:
                         continue
-                    h = _start_hour(f, out, str(profile), device, bits, fields, ps=ps, gkey=gkey_for(f),
-                                    cctx=cctx_for(f), file_name=file_name)
+                    beat(f"working ({f.name})")
+                    h = _start_hour_fits(lambda f=f: _start_hour(f, out, str(profile), device, bits, fields, ps=ps,
+                                                                 gkey=gkey_for(f), cctx=cctx_for(f),
+                                                                 file_name=file_name), f.name, run_dir=run_dir)
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"{f.name}: {type(e).__name__}: {e}")
                     print("FAILED", errors[-1], flush=True)
@@ -1398,6 +1759,87 @@ def compare(reference: Path, ours: Path) -> int:
     return 0
 
 
+# Every product set needs a card, whatever --post-device says: the pinned writer computes its RRFS extras (the derived
+# records of NOAA's files) on a CUDA device only; --post-device cpu moves the rest of its post to the processor (a
+# referee run) and still opens the card for the extras. With no device it stopped at hour 0 with "the RRFS extras
+# need a CUDA device", after the frame of hour 0 had been built on the processor (nam-differences-2, 2026-11-11).
+NO_CARD = ("woof-nam products: no CUDA device ({why}): these GRIB2 files need a card, with any --post-device (the "
+           "writer computes the derived records of NOAA's files, its RRFS extras, on a card only; cpu moves only the "
+           "rest of its post to the processor)")
+_CARD_PROBE = r"""
+import ctypes, sys
+try:
+    lib = ctypes.CDLL("libcuda.so.1")
+except OSError as e:
+    print("no CUDA driver library: %s" % e); sys.exit(1)
+n = ctypes.c_int(0)
+r = lib.cuInit(0) or lib.cuDeviceGetCount(ctypes.byref(n))
+print("CUresult %d, %d devices visible" % (r, n.value)); sys.exit(0 if r == 0 and n.value > 0 else 1)
+"""
+
+
+def card_visible() -> tuple[bool, str]:
+    """(whether a CUDA device opens here, the driver's own words): cuInit and cuDeviceGetCount in a short child, so
+    this process holds no CUDA state (CUDA_VISIBLE_DEVICES is honoured as the writer honours it)."""
+    try:
+        p = subprocess.run([sys.executable, "-c", _CARD_PROBE], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"the device probe did not run: {e}"
+    return p.returncode == 0, (p.stdout or p.stderr).strip().splitlines()[-1] if (p.stdout or p.stderr).strip() \
+        else f"probe exit {p.returncode}"
+
+
+def _children(pid: int) -> list[int]:
+    """The processes whose parent is `pid` (from /proc; empty where there is none)."""
+    out = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return out
+    for d in names:
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                rest = f.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(rest) > 1 and rest[1] == str(pid):
+            out.append(int(d))
+    return out
+
+
+def _stop_on_signal(signum, _frame):
+    """SIGTERM/SIGHUP: end the field workers and the writers now, then leave by SystemExit so every frame folder in
+    host RAM (wrf_frame's finally), every hour's work folder (_finish_hour's finally) and the pools are cleaned up.
+    Breakage it prevents: a products process stopped by its PID left 13 processes and its /dev/shm frame folder
+    behind (nam-differences-2, 2026-11-11), because the default SIGTERM ends Python with no cleanup at all."""
+    import multiprocessing
+    kids = [p.pid for p in multiprocessing.active_children() if p.pid]
+    for pid in _children(os.getpid()):
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                if b"--profile-json" in f.read().split(b"\0"):       # a writer (_start_hour's command)
+                    kids.append(pid)
+        except OSError:
+            pass
+    for pid in kids:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+    raise SystemExit(128 + signum)
+
+
+def _install_stop_handlers() -> None:
+    import signal
+    try:
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(s, _stop_on_signal)
+    except (ValueError, AttributeError):        # not the main thread, or no such signal here
+        pass
+
+
 def main(argv=None) -> int:
     global FILE_NAME
     from namgpu.cli import HelpFormatter
@@ -1430,8 +1872,10 @@ def main(argv=None) -> int:
     ap.add_argument("--packing", default="complex", choices=("complex",),
                     help="GRIB2 packing: complex (NCEP complex packing with spatial differencing, as NOAA's files)")
     ap.add_argument("--post-device", default="gpu", choices=("gpu", "auto", "cpu"),
-                    help="where the exporter computes the products: gpu (default; a full card is waited for, never "
-                         "replaced by the CPU), auto, or cpu (a referee run)")
+                    help="where the writer runs its post: gpu (default; a full card is waited for, never replaced by "
+                         "the CPU), auto, or cpu (a referee run: the post on the processor). Every choice needs a "
+                         "CUDA device: the writer computes the derived records of NOAA's files on a card only, so "
+                         "with no device visible products stops before the first hour, in one line")
     ap.add_argument("--compare", nargs=2, type=Path, metavar=("REFERENCE", "OURS"),
                     help="check the grid section and every table record of one of our files against an archived "
                          "NAM awphys file (same inventory line, NOAA's order)")
@@ -1459,6 +1903,13 @@ def main(argv=None) -> int:
     except exporter.ExporterMissing as e:
         print(f"woof-nam products: {e}", file=sys.stderr)
         return 2
+    ok, why = card_visible()           # before any hour is read: no card, no file (NO_CARD says why)
+    if not ok:
+        print(NO_CARD.format(why=why), file=sys.stderr)
+        return 2
+    _install_stop_handlers()
+    from namgpu.io import scratch as _scr
+    _scr.sweep()                       # frame folders of products runs that were killed (their owner has ended)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", a.prefix):
         ap.error(f"--prefix {a.prefix!r}: letters, digits, '.', '_' and '-' only")
     FILE_NAME = a.prefix + FILE_NAME[FILE_NAME.index(".t{HH}z"):]

@@ -21,7 +21,7 @@ def test_every_nest_set_reads_and_pairs_noaas_66_messages():
         n = len(rows)
         assert n == (876 if name == "conusnest" else 871), (name, n)
         assert sum(1 for f in doc["fields"] if f.get("pair_next")) == 66, name
-        assert doc["mask_carrier"] == "WOOF_VALID" and doc["initial_window_unit"] == 2
+        assert doc["mask_carrier"] == "WOOF_VALID" and doc["initial_window_stats"] == [0, 1] and "initial_window_unit" not in doc
         # every left-out row says why, and every written row has NOAA's precision
         assert all(r["note"] for r in left), name
         assert all("decimal_scale" in f for f in doc["fields"]), name

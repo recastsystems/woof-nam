@@ -19,14 +19,14 @@
 //     MAX(a,b) is (a > b) ? a : b.  fmaxf/fminf are not used: they are
 //     commutative on signed zeros, and the sign of a zero is observable here.
 //
-//   * EXP and ** 0.667 are glibc 2.39's expf and powf, not CUDA's.  gfortran
+//   * EXP and ** 0.667 are the reference libm's expf and powf, not CUDA's.  gfortran
 //     emits calls to the C library, and neither CUDA's device expf/powf nor a
-//     correctly-rounded expf agrees with glibc often enough to hold a
+//     correctly-rounded expf agrees with the reference libm often enough to hold a
 //     max_ulp-0 gate.  Both are reproduced below in double precision with
 //     __dadd_rn / __dsub_rn / __dmul_rn / __fma_rn, matching the FMA-contracted
-//     x86-64 ifunc variant that glibc selects on both hosts in this project.
+//     x86-64 ifunc variant that the reference libm selects on both hosts in this project.
 //
-//   * the two glibc constant tables live in __constant__ memory and are stored
+//   * the two Arm constant tables live in __constant__ memory and are stored
 //     as raw IEEE-754 bit patterns.  ptxas 12.8's constant folder does not
 //     honour round-to-nearest-even, so a literal FP array inside a kernel can
 //     have its differences mis-folded at compile time; bit patterns in
@@ -53,7 +53,7 @@ __device__ __forceinline__ unsigned long long d2u(double d)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 __exp2f_data / __powf_log2_data, as raw bit patterns.
+// the Arm exp2f and powf log2 tables (MIT; LICENSE-third-party.txt), as raw bit patterns.
 // POWF_SCALE == 1 because TOINT_INTRINSICS is 0 on x86-64.
 // --------------------------------------------------------------------------
 __constant__ unsigned long long VP_EXP2F_TAB[32] = {
@@ -111,9 +111,9 @@ __constant__ unsigned long long VP_POWF_POLY[5] = {
 // the compiler honours the last occurrence.  The flush is the flag, not the
 // SM: the conversion instruction has no flush of its own, so under `-ftz=true`
 // the compiler emits an extra multiply after it to produce one, and built
-// without the append the same conversion keeps the subnormal.  glibc's
+// without the append the same conversion keeps the subnormal.  The reference libm's
 // expf and powf do produce subnormals, gfortran at -O0 leaves MXCSR's FTZ/DAZ
-// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the live glibc 2.39
+// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the reference libm
 // over 1,106,247,680 inputs -- produces them too.  So the conversion as
 // compiled here is a divergence from the authority in a narrow but reachable
 // band:
@@ -141,9 +141,9 @@ __device__ float nmp_d2f_rn(double y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 expf  (sysdeps/ieee754/flt-32/e_expf.c)
+// FP32 expf, our own implementation
 // --------------------------------------------------------------------------
-__device__ float vp_glibc_expf(float x)
+__device__ float vp_f32_expf(float x)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int abstop = (ix >> 20) & 0x7FFu;
@@ -153,7 +153,7 @@ __device__ float vp_glibc_expf(float x)
         if (abstop >= 0x7F8u) return __fadd_rn(x, x);   // +-inf or NaN
         if (x >  0x1.62e42ep6f) return __uint_as_float(0x7F800000u);  // log(2^128)
         if (x < -0x1.9fe368p6f) return 0.0f;                          // log(2^-150)
-        // the remaining tail falls through to the main path, as in glibc
+        // the remaining tail falls through to the main path, as in the reference libm
     }
 
     const double SHIFT   = u2d(VP_EXP2F_SHIFT);
@@ -183,7 +183,7 @@ __device__ float vp_glibc_expf(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 powf  (sysdeps/ieee754/flt-32/e_powf.c)
+// FP32 powf, our own implementation
 //
 // Only the domain Noah-MP reaches is transcribed: a finite non-negative base
 // and a finite positive exponent.  A negative base would need the
@@ -253,7 +253,7 @@ __device__ __forceinline__ bool vp_zeroinfnan(unsigned int i)
     return (2u * i - 1u) >= (2u * 0x7F800000u - 1u);
 }
 
-__device__ float vp_glibc_powf(float x, float y)
+__device__ float vp_f32_powf(float x, float y)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int iy = __float_as_uint(y);
@@ -282,7 +282,7 @@ __device__ float vp_glibc_powf(float x, float y)
 
     double logx  = vp_log2_inline(ix);
     double ylogx = __dmul_rn((double)y, logx);
-    // |y*log2(x)| >= 126 would need glibc's overflow/underflow shims; FWET is
+    // |y*log2(x)| >= 126 would need the reference libm's overflow/underflow shims; FWET is
     // in [0,1] and the exponent is 0.667, so ylogx is in [-126, 0] by
     // construction for every reachable argument.
     return vp_exp2_inline(ylogx);
@@ -373,7 +373,7 @@ extern "C" __global__ void noahmp_phenology(
     float fb = __fdiv_rn(db, vp_fmax(1.0e-06f, span));
 
     if (hvt > 0.0f && hvt <= 1.0f) {
-        float snowhc = __fmul_rn(hvt, vp_glibc_expf(-__fdiv_rn(snowh, 0.2f)));
+        float snowhc = __fmul_rn(hvt, vp_f32_expf(-__fdiv_rn(snowh, 0.2f)));
         fb = __fdiv_rn(vp_fmin(snowh, snowhc), snowhc);
     }
 
@@ -474,7 +474,7 @@ extern "C" __global__ void noahmp_precip_heat(
         qintr = __fmul_rn(__fmul_rn(fveg, rain), fp);
         float cap = __fmul_rn(
             __fdiv_rn(__fsub_rn(maxliq, canliq), dt),
-            __fsub_rn(1.0f, vp_glibc_expf(-__fdiv_rn(__fmul_rn(rain, dt), maxliq))));
+            __fsub_rn(1.0f, vp_f32_expf(-__fdiv_rn(__fmul_rn(rain, dt), maxliq))));
         qintr = vp_fmin(qintr, cap);
         qintr = vp_fmax(qintr, 0.0f);
         qdripr = __fsub_rn(__fmul_rn(fveg, rain), qintr);
@@ -507,7 +507,7 @@ extern "C" __global__ void noahmp_precip_heat(
         qints = __fmul_rn(__fmul_rn(fveg, snow), fp);
         float cap = __fmul_rn(
             __fdiv_rn(__fsub_rn(maxsno, canice), dt),
-            __fsub_rn(1.0f, vp_glibc_expf(-__fdiv_rn(__fmul_rn(snow, dt), maxsno))));
+            __fsub_rn(1.0f, vp_f32_expf(-__fdiv_rn(__fmul_rn(snow, dt), maxsno))));
         qints = vp_fmin(qints, cap);
         qints = vp_fmax(qints, 0.0f);
         float ft = vp_fmax(0.0f, __fdiv_rn(__fsub_rn(tv, 270.15f), 1.87e5f));
@@ -534,7 +534,7 @@ extern "C" __global__ void noahmp_precip_heat(
         fwet = __fdiv_rn(vp_fmax(0.0f, canice), vp_fmax(maxsno, 1.0e-06f));
     else
         fwet = __fdiv_rn(vp_fmax(0.0f, canliq), vp_fmax(maxliq, 1.0e-06f));
-    fwet = vp_glibc_powf(vp_fmin(fwet, 1.0f), 0.667f);
+    fwet = vp_f32_powf(vp_fmin(fwet, 1.0f), 0.667f);
 
     float cmc = __fadd_rn(canliq, canice);
 

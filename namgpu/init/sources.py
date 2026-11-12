@@ -287,8 +287,9 @@ SOURCES = {
                "licence": "inherits the parent run's start source (history attribute DATA_LICENCES)"},
 }
 
-# NAM native analysis records (UPP output of the NMMB analysis, GDT 32769, UPP resolution flags 56:
-# winds grid-relative, grib2_module.f:1301), (discipline, category, parameter) on hybrid levels.
+# NAM native analysis records (NCEP's GRIB2 file of the NMMB analysis, GDT 32769, resolution and component
+# flags 56 = 32 + 16 + 8: i and j increments given, u and v relative to the grid; WMO-No. 306 flag table 3.3),
+# (discipline, category, parameter) on hybrid levels.
 NATIVE_3D = {
     "PRES": (0, 3, 0), "HGT3D": (0, 3, 5), "TMP": (0, 0, 0), "SPFH": (0, 1, 0),
     "UGRD": (0, 2, 2), "VGRD": (0, 2, 3), "CLMR": (0, 1, 22), "CICE": (0, 6, 0),
@@ -297,6 +298,7 @@ NATIVE_3D = {
     "TCOND": (0, 6, 195), "FICE": (0, 6, 199), "FRAIN": (0, 1, 202), "RIME": (0, 1, 203),
     "TKE": (0, 19, 11),
     "DZDT": (0, 2, 9),        # vertical velocity (m/s): the analysis' W_TOT = W + BARO (BARO, mm/s, not subtracted)
+    "CFRAC": (0, 6, 1),       # cloud fraction (%) on the hybrid levels: the NAM's CLDFRA (drv-native-diag-restore)
 }
 # Staged inputs dropped from the state once init-native-atm / init-vcoord-recover have read them.
 STAGED_3D = ("PRES", "TMP", "SPFH", "UGRD", "VGRD", "CLMR", "CICE", "RWMR", "SNMR", "ZERO3")
@@ -335,6 +337,131 @@ NATIVE_SFC = {
 }
 
 
+
+def albase_from_analysis(albdo_pct, snowc, weasd, land):
+    """The snow-free base albedo (NMMB ALBASE, a fraction) from an archived NAM analysis' own surface albedo.
+
+    NAM's Noah sets ALBEDO = ALBASE where there is no snow, so on snow-free land the analysis' ALBDO record is the
+    NAM's ALBASE. In NCEP's awphys files of the 2024-11-05 12Z cycle the albedo of 76,057 snow-free land cells of
+    grid 218 is the same at +9 h as at +0 h (mean abs difference 0.000 points). The analysis file carries no ALBASE
+    record, and before this the whole field was init-static-missing's vegetation-class fill (the mid-range of a
+    WRF table's ALBEDOMIN/ALBEDOMAX): from the first land step the run's albedo sat 3.2 points above the NAM's on
+    those cells (mean abs 4.0, 99th percentile 12, pattern correlation 0.60; 5-15 points over the Mojave and the
+    Colorado Plateau, where the 2 m temperature ran 1-3 F cool at 21Z).
+
+    Returns ALBDO / 100 on land where the analysis has no snow (snow cover and snow water both zero) and the
+    albedo is a valid percentage; 0 (missing) elsewhere: snow-covered land, where the record is the snow blend,
+    and water. init-static-missing fills the missing cells from the table, as it did for every cell before.
+    numpy or cupy arrays; snowc in percent or as a fraction."""
+    ok = (land > 0.5) & (snowc <= 0) & (weasd <= 0) & (albdo_pct > 0) & (albdo_pct <= 100)
+    return (albdo_pct * 0.01 * ok).astype("float32")
+
+
+
+# NCEP's native surface file of the same cycle (nam.tHHz.bgrdsf00.tm00.grib2 on noaa-nam-pds, the same NMMB H grid as
+# bgrd3d00; fetch_case row nam-bgrdsf00-land fetches these records only) carries three land states the analysis
+# bgrd3d00 does not:
+#   SOILL  the liquid part of the soil water, four Noah layers (2-3-192). The NAM's cycled soil holds ice that no
+#          formula of temperature and total water gives back: on 2024-11-05 12Z the top layer has ice at 115,396 of
+#          217,650 land points, 17,510 of them above 0 C, and the frozen-fraction split of init-native-sfc missed
+#          the NAM's liquid water by 0.028 (volume fraction, mean abs, all land; 0.052 where the NAM has ice). With
+#          more liquid and less ice than the NAM, the run warmed the frozen ground too fast: soil 0-10 cm +3 to +4 F
+#          and 2 m +1 to +2 F at 21Z in a band from Arizona to Manitoba.
+#   SNFALB the snow-free base albedo (0-19-193, percent): the NAM's ALBASE on every land point, under snow too. On
+#          snow-free land it equals the analysis albedo (mean abs 0.0002 points); under snow albase_from_analysis
+#          has nothing and the vegetation-table fill missed it by 7.1 points (mean abs).
+#   MXSALB the maximum snow albedo (0-19-192, percent): the NAM's MXSNAL. The table fill missed it by 11.7 points
+#          (mean abs, land with snow).
+# With both albedos, NCEP's own 9 h albedo over snow is ALBASE + SC (MXSNAL - ALBASE) with SC = min(SNFRAC(SNO,
+# 4 SNUP), 0.98), the rule phys_noah_alcalc already applies, to 0.08 points (mean abs, 102,112 snowy land points).
+NATIVE_LAND = {
+    "SOILL1": (2, 3, 192, "106", "0", "0.1"), "SOILL2": (2, 3, 192, "106", "0.1", "0.4"),
+    "SOILL3": (2, 3, 192, "106", "0.4", "1"), "SOILL4": (2, 3, 192, "106", "1", "2"),
+    "SNFALB": (0, 19, 193, "1", "0", None),
+    "MXSALB": (0, 19, 192, "1", "0", None),
+}
+# the fetch row's subset first, then the whole file (the referee row nam-bgrdsf, lead 0) when a case has that instead
+NATIVE_LAND_FILES = ("raw/nam/bgrdsf00.land.grib2", "raw/nam/bgrdsf00.grib2")
+
+
+def native_land_file(case_dir):
+    """The case's NCEP native surface file of the start (NATIVE_LAND_FILES), or None."""
+    for rel in NATIVE_LAND_FILES:
+        p = Path(case_dir) / rel
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def land_from_surface_file(rec, albase, land):
+    """The NAM's own land states from the native surface file's records (rec: NATIVE_LAND name -> [JM, IM] array,
+    any subset), merged over what the start has without them.
+    albase: the base albedo the start has without the file (albase_from_analysis, 0 = missing), a fraction.
+    Returns (static_extra, sh2o, lacking): static_extra {"ALBASE", and "MXSNAL" when the file has it} for
+    init-static-missing (0 = missing: its table fill); sh2o [4, JM, IM] (volume fraction) for init-native-sfc's
+    sfc_override (capped there at the total), or None; lacking: the states left to the fallbacks. numpy or cupy."""
+    if type(albase).__module__.split(".")[0] == "cupy":
+        import cupy as xp  # noqa: PLC0415
+    else:
+        xp = np
+    island = land > 0.5
+    extra, lacking = {}, []
+    if "SNFALB" in rec:
+        a = rec["SNFALB"]
+        extra["ALBASE"] = xp.where(island & (a > 0) & (a <= 100), a * 0.01, albase).astype(xp.float32)
+    else:
+        extra["ALBASE"] = albase
+        lacking.append("base albedo under snow")
+    if "MXSALB" in rec:
+        a = rec["MXSALB"]
+        extra["MXSNAL"] = xp.where(island & (a > 0) & (a <= 100), a * 0.01, 0.0).astype(xp.float32)
+    else:
+        lacking.append("maximum snow albedo")
+    if all(f"SOILL{k}" in rec for k in range(1, 5)):
+        sh2o = xp.ascontiguousarray(xp.stack([rec[f"SOILL{k}"] for k in range(1, 5)]).astype(xp.float32))
+    else:
+        sh2o = None
+        lacking.append("liquid soil water")
+    return extra, sh2o, lacking
+
+
+def decode_native_land(ctx, path, tmpdir):
+    """Decode the NATIVE_LAND records a native surface file carries (init-grib2-decode, on the model grid)."""
+    from namgpu.init import init_grib2_decode as dec
+    inv = dec.inventory(path)
+    keys = [k for k, spec in NATIVE_LAND.items() if any(_selsfc(spec)(r) for r in inv)]
+    if not keys:
+        return {}
+    im, jm = int(ctx.grid.im), int(ctx.grid.jm)
+    return dec.run(ctx, path, {k: _selsfc(NATIVE_LAND[k]) for k in keys}, missing_value=0.0, tmpdir=tmpdir,
+                   expect_shape=(im, jm))
+
+
+# The analysis' 0 h diagnostics (optional; drv-native-diag-restore puts them in the state before the time loop of a
+# no-filter start, so the 0 h history and products carry the NAM's own values instead of zeros): boundary-layer
+# height, friction velocity, the instantaneous surface fluxes (template 4.0; the 4.8 twins are averages), total
+# soil moisture 0-2 m and moisture availability 0-1 m. The hybrid-level cloud fraction is NATIVE_3D CFRAC.
+# The convective state of the analysis: the convective precipitation rate (CPRAT, kg m-2 s-1) and the pressures of the
+# convective cloud bottom and top (level types 242 and 243, Pa; -50000 where the column has no convective cloud). In
+# nam.t12z.bgrd3d00 of 2024-11-05 both pressures are a mid-layer pressure of the column's hybrid levels at every
+# point that has one (to 2.4 Pa, the record's packing), so each names a model layer; the cloud-base pressure record
+# is the higher of the convective and the grid-scale cloud bottom pressures at every point.
+NATIVE_DIAG = {
+    "HPBL": (0, 3, 196, "1", "0", None), "FRICV": (0, 2, 197, "1", "0", None),
+    "SHTFL": (0, 0, 11, "1", "0", None), "LHTFL": (0, 0, 10, "1", "0", None),
+    "DSWRF": (0, 4, 192, "1", "0", None), "USWRF": (0, 4, 193, "1", "0", None),
+    "DLWRF": (0, 5, 192, "1", "0", None), "ULWRF": (0, 5, 193, "1", "0", None),
+    "SOILM": (2, 0, 3, "106", "0", "2"), "MSTAV": (2, 0, 194, "106", "0", "1"),
+    "CPRAT": (0, 1, 196, "1", "0", None),
+    "PCNVBOT": (0, 3, 0, "242", "0", None), "PCNVTOP": (0, 3, 0, "243", "0", None),
+}
+
+
+def native_diag_keys(inv) -> list:
+    """The NATIVE_DIAG names whose record the analysis inventory carries (instantaneous ones only)."""
+    return [k for k, spec in NATIVE_DIAG.items() if any(_selsfc(spec)(r) for r in inv)]
+
+
 # 2 m / 10 m analysis records. NMMB reads tshltr, qshltr, pshltr, u10, v10, th10, q10 from its input file
 # (module_INIT_READ_NEMSIO.F90:802-820, 2178-2217, 2589-2694); without them they start at the
 # SOLVER_INITIALIZE defaults (TSHLTR 273, QSHLTR 0, U10 0; module_SOLVER_GRID_COMP.F90:1105-1118) and the
@@ -345,29 +472,40 @@ NATIVE_SHELTER = {
     "U10M": (0, 2, 2, "103", "10", None), "V10M": (0, 2, 3, "103", "10", None),
     "TH10M": (0, 0, 2, "103", "10", None), "Q10M": (0, 1, 0, "103", "10", None),
 }
-CAPA = 0.28589641          # R/CP, nmm/module_CONSTANTS.F90 (post T2 = TSHLTR * (PSHLTR*1e-5)**CAPA)
-RD = 287.04
-G = 9.8060226
 
 
 def shelter_state(ctx, t2, q2, u10, v10, p2=None, th10=None, q10=None):
-    """Fill the NMMB shelter / 10 m state (H points, [JM, IM]) from analysis 2 m and 10 m fields.
-    t2 K (temperature), q2 kg/kg, u10/v10 grid-relative m/s at H points, p2 Pa (else PSFC reduced 2 m
-    hydrostatically). TSHLTR and TH10 are potential temperatures (P0 = 1e5 Pa), as NMMB stores them."""
-    import cupy as cp
+    """Fill ctx.st PSHLTR, TSHLTR (2 m potential temperature), QSHLTR, U10, V10, TH10 and Q10 [JM, IM] at H points from analysis 2 m and 10 m fields (t2 K, q2 kg/kg, grid-relative u10/v10 m/s, optional p2 Pa, th10, q10).
+
+    PSHLTR: the analysis' 2 m pressure p2 where it is positive; elsewhere, and when the source has none, the
+    hypsometric pressure 2 m above PSFC (poisson.pressure_2m). TSHLTR = t2 (1e5 / PSHLTR) ** KAPPA, the inverse of
+    the history's T2 = TSHLTR (PSHLTR / 1e5) ** KAPPA, so the 0 h history T2 is the analysis t2. QSHLTR = q2
+    (specific humidity). TH10 and Q10: the analysis' 10 m potential temperature and specific humidity; a source
+    without them gets the 2 m values (TSHLTR, q2). Arrays may be numpy or cupy; the state's own kind is written."""
+    from namgpu.io import poisson
     st = ctx.st
-    jm, im = int(ctx.grid.jm), int(ctx.grid.im)
-    psfc = st["PSFC"]
+    s2 = (int(ctx.grid.jm), int(ctx.grid.im))
+    xp = poisson._xp(t2)
+    t2 = xp.asarray(t2, dtype=xp.float32)
+    if "PSFC" not in st.fields:
+        raise RuntimeError(f"{UNIT}: shelter_state needs PSFC in the state before the 2 m pressure can be set")
+    p_hyps = poisson.pressure_2m(xp.asarray(st["PSFC"]), t2)
     if p2 is None:
-        p2 = psfc * cp.exp(cp.float32(-2.0 * G / RD) / t2)
-    st.add("PSHLTR", (jm, im))[...] = p2
-    th2 = t2 * (cp.float32(1.0e5) / p2) ** cp.float32(CAPA)
-    st.add("TSHLTR", (jm, im))[...] = th2
-    st.add("QSHLTR", (jm, im))[...] = cp.maximum(q2, 0.0)
-    st.add("U10", (jm, im))[...] = u10
-    st.add("V10", (jm, im))[...] = v10
-    st.add("TH10", (jm, im))[...] = th2 if th10 is None else th10
-    st.add("Q10", (jm, im))[...] = cp.maximum(q2 if q10 is None else q10, 0.0)
+        pshltr = p_hyps
+    else:
+        p2 = xp.asarray(p2, dtype=xp.float32)
+        # a missing value decodes as 0, which would make TSHLTR infinite
+        pshltr = xp.where(p2 > 0, p2, p_hyps).astype(xp.float32)
+    tshltr = poisson.theta(t2, pshltr)
+    q2 = xp.asarray(q2, dtype=xp.float32)
+    fill = {
+        "PSHLTR": pshltr, "TSHLTR": tshltr, "QSHLTR": q2,
+        "U10": u10, "V10": v10,
+        "TH10": tshltr if th10 is None else th10,
+        "Q10": q2 if q10 is None else q10,
+    }
+    for name, val in fill.items():
+        st.add(name, s2)[...] = xp.asarray(val, dtype=xp.float32)
 
 
 def source_row(ctx) -> tuple[str, dict]:
@@ -522,7 +660,7 @@ def decode_native(ctx, path, names3, sfc, lm, tmpdir, sink, top_first=None):
               expect_shape=(im, int(ctx.cfg.raw["jm_full"]) if win else jm))
     p1 = plm = None
     if top_first is None:
-        # UPP numbers hybrid levels from one end; NMMB wants l = 1 at the model top. Decide from PRES.
+        # NCEP's GRIB2 output numbers hybrid levels from one end; NMMB wants l = 1 at the model top. Decide from PRES.
         pr = dec.run(ctx, path, {"P1": _sel3(NATIVE_3D["PRES"], 1),
                                  "PL": _sel3(NATIVE_3D["PRES"], lm)}, **kw)
         p1, plm = float(cp.mean(cut(pr["P1"]))), float(cp.mean(cut(pr["PL"])))
@@ -549,6 +687,14 @@ def decode_native(ctx, path, names3, sfc, lm, tmpdir, sink, top_first=None):
 ALIAS_INTO = {"TMP": "T", "SPFH": "Q", "UGRD": "U", "VGRD": "V"}
 SPECIES = ("CLMR", "CICE", "RWMR", "SNMR")
 WARM_INTO = {"TCOND": "CW", "FICE": "F_ICE", "FRAIN": "F_RAIN", "RIME": "F_RIMEF", "TKE": "Q2", "DZDT": "W"}
+# The archived NAM analysis' TKE record (0-19-11 on the hybrid levels) is the NMMB q2 as it is, not q2 / 2: NAM's
+# post writes q2 under the TKE name (the awphys table says so for the isobaric TKE rows, which write history
+# TKE_PBL x 2). Its free-air value in bgrd3d00 is 0.02, the EPSQ2 floor of q2 itself (2024-11-05 12Z: level
+# medians 0.02, minimum 0.02). Reading it as a TKE and doubling it started every native run with twice the
+# NAM's q2: the +0 h awphys TKE was 2.00 times NCEP's at every level (1000 hPa mean 1.085 against 0.542; free air
+# 0.04 against 0.02) and equal to it from +1 h on. A RAP start's TKE record is a real TKE (gfs_start.warm_state
+# keeps its 2 x).
+NATIVE_TKE_TO_Q2 = 1.0
 
 
 def decode_warm(ctx):
@@ -573,8 +719,8 @@ def decode_warm(ctx):
             dst[...] = cp.maximum(a, 1.0)
         elif n == "DZDT":
             dst[...] = a
-        else:                                   # TKE -> Q2 = 2 TKE, EPSQ2 floor 0.02
-            dst[...] = cp.maximum(2.0 * a, cp.float32(0.02))
+        else:                                   # the file's TKE record is the NMMB q2 itself; EPSQ2 floor 0.02
+            dst[...] = cp.maximum(NATIVE_TKE_TO_Q2 * a, cp.float32(0.02))
         done.append(WARM_INTO[n])
 
     decode_native(ctx, Path(w["file"]), w["names"], [], lm, w["tmpdir"], sink, top_first=w["top_first"])
@@ -619,6 +765,11 @@ def stage_native(ctx, row):
                      missing_value=0.0, tmpdir=tmpdir, expect_shape=(im, jm))
     else:
         sh = {}
+    diag_keys = native_diag_keys(inv)
+    diag = dec.run(ctx, path, {k: _selsfc(NATIVE_DIAG[k]) for k in diag_keys},
+                   missing_value=0.0, tmpdir=tmpdir, expect_shape=(im, jm)) if diag_keys else {}
+    ctx.tables["native_diag"] = {"file": str(path), "tmpdir": tmpdir, "top_first": order["top_first_in_file"],
+                                 "sfc": diag, "cldfra": (NATIVE_3D["CFRAC"], "105") in have}
     warm = [n for n in WARM_INTO if (NATIVE_3D[n], "105") in have]
     ctx.tables["native_warm"] = {"file": str(path), "names": warm, "tmpdir": tmpdir,
                                  "top_first": order["top_first_in_file"]}
@@ -629,7 +780,7 @@ def stage_native(ctx, row):
     st.add("SOILHGT", (jm, im))[...] = hgt
     st.add("FIS", (jm, im))[...] = hgt * G_NMMB
 
-    # Shelter / 10 m state from the analysis' own 2 m and 10 m records (UPP grid-relative winds, flags 56);
+    # Shelter / 10 m state from the analysis' own 2 m and 10 m records (NCEP grid-relative winds, flags 56);
     # missing records fall back to the lowest model layer (l = LM, index LM-1).
     t2 = sh.get("T2M", st["T"][lm - 1])
     q2 = sh.get("Q2M", st["Q"][lm - 1])
@@ -646,9 +797,27 @@ def stage_native(ctx, row):
     for k in ("TMP_SFC", "ICEC", "LAND", "TSOIL_3M", "SNOD", "WEASD", "ALBDO", "VEG", "SFCR", "CNWAT",
               "SNOWC", "WTMP"):
         raw[k] = got[k]
-    # SNOWC is percent in UPP output (NCEP 0-1-201); init-native-sfc takes a fraction.
+    # SNOWC is percent in NCEP's GRIB2 output (NCEP 0-1-201); init-native-sfc takes a fraction.
     raw["SNOWC"] = cp.clip(raw["SNOWC"] / cp.float32(100.0), 0.0, 1.0).astype(cp.float32)
     ctx.tables["raw_sfc"] = raw
+    # The snow-free base albedo from the analysis itself (albase_from_analysis); init-static-missing puts it in the
+    # state before its vegetation-table fill, which then only touches the snow-covered and water cells.
+    albase = albase_from_analysis(raw["ALBDO"], raw["SNOWC"], raw["WEASD"], raw["LAND"])
+    # The NAM's liquid soil water, base albedo (under snow too) and maximum snow albedo from NCEP's native surface
+    # file of the same cycle (NATIVE_LAND); a case without it keeps the split and the table fill, and says so.
+    lpath = native_land_file(ctx.case_dir)
+    rec = decode_native_land(ctx, lpath, tmpdir) if lpath is not None else {}
+    extra, sh2o, lacking = land_from_surface_file(rec, albase, raw["LAND"])
+    ctx.tables["static_extra"] = extra
+    if sh2o is not None:
+        ctx.tables["sfc_override"] = {**(ctx.tables.get("sfc_override") or {}), "SH2O": sh2o}
+    if lacking:
+        what = f"{lpath.name} lacks records" if lpath else "no NCEP native surface file (raw/nam/bgrdsf00.land.grib2)"
+        print(f"{UNIT}: {what}: {', '.join(lacking)} from the frozen-fraction split and the vegetation table, not "
+              "the NAM's own; `woof-nam fetch` on the case brings the file", flush=True)
+    else:
+        print(f"{UNIT}: {lpath.name}: the NAM's own liquid soil water, base albedo and maximum snow albedo",
+              flush=True)
     ctx.tables["soil_hydraulics"] = {k: cp.asarray(v) for k, v in soil_hydraulics().items()}
     ctx.tables["grid_source"] = {"source": "native", "file": str(path), **order}
     print(f"{UNIT}: native analysis {path.name}: {len(names3)} hybrid fields x {lm} levels, "

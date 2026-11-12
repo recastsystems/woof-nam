@@ -58,7 +58,7 @@
 //     rows of length 10 and 3). Within the lower atmosphere (k <= laytrop) setcoef sets indself in 1..9
 //     and indfor in 1..2 (clamped in phys_rrtm_sw_setcoef.cu), so indsp <= 10 and indfp <= 3 stay inside
 //     their row. indself = 0 is written only in the upper branch (setcoef, plog <= 4.56), which loop 1 does
-//     not read for monotone pressure. A non-monotone column can reach it, and the Fortran reads out of
+//     not reach for monotone pressure. A non-monotone column can reach it, and the Fortran reads out of
 //     bounds there too, so that case is native-undefined. The wrapper's check asserts the range.
 //
 // Fast numerics: fmad on (NVRTC option), IEEE division, no host sync, no device allocation.

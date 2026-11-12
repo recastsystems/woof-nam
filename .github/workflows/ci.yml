@@ -44,11 +44,19 @@ jobs:
           python tests/test_nest_twoway_default.py
           python tests/test_products_writer.py
           python tests/test_urban_soilw.py
+          python tests/test_noah_snow_albedo.py
+          python tests/test_products_stale_receipt.py
+          python tests/test_doctor_terrain.py
+          python tests/test_products_oom_rerun.py
+          python tests/test_columns_cgroup.py
+          python tests/test_io_wind_rotate.py
+          python tests/test_refl_conv.py
+          python tests/test_projections_ncep.py
 
       - name: moving-nest tests (CPU)
         run: |
           python -m pip install --quiet numpy scipy netCDF4 pytest
-          PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_follow_bocos.py tests/test_follow_door.py tests/test_follow_prepcap.py tests/test_follow_replay.py tests/test_follow_segment.py tests/test_small_card.py tests/test_helpers.py tests/test_memory_path.py tests/test_nest_door.py tests/test_ncep_nests.py tests/test_coupled_tables.py tests/test_soil_cdf_fetch.py tests/test_ptype.py tests/test_products_inventory.py tests/test_tempo_versions.py tests/test_woof_nam_next_rows.py tests/test_suite_card_share.py tests/test_suite_retry.py tests/test_suite_table.py tests/test_products_run_ctx.py tests/test_suite_no_products.py tests/test_hexdep.py tests/test_ruc_bnu_fetch.py tests/test_run_case_missing.py tests/test_products_pipeline.py
+          PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_follow_bocos.py tests/test_follow_door.py tests/test_follow_prepcap.py tests/test_follow_replay.py tests/test_follow_segment.py tests/test_small_card.py tests/test_helpers.py tests/test_memory_path.py tests/test_nest_door.py tests/test_ncep_nests.py tests/test_coupled_tables.py tests/test_soil_cdf_fetch.py tests/test_ptype.py tests/test_products_inventory.py tests/test_tempo_versions.py tests/test_woof_nam_next_rows.py tests/test_suite_card_share.py tests/test_suite_retry.py tests/test_suite_table.py tests/test_products_run_ctx.py tests/test_suite_no_products.py tests/test_hexdep.py tests/test_ruc_bnu_fetch.py tests/test_run_case_missing.py tests/test_products_pipeline.py tests/test_memslp.py tests/test_shm_leftovers.py tests/test_resume_bocos.py tests/test_products_late_rerun_windows.py tests/test_products_q2_mixing_ratio.py tests/test_albase_from_analysis.py tests/test_native_tke_is_q2.py tests/test_products_snowfall_bucket.py tests/test_native_diag_restore.py tests/test_noah_soil_table_ncep.py tests/test_land_cloud.py tests/test_bocos_stream_scope.py tests/test_pools_follow_pinned_cores.py tests/test_card_gate.py tests/test_shm_owner_lock.py tests/test_columns_workers.py tests/test_products_no_card.py tests/test_products_stop_cleanup.py tests/test_run_products_wait.py tests/test_native_land_file.py tests/test_products_conv_vis.py tests/test_run_card_before_wait.py tests/test_products_wait_heartbeat.py tests/test_products_card_release_wait.py tests/test_run_follower_after_checks.py tests/test_static_line.py tests/test_maps_mslet_process.py tests/test_case_land_line.py tests/test_shelter_poisson.py tests/test_hiresf_carriers.py tests/test_pools_long_tmpdir.py tests/test_zero_hour_refl.py
 
       - name: winter/CAD scorer (Rust reader and station statistics)
         run: |

@@ -1,9 +1,8 @@
 """NCEP-style dominant precipitation type for WOOF-NAM (awphys/hiresf CRAIN/CSNOW/CICEP/CFRZR), on the GPU.
 
-The legacy NAM's post typed precipitation with a "dominant" vote over several algorithms run on the model's own
-profile plus the microphysics' frozen fraction (Manikin 2005, "An overview of precipitation type forecasting using
-NAM and SREF data", AMS 21st WAF/17th NWP, 8A.6). This module is written from the published descriptions, never
-from NCEP's post source: UPP is LGPL-3, and the 2026-10-29 licensing ruling keeps LGPL code out and writes it from papers.
+The dominant type is a vote over several algorithms run on the model's own profile plus the microphysics' frozen
+fraction (Manikin 2005, "An overview of precipitation type forecasting using NAM and SREF data", AMS 21st WAF/17th
+NWP, 8A.6).
 
   ncep          Baldwin, Treadon & Contorno (1994) as described by Manikin (2005) and Jeffrey (2018, UMD MS thesis,
                 sec. 1.3): no ice in the column (coldest saturated level warmer than 269 K) -> ZR/RA by the lowest
@@ -32,9 +31,14 @@ from NCEP's post source: UPP is LGPL-3, and the 2026-10-29 licensing ruling keep
 
 Mask: a type is given only where the model precipitates (Manikin 2005: "a precipitation type solution is only
 generated when the model generates non-zero precipitation at a grid point"). `rate` (default): the last physics
-step's rate PREC / (DT NPHS) >= MASK_RATE_MM_H, a trace (TEMPO leaves sub-trace precipitation over very large areas:
-with a literal non-zero test the 7.6 km nam-modern runs typed precipitation at 2.4x the ASOS precipitating hours,
-the archived NAM's own type 1.4x; ptype-winter lane, 2026-11-09). `prec`: PREC > 0, the literal non-zero test.
+step's rate PREC / (DT NPHS) >= MASK_RATE_MM_H = 0.01 mm/h, the value that reproduces NCEP's own awphys records:
+on one history hour of a run from the NAM's own analysis (2024-11-05 12Z, +3 h) the typed share of grid 218 is
+20.93 % against the archived NAM's 21.30 % (overlap 0.879; snow over land 13.13 against 13.57 %); at the 0.05 mm/h
+this module used before it was 15.62 % (overlap 0.704; snow over land 7.17 %), and with the literal non-zero test
+34.39 % (overlap 0.601). NAMGPU_PTYPE_RATE_MM_H sets another rate: a suite whose microphysics leaves sub-trace
+precipitation over very large areas (TEMPO: with the non-zero test the 7.6 km nam-modern runs typed precipitation
+at 2.4x the ASOS precipitating hours; ptype-winter lane, 2026-11-09) may want 0.05. `prec`: PREC > 0, the literal
+non-zero test.
 `prec4e-6`: PREC >= 4e-6 m per step or the hour >= 0.25 mm, the winter-scoring lane's mask: 0.48 mm/h at the
 7.6 km step (DT NPHS = 30 s), so it dropped almost every light-snow hour, the cause of the "snow forecast half as
 often as observed" score. Kept by name.
@@ -59,7 +63,7 @@ DEFAULT_METHOD = "dominant"
 MASKS = ("rate", "prec", "prec4e-6")
 PTOP_PA = 40000.0                  # every profile algorithm looks below 400 hPa (Ramer's generating-level search)
 MASK_PREC_M = 0.0
-MASK_RATE_MM_H = float(os.environ.get("NAMGPU_PTYPE_RATE_MM_H", "0.05"))
+MASK_RATE_MM_H = float(os.environ.get("NAMGPU_PTYPE_RATE_MM_H", "0.01"))
 SR_FROZEN = 0.5
 HYD_MIN = 1.0e-7                   # kg/kg of rain+snow+graupel at the lowest level for the explicit vote
 # Baldwin et al. (1994) / revised NCEP thresholds (K m)
@@ -389,7 +393,7 @@ NEED = ("T", "PRES", "QVAPOR", "T2", "Q2", "PSFC", "PREC")
 def dataset_ptype(ds, method: str | None = None, mask_name: str | None = None):
     """[j, i] int8 type classes (0 none, 1 RA, 2 SN, 3 ZR, 4 IP) for one open history Dataset, masked, or None when
     the history lacks an input: the awphys/hiresf precipitation-type product. NAMGPU_PTYPE picks the method
-    (default dominant), NAMGPU_PTYPE_MASK the mask (default rate, the 0.05 mm/h trace)."""
+    (default dominant), NAMGPU_PTYPE_MASK the mask (default rate, 0.01 mm/h as NCEP's files)."""
     method = method or os.environ.get("NAMGPU_PTYPE", DEFAULT_METHOD)
     mask_name = mask_name or os.environ.get("NAMGPU_PTYPE_MASK", "rate")
     if method not in METHODS:

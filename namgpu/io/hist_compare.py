@@ -64,14 +64,35 @@ def compare(a: Path, b: Path, workers: int = 8) -> dict:
         nbad += len(h["diff"]) + len(h["only_a"]) + len(h["only_b"])
         first = h["diff"][0] if h["diff"] else None
         print(f"{h['file']}: {h['vars']} vars, {len(h['diff'])} differ, {h['words_diff']:,} of {h['words']:,} words"
-              + (f"; first {first}" if first else ""), flush=True)
+              + (f"; first {first}" if first else "") + _only_note(h), flush=True)
     rec["hours"] = hours
     rec["bitwise"] = nbad == 0 and not rec["only_a"] and not rec["only_b"] and len(fa) > 0
     rec["words"] = sum(h["words"] for h in hours)
     rec["words_diff"] = sum(h["words_diff"] for h in hours)
     print(f"{len(hours)} hours compared: {'BITWISE IDENTICAL' if rec['bitwise'] else 'DIFFERENT'} "
-          f"({rec['words_diff']:,} of {rec['words']:,} words differ)", flush=True)
+          f"({rec['words_diff']:,} of {rec['words']:,} words differ){_why(rec, hours)}", flush=True)
     return rec
+
+
+def _only_note(h: dict) -> str:
+    """'; only in A: X; only in B: Y' for the variables one history has and the other lacks."""
+    return "".join(f"; only in {side}: {', '.join(h[key])}" for side, key in (("A", "only_a"), ("B", "only_b"))
+                   if h.get(key))
+
+
+def _why(rec: dict, hours: list[dict]) -> str:
+    """Why a comparison with 0 differing words is still DIFFERENT: hours or variables only one run wrote. Before
+    this the verdict said DIFFERENT with 0 words differing and no reason (an extra SNOWNC in the release check)."""
+    if rec.get("bitwise") or rec.get("words_diff") or any(h["diff"] for h in hours):
+        return ""
+    parts = []
+    for side, key in (("A", "only_a"), ("B", "only_b")):
+        if rec.get(key):
+            parts.append(f"hours only in {side}: {', '.join(rec[key])}")
+        names = sorted({v for h in hours for v in h.get(key, [])})
+        if names:
+            parts.append(f"variables only in {side}: {', '.join(names)}")
+    return "; every shared value identical; " + "; ".join(parts) if parts else ""
 
 
 def main(argv=None) -> int:

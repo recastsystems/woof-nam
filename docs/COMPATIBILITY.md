@@ -49,8 +49,9 @@ f06): 450 are present with NOAA's name, level and time keys, and 4 are not produ
 decimal and binary scale factors exactly; 42 differ in one or both (16 TKE, 13 HGT, 4 VVEL, 3 UGRD/VGRD pairs, DPT at
 2 m, SNOD, LHTFL), and the table gives NOAA's value and ours for each.
 
-- **Records we do not produce (4).** Lightning (LTNG), visibility at cloud top, the Blackadar mixing length (NOAA's
-  file holds zero there) and the snowfall accumulation (WEASD), which needs a model field that is not written yet.
+- **Records we do not produce (3).** Lightning (LTNG), visibility at cloud top and the Blackadar mixing length (NOAA's
+  file holds zero there). The snowfall accumulation (WEASD, NOAA's 12 h window) is written from 0.2.1, rebuilt from
+  the model's 3 h snowfall bucket in the history files.
 - **Written from 0.2.0.** The dominant precipitation type (CSNOW, CICEP, CFRZR, CRAIN), and MAXUW and MAXVW (the
   hourly 10 m maximum wind).
 

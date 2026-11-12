@@ -23,9 +23,9 @@
 //    at compile time.  __fsub_rn pins the hardware, not the folder.  The
 //    ESAT polynomial coefficients are exactly such a table, which is why
 //    C_ESAT lives in __constant__ memory rather than as local literals.
-// 3. LOG/ATAN/**0.25 are glibc calls in the oracle, so glibc_logf,
-//    glibc_atanf and glibc_powf below transcribe glibc 2.39's own
-//    algorithms.  CUDA's logf, atanf, powf, __logf and __powf are all
+// 3. LOG/ATAN/**0.25 are calls into the reference libm in the oracle, so f32_logf,
+//    f32_atanf and f32_powf below are our own FP32 implementations; they
+//    match the reference libm bit for bit.  CUDA's logf, atanf, powf, __logf and __powf are all
 //    different functions and none of them can hold a max_ulp-0 gate.
 //    SQRT is the one exception: it is correctly rounded in both, so
 //    __fsqrt_rn matches gfortran's sqrtss.
@@ -96,7 +96,7 @@ __constant__ unsigned long long C_LOGF_TAB[32] = {
 __constant__ unsigned long long C_LOGF_MISC[4] = {
     0x3FE62E42FEFA39EFULL, 0xBFD00EA348B88334ULL, 0x3FD5575B0BE00B6AULL, 0xBFDFFFFEF20A4123ULL,
 };
-// powf overflow/underflow limits, as glibc writes them (hex float literals).
+// powf overflow/underflow limits (hex float literals).
 // [2] is 0x1.fffffffd1d571p+6; [3] is 126.0, the |y*log2(x)| screen.
 __constant__ unsigned long long C_LIMITS[4] = {
     0x40562E42E0000000ULL, 0xC059FE3680000000ULL, 0x405FFFFFFFD1D571ULL, 0x405F800000000000ULL,
@@ -152,9 +152,8 @@ __constant__ unsigned int C_ESAT[28] = {
     0x3F00C69Cu, 0x3D1A8D72u, 0x3AA632DDu, 0x37CFD543u, 0x34A15DEFu, 0x3114557Bu, 0x2CFAE738u,
 };
 
-// glibc s_atanf.c atanhi[4], atanlo[4], aT[11].  aT[0] is 0x3EAAAAAB -- the
-// value glibc's decimal literal rounds to, NOT the 0x3eaaaaaa its own source
-// comment claims.  Trusting the comment costs 1 ULP on the |x|<0.4375 arm.
+// FP32 atanf atanhi[4], atanlo[4], aT[11].  aT[0] is 0x3EAAAAAB, not
+// 0x3eaaaaaa: the latter costs 1 ULP on the |x|<0.4375 arm.
 __constant__ unsigned int C_ATAN[19] = {
     0x3EED6338u, 0x3F490FDAu, 0x3F7B985Eu, 0x3FC90FDAu,
     0x31AC3769u, 0x33222168u, 0x33140FB4u, 0x33A22168u,
@@ -194,9 +193,9 @@ __device__ __forceinline__ float f_max(float a, float b) { return (a > b) ? a : 
 // the compiler honours the last occurrence.  The flush is the flag, not the
 // SM: the conversion instruction has no flush of its own, so under `-ftz=true`
 // the compiler emits an extra multiply after it to produce one, and built
-// without the append the same conversion keeps the subnormal.  glibc's
+// without the append the same conversion keeps the subnormal.  The reference libm's
 // expf and powf do produce subnormals, gfortran at -O0 leaves MXCSR's FTZ/DAZ
-// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the live glibc 2.39
+// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the reference libm
 // over 1,106,247,680 inputs -- produces them too.  So the conversion as
 // compiled here is a divergence from the authority in a narrow but reachable
 // band:
@@ -224,11 +223,11 @@ __device__ float nmp_d2f_rn(double y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 logf  --  sysdeps/ieee754/flt-32/e_logf.c, FMA variant.
+// FP32 logf, our own implementation, FMA variant.
 // Operation order read off the disassembly of __logf_fma, including the
 // single FMA that computes logc + k*Ln2.
 // --------------------------------------------------------------------------
-__device__ float glibc_logf(float x)
+__device__ float f32_logf(float x)
 {
     unsigned int ix = __float_as_uint(x);
     if (ix == 0x3F800000u) return 0.0f;           // log(1) == +0
@@ -265,7 +264,7 @@ __device__ float glibc_logf(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 powf  --  sysdeps/ieee754/flt-32/e_powf.c, FMA variant.
+// FP32 powf, our own implementation, FMA variant.
 // Only the domain the radiation leaves reach is transcribed: a strictly
 // positive normal base and a finite exponent (GROUNDALB's
 // MAX(0.01, COSZ) ** 1.7).  Anything else returns NaN rather than a value
@@ -324,7 +323,7 @@ __device__ float powf_exp2_inline(double xd, unsigned long long sign_bias)
     return nmp_d2f_rn(y);
 }
 
-__device__ float glibc_powf(float x, float y)
+__device__ float f32_powf(float x, float y)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int iy = __float_as_uint(y);
@@ -344,12 +343,12 @@ __device__ float glibc_powf(float x, float y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 atanf  --  sysdeps/ieee754/flt-32/s_atanf.c (fdlibm kernel).
+// FP32 atanf, our own implementation (fdlibm kernel).
 // Unlike logf/powf, atanf is NOT an ifunc in libm.so.6, so there is no -mfma
 // rebuild of it: every operation is a plain float32 multiply or add and none
 // of them may be contracted.  Hence FMUL/FADD/FSUB throughout, never FMA.
 // --------------------------------------------------------------------------
-__device__ float glibc_atanf(float x)
+__device__ float f32_atanf(float x)
 {
     unsigned int hx = __float_as_uint(x);
     unsigned int ix = hx & 0x7FFFFFFFu;
@@ -459,10 +458,10 @@ __device__ void d_sfcdif1(Sfcdif1State *s, int it, float sfctmp, float rhoair,
 {
     float mozold = s->moz;
 
-    float tmpcm = glibc_logf(FDIV(FSUB(zlvl, zpd), z0m));
-    float tmpch = glibc_logf(FDIV(FSUB(zlvl, zpd), z0h));
-    float tmpcm2 = glibc_logf(FDIV(FADD(K_TWO, z0m), z0m));
-    float tmpch2 = glibc_logf(FDIV(FADD(K_TWO, z0h), z0h));
+    float tmpcm = f32_logf(FDIV(FSUB(zlvl, zpd), z0m));
+    float tmpch = f32_logf(FDIV(FSUB(zlvl, zpd), z0h));
+    float tmpcm2 = f32_logf(FDIV(FADD(K_TWO, z0m), z0m));
+    float tmpch2 = f32_logf(FDIV(FADD(K_TWO, z0h), z0h));
 
     float mol, moz2;
     if (it == 1) {
@@ -492,18 +491,18 @@ __device__ void d_sfcdif1(Sfcdif1State *s, int it, float sfctmp, float rhoair,
 
     float fmnew, fhnew, fm2new, fh2new;
     if (s->moz < K_ZERO) {
-        float tmp1 = glibc_powf(FSUB(K_ONE, FMUL(K_SIXTEEN, s->moz)), K_QUARTER);
-        float tmp2 = glibc_logf(FDIV(FADD(K_ONE, FMUL(tmp1, tmp1)), K_TWO));
-        float tmp3 = glibc_logf(FDIV(FADD(K_ONE, tmp1), K_TWO));
+        float tmp1 = f32_powf(FSUB(K_ONE, FMUL(K_SIXTEEN, s->moz)), K_QUARTER);
+        float tmp2 = f32_logf(FDIV(FADD(K_ONE, FMUL(tmp1, tmp1)), K_TWO));
+        float tmp3 = f32_logf(FDIV(FADD(K_ONE, tmp1), K_TWO));
         fmnew = FADD(FSUB(FADD(FMUL(K_TWO, tmp3), tmp2),
-                          FMUL(K_TWO, glibc_atanf(tmp1))), K_PIO2);
+                          FMUL(K_TWO, f32_atanf(tmp1))), K_PIO2);
         fhnew = FMUL(K_TWO, tmp2);
 
-        float tmp12 = glibc_powf(FSUB(K_ONE, FMUL(K_SIXTEEN, moz2)), K_QUARTER);
-        float tmp22 = glibc_logf(FDIV(FADD(K_ONE, FMUL(tmp12, tmp12)), K_TWO));
-        float tmp32 = glibc_logf(FDIV(FADD(K_ONE, tmp12), K_TWO));
+        float tmp12 = f32_powf(FSUB(K_ONE, FMUL(K_SIXTEEN, moz2)), K_QUARTER);
+        float tmp22 = f32_logf(FDIV(FADD(K_ONE, FMUL(tmp12, tmp12)), K_TWO));
+        float tmp32 = f32_logf(FDIV(FADD(K_ONE, tmp12), K_TWO));
         fm2new = FADD(FSUB(FADD(FMUL(K_TWO, tmp32), tmp22),
-                           FMUL(K_TWO, glibc_atanf(tmp12))), K_PIO2);
+                           FMUL(K_TWO, f32_atanf(tmp12))), K_PIO2);
         fh2new = FMUL(K_TWO, tmp22);
     } else {
         fmnew = FMUL(K_N5, s->moz);
@@ -667,7 +666,7 @@ __device__ void d_bare_flux(const float *p, const int *q, float *o)
     // opt_sfc == 1 2 m diagnostics.  WRF assigns EHB2 twice; the first
     // assignment is dead and is not reproduced.
     float ehb2 = FDIV(FMUL(s.fv, K_VKC),
-                      FSUB(glibc_logf(FDIV(FADD(K_TWO, z0h), z0h)), s.fh2));
+                      FSUB(f32_logf(FDIV(FADD(K_TWO, z0h), z0h)), s.fh2));
     float cq2b = ehb2;
     float t2mb, q2b;
     if (ehb2 < K_E5) {
@@ -704,7 +703,7 @@ extern "C" __global__ void noahmp_bare_flux(const float *in, const int *ii,
 }
 
 // Probe kernels.  They exist so the device acceptance test can show that the
-// __constant__ tables survived ptxas and that the glibc kernels themselves --
+// __constant__ tables survived ptxas and that the reference libm kernels themselves --
 // not merely the leaf built on top of them -- are bitwise right on the
 // device.  Without them a table mis-fold could hide inside a leaf that
 // happens not to reach the affected table entry.
@@ -713,9 +712,9 @@ extern "C" __global__ void noahmp_bareflux_libm_probe(const float *x,
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        out[3 * i + 0] = glibc_logf(x[i]);
-        out[3 * i + 1] = glibc_atanf(x[i]);
-        out[3 * i + 2] = glibc_powf(x[i], K_QUARTER);
+        out[3 * i + 0] = f32_logf(x[i]);
+        out[3 * i + 1] = f32_atanf(x[i]);
+        out[3 * i + 2] = f32_powf(x[i], K_QUARTER);
     }
 }
 

@@ -167,7 +167,8 @@ def run(ctx):
             np.int32(im), np.int32(jm),
         ))
         # A source that carries the model's own liquid soil water (the parent hand-off, parent_start.py) keeps it
-        # on land instead of the kernel's frozen-fraction split, capped at the total. No other source sets this.
+        # on land instead of the kernel's frozen-fraction split, capped at the total. So does a native start that has
+        # NCEP's bgrdsf00 land records (sources.py). No other source sets this.
         ov = ctx.tables.get("sfc_override") if getattr(ctx, "tables", None) is not None else None
         if ov and "SH2O" in ov:
             land = (f["SM"] < 0.5)[None]

@@ -161,7 +161,7 @@ for h in map(int, os.environ.get("HOURS", "1,6,12,24").split(",")):
               "ws10m": (np.hypot(d[ix["u"]], d[ix["v"]]), "m s-1"), "qpf1h": (np.where(ap >= _MAPS_LEVEL0_MM, ap, np.nan), "kg m-2")}   # under 0.01 in: blank, as nam-gpu maps
     if no1h:
         fields.pop("qpf1h")
-    if full:   # MSLET: the NAM post membrane MSLP (the reduction our QUASIPOST MSLP ports), and 850 hPa speed
+    if full:   # MSLET, the archived NAM's membrane sea-level pressure record, and 850 hPa speed
         fields["mslp"] = (d[ix["mslp"]] / 100, "hPa")
         fields["ws850"] = (np.hypot(d[ix["u85"]], d[ix["v85"]]), "m s-1")
     cf = TMP / f"nam218_f{h:02d}.nc"

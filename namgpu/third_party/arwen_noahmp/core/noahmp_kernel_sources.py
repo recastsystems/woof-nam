@@ -6,10 +6,10 @@ Three of the Noah-MP kernel sources do not compile on their own::
     noahmp_energy.cu
     noahmp_thermal.cu      NVRTC: identifier "r_pow" is undefined
 
-That is deliberate and it is the whole reason ``r_pow`` has that name.  glibc
-2.39's ``powf``, ``expf`` and ``logf`` are transcribed **once** in this tree, in
+That is deliberate and it is the whole reason ``r_pow`` has that name.  The FP32
+``powf``, ``expf`` and ``logf`` are implemented **once** in this tree, in
 ``noahmp_leaves.cu``, because two copies of a 32-entry constant table can drift
-and only one of them would be audited against ``glibc-libm-fp32.csv``.  The
+and only one of them would be audited against gpuwm's pinned FP32 libm fixture.  The
 three files above borrow that single copy, so each is compiled *after*
 ``noahmp_leaves.cu`` -- which is what :func:`namgpu.third_party.arwen_noahmp.core.noahmp_thermal_gpu
 .thermal_source` and :func:`namgpu.third_party.arwen_noahmp.core.noahmp_energy_gpu.energy_source` already
@@ -38,7 +38,7 @@ from pathlib import Path
 
 KERNEL_DIR = Path(__file__).resolve().parent / "kernels"
 
-#: The one device transcription of glibc's powf/expf/logf.  Its ``r_pow``,
+#: The one device implementation of FP32 powf/expf/logf.  Its ``r_pow``,
 #: ``r_exp`` and ``r_log`` are what the composed units below are missing.
 LIBM_UNIT = "noahmp_leaves"
 
@@ -51,7 +51,7 @@ NOAHMP_TRANSLATION_UNITS: dict[str, tuple[str, ...]] = {
     "noahmp_fluxprep": ("noahmp_fluxprep",),
     # NOAHMP_GLACIER borrows r_pow/r_exp/r_log (and the AD/SU/MU/DV
     # macros plus NMP_* constants) from the libm unit and carries only its
-    # own glibc atanf copy, like noahmp_bareflux does.
+    # own FP32 atanf copy, like noahmp_bareflux does.
     "noahmp_glacier": (LIBM_UNIT, "noahmp_glacier"),
     "noahmp_leaves": ("noahmp_leaves",),
     # The slab composition's elementwise transcendentals borrow r_pow/r_exp/

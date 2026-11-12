@@ -2,7 +2,7 @@
 
 The arithmetic lives in ``gpuwm/core/kernels/noahmp_bareflux.cu``, whose
 ``d_bare_flux`` body is already held at max_ulp 0 against the unmodified WRF
-v4.6.1 leaf oracle (``noahmp-bareflux.csv``), with its glibc ``logf``/``atanf``
+v4.6.1 leaf oracle (``noahmp-bareflux.csv``), with its reference ``logf``/``atanf``
 and its ESAT coefficient table separately probed on the device.  This module
 supplies the runtime-facing part the oracle harness did not: the physical
 Python call is packed in column order, all columns are evaluated by one CUDA
@@ -14,9 +14,9 @@ Two things this deliberately does not do:
   every FP32 operation with a rounding intrinsic and keeps every constant in
   ``__constant__`` memory, so ``-fmad`` is not load-bearing and a global flag
   would silently move unrelated arithmetic if the source is composed later.
-* It does not touch ``glibc_powf``.  ``d_bare_flux`` never calls it -- only
+* It does not touch ``f32_powf``.  ``d_bare_flux`` never calls it -- only
   ``powi3``/``powi4`` (integer powers, written as multiplies) and
-  ``glibc_logf`` are on the live path -- so this seam neither depends on nor
+  ``f32_logf`` are on the live path -- so this seam neither depends on nor
   widens that leaf's narrow subnormal/negative-base domain guard.
 
 Unlike ``noahmp_vegeflux_gpu``, no coefficient table is uploaded from the host:

@@ -22,10 +22,10 @@ than one operation.
 
 Transcendentals
 ---------------
-gfortran lowers ``EXP`` on a ``REAL(4)`` to a call to glibc ``expf`` and
-``x ** 0.667`` to a call to glibc ``powf``.  Neither is correctly rounded, so
+gfortran lowers ``EXP`` on a ``REAL(4)`` to a call to the reference libm ``expf`` and
+``x ** 0.667`` to a call to the reference libm ``powf``.  Neither is correctly rounded, so
 ``np.exp``/``**`` cannot hold a max_ulp-0 gate.  Both come from
-:mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, which reproduces glibc 2.39's own kernels.
+:mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, which matches the reference libm bit for bit.
 
 ``MOD`` on ``REAL(4)`` is lowered to x87 ``fprem``, which is exact, so
 ``math.fmod`` on the binary64 promotions reproduces it bit for bit.

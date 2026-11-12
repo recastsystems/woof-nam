@@ -19,9 +19,9 @@ Fields written (names as WRF where WRF has them, values from NMMB state):
   points, not WRF's staggered U/V) and W for soundings.
   PRES is the full mid-layer pressure (Pa). It is not WRF's perturbation P, and the file has no PB
   or PHB, so a reader must take PRES as the pressure itself.
-  REFL_10CM and COMPOSITE are written when the Ferrier microphysics has produced REFL_10CM (phys-fer-calmict),
-  as NAM's post writes them: the microphysics field plus the BMJ convective-rain term, COMPOSITE its column maximum
-  (io_history_fields._refl_post); otherwise they are absent.
+  REFL_10CM and COMPOSITE are written when the Ferrier microphysics has produced REFL_10CM (phys-fer-calmict):
+  the microphysics field plus the convective-rain reflectivity, COMPOSITE its column maximum
+  (io_history_fields._refl_conv); otherwise they are absent.
 
 WRF dims: Time, south_north, west_east, bottom_top (bottom-up: NMMB l is flipped on write).
 Global attrs: MAP_PROJ=203 (rotated lat-lon, as WRF-NMM); CEN_LAT/CEN_LON = geographic lat/lon at
@@ -199,16 +199,27 @@ def stage_and_write(path: Path, staged: dict) -> Path:
     return write_payload(path, finish_payload(staged))
 
 
-def finish_payload_shm(staged: dict):
+def _shm_sizes(items) -> list:
+    return [-(-int(np.prod(h.shape)) * 4 // 64) * 64 for _, h, _ in items]
+
+
+def shm_bytes(staged: dict) -> int:
+    """Bytes of the shared-memory block finish_payload_shm makes for this staged hour."""
+    return max(64, sum(_shm_sizes(staged["staged"])))
+
+
+def finish_payload_shm(staged: dict, name: str | None = None):
     """Writer thread: wait for the staged copies and copy them (flipped as finish_payload flips them) into one
     shared-memory block, so a writer PROCESS can encode the file while the pinned buffers serve the next hour.
+    name: the block's name in /dev/shm (io_history names it woof-nam-hist-<pid>-<n>, so a later run can tell the
+    block of a run that died; default a random psm_* name).
     Returns (SharedMemory, payload without arrays; 'fields_shm' = [(name, offset, shape, dims)])."""
     from multiprocessing import shared_memory  # noqa: PLC0415
     staged["event"].synchronize()
     staged["keep"] = None
     items = staged.pop("staged")
-    sizes = [-(-int(np.prod(h.shape)) * 4 // 64) * 64 for _, h, _ in items]
-    shm = shared_memory.SharedMemory(create=True, size=max(64, sum(sizes)))
+    sizes = _shm_sizes(items)
+    shm = shared_memory.SharedMemory(create=True, size=max(64, sum(sizes)), name=name)
     desc, off = [], 0
     try:
         for (name, h, dims), sz in zip(items, sizes):

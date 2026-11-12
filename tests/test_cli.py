@@ -45,6 +45,28 @@ def test_help():
         assert "usage: woof-nam" in out, (args, out[:200])
 
 
+def test_run_help_names_every_suite():
+    from namgpu.physics import suites
+    rc, out = _help(["run"])
+    flat = "".join(out.split())              # argparse may wrap a name at its hyphen
+    for name in suites.names():
+        assert name in flat, (name, "missing from woof-nam run --help")
+
+
+def test_products_pending_note():
+    import tempfile
+    from namgpu.run_forecast import _products_pending_note
+    with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()) as buf:
+        out = Path(d)
+        assert not _products_pending_note(out)                   # no --products: silent
+        (out / "products.log").write_text("")
+        assert _products_pending_note(out)                       # follower started, not done: one line
+        (out / "products").mkdir()
+        (out / "products" / "DONE").write_text("{}")
+        assert not _products_pending_note(out)                   # done: silent
+    assert buf.getvalue().count("still writing") == 1
+
+
 def test_unknown_command():
     with contextlib.redirect_stderr(io.StringIO()):
         assert cli.main(["no-such-command"]) == 2
@@ -199,7 +221,10 @@ def test_fetch_window():
     # --inputs-only (init_fetch_case): only the init and boco rows, no referee or truth files
     rows = tuple(r for r in fetch_case.FETCH_ROWS if r["role"] not in ("referee", "truth"))
     only, _ = fetch_case.plan(datetime(2025, 3, 14, 12), 24, Path("raw"), source="native", rows=rows)
-    assert [j[2].name for j in only if "nam" in str(j[2])] == ["bgrd3d00.grib2"]
+    # the analysis (required) and the six land records of NCEP's native surface file (optional: a start without them
+    # keeps its fallbacks and says so; sources.NATIVE_LAND)
+    assert [(j[2].name, j[-1]) for j in only if "nam" in str(j[2])] == [("bgrd3d00.grib2", True),
+                                                                         ("bgrdsf00.land.grib2", False)]
     assert not [j for j in only if "mrms" in str(j[2])]
     assert archive_cycle(cyc) == datetime(2025, 11, 4) and archive_cycle(datetime(2026, 11, 2, 12)) == datetime(2026, 11, 2)
 

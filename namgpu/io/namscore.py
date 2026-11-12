@@ -395,7 +395,7 @@ def _render(job):
     nc, var, row, valid, png = job
     from namgpu.io import maps
     # NAMGPU_RENDERER (the pinned build), else the installed gpuwm wheel's renderer (built for this machine's
-    # glibc; a bridges copy from another host may not load), else the bridges copy
+    # C library; a bridges copy from another host may not load), else the bridges copy
     ren = os.environ.get("NAMGPU_RENDERER") or rustwx.find_renderer() or (bridges() / "rw_wrfbatch")
     ren = Path(ren)
     maps.ensure_basemap(ren)

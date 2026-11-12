@@ -2,7 +2,7 @@
 
 The arithmetic lives in ``gpuwm/core/kernels/noahmp_glacier.cu`` (one
 thread per glacier column, compiled after ``noahmp_leaves.cu`` for the
-single glibc 2.39 device transcription -- see
+single FP32 device implementation -- see
 ``gpuwm/core/noahmp_kernel_sources.py``).  This module is the
 runtime-facing half: it packs the per-column input dictionary the
 runtime gathers, launches one kernel over all glacier columns, and
@@ -142,7 +142,7 @@ def _raise_on_errors(errors: np.ndarray) -> None:
 @lru_cache(maxsize=None)
 def _module(options: tuple[str, ...]):
     """Compile (once per option set) the COMPOSED glacier translation
-    unit -- noahmp_leaves.cu (the single glibc device transcription)
+    unit -- noahmp_leaves.cu (the single FP32 device implementation)
     followed by noahmp_glacier.cu, exactly as
     gpuwm/core/noahmp_kernel_sources.py declares it.  ``get_kernel``
     loads single files and must not be handed a fragment."""

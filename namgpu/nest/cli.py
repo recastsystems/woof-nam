@@ -109,7 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also write NOAA's NAM nest GRIB2 files (<prefix>.tHHz.<nest>.hiresfFF.tm00.grib2 + .idx, "
                         "<out>/run/products/) while the forecast runs: SET is the NOAA nest grid and record list "
                         "(conusnest, alaskanest, hawaiinest, priconest, firewxnest; hiresf = a Lambert box around "
-                        "this nest; default auto: the NCEP nest this domain is, else hiresf)")
+                        "this nest; default auto: the NCEP nest this domain is, else hiresf). The door returns once "
+                        "<out>/run/products/DONE is written (exit 6 when the follower failed). Not written by a "
+                        "moving nest (--follow) or a live parent (--two-way, --concurrent) in this release")
     n.add_argument("--no-warm", action="store_true")
     n.add_argument("--dry-run", action="store_true", help="domain, pre-flight and static only")
     n.add_argument("--wait-min", type=float, default=0.0, help="shared card: if the nest does not fit now, fetch "
@@ -417,6 +419,12 @@ def main(argv=None) -> int:
               f"(the door picks from {domain.RRTM_ROW_CHOICES}); give 3 or more", file=sys.stderr)
         return 2
     following = bool(a.follow or a.storm or a.storm_id or a.follow_config)
+    if a.products and (following or a.two_way or a.concurrent or a.parent_center or a.parent_size_km
+                       or a.parent_size_y_km or a.parent_margin is not None):
+        # these doors build their own forecast commands with no follower: say so instead of dropping it quietly
+        print("woof-nam nest: --products: a moving nest (--follow) or a live parent (--two-way, --concurrent, "
+              "--parent-*) writes no GRIB2 in this release; write them after the run with woof-nam products --run "
+              "<its run folder>", file=sys.stderr, flush=True)
     if a.ncep_nest and (a.concurrent or a.two_way or a.parent_margin is not None):
         # NCEP's nests inside the live NAM 12 km parent, one card or N (namgpu/nest/suite_door.py)
         if following or a.center or a.parent_center or a.parent_size_km or a.parent_size_y_km:
@@ -712,7 +720,8 @@ def main(argv=None) -> int:
         pset = a.products
         if pset == "auto" and getattr(a, "ncep_nest", None) and "," not in a.ncep_nest:
             pset = a.ncep_nest
-        cmd += ["--products", pset]
+        # the run returns at once and the sheets are drawn while the follower writes; this door waits at its end
+        cmd += ["--products", pset, "--no-products-wait"]
     if source == "parent":
         cmd += ["--parent-run", str(Path(a.parent_run).resolve())]
     init_tmp = None
@@ -813,7 +822,35 @@ def main(argv=None) -> int:
             rec["failed_stage"] = f"sheets rc {sc} (see {out / 'sheets.log'})"
             print(f"woof-nam: {rec['failed_stage']}", flush=True)
             code = 5
+    if getattr(a, "products", None) and follow is None:
+        code = wait_products(run_dir, rec, code, stage, done)
     _write(out, rec, stages, sampler, t_all)
+    return code
+
+
+def wait_products(run_dir: Path, rec: dict, code: int, stage=None, done=None, stall_s: float = 900.0) -> int:
+    """The door returns only when the run's GRIB2 follower has written run/products/DONE (run_forecast.products_wait:
+    bounded by the follower's progress), as `woof-nam run --products` does; a failed follower is the door's exit code
+    6 with one line. The run child was started with --no-products-wait, so the sheets were drawn meanwhile."""
+    from namgpu import run_forecast as rf
+    try:
+        fr = json.loads((run_dir / rf.FOLLOWER).read_text())
+    except (OSError, ValueError):
+        rec["products"] = f"no GRIB2 follower record ({run_dir / rf.FOLLOWER}): the run stopped before it started one"
+        print(f"woof-nam: {rec['products']}", flush=True)
+        return code
+    if stage:
+        stage("products")
+    print(f"woof-nam: waiting for the GRIB2 follower (PID {fr['pid']}) to write {run_dir / 'products' / 'DONE'}",
+          flush=True)
+    bad, line = rf.products_wait(run_dir, int(fr["pid"]), stall_s)
+    print(f"woof-nam: {line}", flush=True)
+    rec["products"] = line
+    if done:
+        done("products", rc=bad)
+    if bad:
+        rec["failed_stage"] = rec.get("failed_stage") or line
+        return code or 6
     return code
 
 

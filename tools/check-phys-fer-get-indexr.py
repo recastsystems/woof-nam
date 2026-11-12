@@ -8,7 +8,7 @@ Referee: tools/fer-get-indexr-ref/ref_get_indexr.F90 holds GET_INDEXR copied ver
   4. asserts no NaN-type garbage (outputs in [50, 1000]) and that the wrapper refuses bad buffers.
 Numerics: fast numerics (--fmad=true, no fast math). Measured on set B: 18 of 47.8 M values differ by one
 count at INT(x+.5) boundaries; the same 18 differ with --fmad=false, so the residue is the power function
-(CUDA powf vs glibc powf), not FMA. The unit is therefore NOT claimed bitwise; the test asserts exact
+(CUDA powf vs the host libm's powf), not FMA. The unit is therefore NOT claimed bitwise; the test asserts exact
 equality on set A and a one-count, <=1e-6 residue on set B.
 The breakpoints are caller inputs to GET_INDEXR. The production RR_DR* values need RRATE from
 ETAMPNEW_DATA.expanded_rain, which is not in the NAM clone, so two monotone breakpoint sets are replayed.

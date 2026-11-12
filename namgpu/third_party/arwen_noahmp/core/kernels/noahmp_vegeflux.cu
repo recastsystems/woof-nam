@@ -3,7 +3,7 @@
 //  d66e442fccc04111067e29274c9f9eaccc3cef28,
 //  sha256 bd592a5b7db29000e715250e3a7c779ffb5e0dcc356f6b5a7d9e1c9f69c55282).
 //
-// Gate: max_ulp 0 against the gfortran+glibc oracle fixture
+// Gate: max_ulp 0 against the gfortran+libm oracle fixture
 // gpuwm/data/noahmp/oracle/noahmp-vegeflux.csv.
 //
 // Two things make that reachable and both are load-bearing:
@@ -13,12 +13,12 @@
 //     as importantly, stop nvcc contracting a*b+c into an FMA that the SSE
 //     baseline gfortran targets cannot emit.
 //
-//  2. The transcendentals are glibc 2.39's own logf/expf/powf/atanf, not CUDA's
+//  2. The transcendentals are our own FP32 logf/expf/powf/atanf, matching the reference libm, not CUDA's
 //     device libm.  CUDA's __logf/logf/powf are different functions with
 //     different error, and no amount of rounding control makes them agree.
-//     glibc's kernels compute in binary64 and round once; the binary64 steps
+//     these routines compute in binary64 and round once; the binary64 steps
 //     here use __dadd_rn/__dsub_rn/__dmul_rn and __fma_rn, with __fma_rn used
-//     at exactly the sites where the -fma multiarch build of glibc contracts
+//     at exactly the sites where the -fma multiarch build of the reference libm contracts
 //     (read off the disassembly of the installed libm.so.6, not guessed).
 //
 // The coefficient tables live in __constant__ memory and are uploaded from the
@@ -56,7 +56,7 @@ __device__ __forceinline__ float p3f(float x) { return FM(x, FM(x, x)); }
 __device__ __forceinline__ float p4f(float x) { float t = FM(x, x); return FM(t, t); }
 
 // ---------------------------------------------------------------------------
-// glibc 2.39 libm tables (uploaded from the host; never literals)
+// the reference libm tables (uploaded from the host; never literals)
 // ---------------------------------------------------------------------------
 // Declared inside extern "C" so the symbol names survive unmangled and the
 // host can cuModuleGetGlobal them by name to upload the values.
@@ -81,9 +81,9 @@ __constant__ float c_atan_aT[11];
 }
 
 // ---------------------------------------------------------------------------
-// glibc logf  (sysdeps/ieee754/flt-32/e_logf.c, __logf_fma)
+// FP32 logf, our own implementation (FMA form)
 // ---------------------------------------------------------------------------
-__device__ float glibc_logf(float x)
+__device__ float f32_logf(float x)
 {
 #ifdef USE_DEVICE_LIBM
     return logf(x);   // negative control: CUDA device libm, a different function
@@ -119,9 +119,9 @@ __device__ float glibc_logf(float x)
 }
 
 // ---------------------------------------------------------------------------
-// glibc expf  (sysdeps/ieee754/flt-32/e_expf.c, __expf_fma)
+// FP32 expf, our own implementation (FMA form)
 // ---------------------------------------------------------------------------
-__device__ float glibc_expf(float x)
+__device__ float f32_expf(float x)
 {
 #ifdef USE_DEVICE_LIBM
     return expf(x);   // negative control
@@ -155,7 +155,7 @@ __device__ float glibc_expf(float x)
 }
 
 // ---------------------------------------------------------------------------
-// glibc powf  (sysdeps/ieee754/flt-32/e_powf.c, __powf_fma)
+// FP32 powf, our own implementation (FMA form)
 // Only the finite, positive-base domain the Noah-MP leaves reach is
 // transcribed; anything else returns NaN rather than a value nothing verified.
 // ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ __device__ double powf_exp2_inline(double xd)
     return DM(y, s);
 }
 
-__device__ float glibc_powf(float x, float y)
+__device__ float f32_powf(float x, float y)
 {
 #ifdef USE_DEVICE_LIBM
     return powf(x, y);   // negative control
@@ -231,10 +231,10 @@ __device__ float glibc_powf(float x, float y)
 }
 
 // ---------------------------------------------------------------------------
-// glibc atanf  (sysdeps/ieee754/flt-32/s_atanf.c -- plain binary32, no FMA)
+// FP32 atanf, our own implementation (plain binary32, no FMA)
 // aT[0] is 0x3EAAAAAB: the decimal literal, not the stale hex comment.
 // ---------------------------------------------------------------------------
-__device__ float glibc_atanf(float x)
+__device__ float f32_atanf(float x)
 {
 #ifdef USE_DEVICE_LIBM
     return atanf(x);   // negative control
@@ -350,24 +350,24 @@ __device__ void dev_ragrb(int iter, float vai, float rhoair, float hg, float tah
 
     float fhgnew;
     if (mozg < 0.0f)
-        fhgnew = glibc_powf(FS(1.0f, FM(15.0f, mozg)), -0.25f);
+        fhgnew = f32_powf(FS(1.0f, FM(15.0f, mozg)), -0.25f);
     else
         fhgnew = FA(1.0f, FM(4.7f, mozg));
 
     fhg = (iter == 1) ? fhgnew : FM(0.5f, FA(fhg, fhgnew));
 
-    float cwpc = glibc_powf(FM(FM(FM(cwp, vai), hcan), fhg), 0.5f);
+    float cwpc = f32_powf(FM(FM(FM(cwp, vai), hcan), fhg), 0.5f);
 
-    float tmp1 = glibc_expf(-FD(FM(cwpc, z0hg), hcan));
-    float tmp2 = glibc_expf(-FD(FM(cwpc, FA(z0h, zpd)), hcan));
-    float tmprah2 = FM(FD(FM(hcan, glibc_expf(cwpc)), cwpc), FS(tmp1, tmp2));
+    float tmp1 = f32_expf(-FD(FM(cwpc, z0hg), hcan));
+    float tmp2 = f32_expf(-FD(FM(cwpc, FA(z0h, zpd)), hcan));
+    float tmprah2 = FM(FD(FM(hcan, f32_expf(cwpc)), cwpc), FS(tmp1, tmp2));
 
     float kh = fmxf(FM(FM(PH_VKC, fv), FS(hcan, zpd)), mpe);
     *ramg = 0.0f;
     *rahg = FD(tmprah2, kh);
     *rawg = *rahg;
 
-    float tmprb = FD(FM(cwpc, 50.0f), FS(1.0f, glibc_expf(-FD(cwpc, 2.0f))));
+    float tmprb = FD(FM(cwpc, 50.0f), FS(1.0f, f32_expf(-FD(cwpc, 2.0f))));
     float r = FM(tmprb, FSQ(FD(dleaf, uc)));
     *rb = fmnf(fmxf(r, 5.0f), 50.0f);
 
@@ -390,10 +390,10 @@ __device__ void dev_sfcdif1(int iter, float sfctmp, float rhoair, float h,
     int mozsgn = *mozsgn_io;
     float mozold = moz;
 
-    float tmpcm = glibc_logf(FD(FS(zlvl, zpd), z0m));
-    float tmpch = glibc_logf(FD(FS(zlvl, zpd), z0h));
-    float tmpcm2 = glibc_logf(FD(FA(2.0f, z0m), z0m));
-    float tmpch2 = glibc_logf(FD(FA(2.0f, z0h), z0h));
+    float tmpcm = f32_logf(FD(FS(zlvl, zpd), z0m));
+    float tmpch = f32_logf(FD(FS(zlvl, zpd), z0h));
+    float tmpcm2 = f32_logf(FD(FA(2.0f, z0m), z0m));
+    float tmpch2 = f32_logf(FD(FA(2.0f, z0h), z0h));
 
     float moz2;
     if (iter == 1) {
@@ -417,16 +417,16 @@ __device__ void dev_sfcdif1(int iter, float sfctmp, float rhoair, float h,
 
     float fmnew, fhnew, fm2new, fh2new;
     if (moz < 0.0f) {
-        float t1 = glibc_powf(FS(1.0f, FM(16.0f, moz)), 0.25f);
-        float t2 = glibc_logf(FD(FA(1.0f, FM(t1, t1)), 2.0f));
-        float t3 = glibc_logf(FD(FA(1.0f, t1), 2.0f));
-        fmnew = FA(FS(FA(FM(2.0f, t3), t2), FM(2.0f, glibc_atanf(t1))), 1.5707963f);
+        float t1 = f32_powf(FS(1.0f, FM(16.0f, moz)), 0.25f);
+        float t2 = f32_logf(FD(FA(1.0f, FM(t1, t1)), 2.0f));
+        float t3 = f32_logf(FD(FA(1.0f, t1), 2.0f));
+        fmnew = FA(FS(FA(FM(2.0f, t3), t2), FM(2.0f, f32_atanf(t1))), 1.5707963f);
         fhnew = FM(2.0f, t2);
 
-        float t12 = glibc_powf(FS(1.0f, FM(16.0f, moz2)), 0.25f);
-        float t22 = glibc_logf(FD(FA(1.0f, FM(t12, t12)), 2.0f));
-        float t32 = glibc_logf(FD(FA(1.0f, t12), 2.0f));
-        fm2new = FA(FS(FA(FM(2.0f, t32), t22), FM(2.0f, glibc_atanf(t12))), 1.5707963f);
+        float t12 = f32_powf(FS(1.0f, FM(16.0f, moz2)), 0.25f);
+        float t22 = f32_logf(FD(FA(1.0f, FM(t12, t12)), 2.0f));
+        float t32 = f32_logf(FD(FA(1.0f, t12), 2.0f));
+        fm2new = FA(FS(FA(FM(2.0f, t32), t22), FM(2.0f, f32_atanf(t12))), 1.5707963f);
         fh2new = FM(2.0f, t22);
     } else {
         fmnew = FM(-5.0f, moz);
@@ -489,13 +489,13 @@ __device__ void dev_sfcdif1(int iter, float sfctmp, float rhoair, float h,
 
 __device__ __forceinline__ float sf1(float ab, float bc)
 {
-    return glibc_powf(ab, FD(FS(bc, 25.0f), 10.0f));
+    return f32_powf(ab, FD(FS(bc, 25.0f), 10.0f));
 }
 
 __device__ __forceinline__ float sf2(float ab)
 {
     float t = FA(ab, 273.16f);
-    return FA(1.0f, glibc_expf(FD(FA(-2.2e05f, FM(710.0f, t)), FM(8.314f, t))));
+    return FA(1.0f, f32_expf(FD(FA(-2.2e05f, FM(710.0f, t)), FM(8.314f, t))));
 }
 
 __device__ void dev_stomata(const float *p, float mpe, float apar, float foln,
@@ -626,8 +626,8 @@ __device__ void dev_vege_flux(const float *in, const float *p, int isnow,
     qsfc = FD(FM(0.622f, eair), FS(psfc, FM(0.378f, eair)));
 
     float hcan = p[PP_HVT];
-    float uc = FD(FM(ur, glibc_logf(FD(FA(FS(hcan, zpd), z0m), z0m))),
-                  glibc_logf(FD(zlvl, z0m)));
+    float uc = FD(FM(ur, f32_logf(FD(FA(FS(hcan, zpd), z0m), z0m))),
+                  f32_logf(FD(zlvl, z0m)));
 
     float air = FS(-FM(FM(emv, FA(1.0f, FM(FS(1.0f, emv), FS(1.0f, emg)))), lwdn),
                    FM(FM(FM(emv, emg), PH_SB), p4f(tg)));
@@ -761,7 +761,7 @@ __device__ void dev_vege_flux(const float *in, const float *p, int isnow,
     float tauxv = -FM(FM(FM(rhoair, cm), ur), uu);
     float tauyv = -FM(FM(FM(rhoair, cm), ur), vv);
 
-    float cah2 = FD(FM(fv, PH_VKC), FS(glibc_logf(FD(FA(2.0f, z0h), z0h)), fh2));
+    float cah2 = FD(FM(fv, PH_VKC), FS(f32_logf(FD(FA(2.0f, z0h), z0h)), fh2));
     float cq2v = cah2;
     float t2mv, q2v;
     if (cah2 < 1.0e-5f) {

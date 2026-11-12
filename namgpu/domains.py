@@ -159,10 +159,20 @@ def ensure_static(case_dir: Path, start: datetime, source: str, card: str | None
                 raise SystemExit(f"woof-nam: no archived NAM analysis for the static near {first:%Y-%m-%d} "
                                  f"(404: {', '.join(tried)})")
             log(f"static: {gfs_start.STATIC_NPZ.name} from the archived NAM analysis {cyc:%Y-%m-%d %HZ} ({got})")
+            # the NAM's own base albedo under snow and maximum snow albedo: NCEP's native surface file of the same
+            # cycle, its two albedo records only (sources.NATIVE_LAND); without it the build says what it lacks
+            from namgpu.init.fetch_case import PATTERNS, _subset
+            land = src.with_name(f"nam.{cyc:%Y%m%d%H}.bgrdsf00.land.grib2")
+            try:
+                _subset(f"{NAM}/nam.{cyc:%Y%m%d}/nam.t{cyc:%H}z.bgrdsf00.tm00.grib2", land, PATTERNS["nam_land"])
+            except (OSError, ValueError, urllib.error.HTTPError) as e:
+                log(f"static: no NCEP native surface file for {cyc:%Y-%m-%d %HZ} ({e}); the snow albedos stay the "
+                    "vegetation table")
             rc = _child("namgpu.init.gfs_start", [str(src), "--out", str(gfs_start.STATIC_NPZ)], card)
             if rc != 0 or not gfs_start.STATIC_NPZ.is_file():
                 raise SystemExit(f"woof-nam: static build failed (exit {rc})")
             src.unlink(missing_ok=True)
+            land.unlink(missing_ok=True)
             rec.update(action="built", file=str(gfs_start.STATIC_NPZ), from_cycle=f"{cyc:%Y%m%d%H}")
     else:
         base = config.static_npz(config.load(), base=True)

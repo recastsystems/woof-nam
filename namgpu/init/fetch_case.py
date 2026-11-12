@@ -120,8 +120,11 @@ RRFS_SFC_VARS = re.compile(
     r":(PRES|HGT|TMP|LAND|ICEC|WEASD|SNOD|CNWAT):surface:"
     r"|:(TSOIL|SOILW):\d+(\.\d+)?-\d+(\.\d+)? m below ground:"
     r"|:(TMP|SPFH):2 m above ground:|:(UGRD|VGRD):10 m above ground:")
+# NAM bgrdsf00: the land states of the NAM's own start that its analysis bgrd3d00 lacks (sources.NATIVE_LAND): liquid
+# soil water on the four Noah layers, the snow-free base albedo and the maximum snow albedo. About 1.6 MB of 45.
+NAM_LAND = re.compile(r":SOILL:\d+(\.\d+)?-\d+(\.\d+)? m below ground:anl:|:(SNFALB|MXSALB):surface:anl:")
 PATTERNS = {"gfs_init": GFS_INIT_VARS, "gfs_boco": GFS_BOCO_VARS, "nam_hourly": NAM_HOURLY, "rap_init": RAP_INIT_VARS,
-            "hrrr_init": HRRR_INIT_VARS, "rrfs_prs": RRFS_PRS_VARS, "rrfs_sfc": RRFS_SFC_VARS}
+            "hrrr_init": HRRR_INIT_VARS, "rrfs_prs": RRFS_PRS_VARS, "rrfs_sfc": RRFS_SFC_VARS, "nam_land": NAM_LAND}
 
 # Regions a row covers. "global": everywhere. "bbox": geographic lat/lon box (degrees, lon -180..180).
 # "rotated": a rotated lat-lon grid given by its centre (tph0d, tlm0d) and wbd/sbd, tested in its own rotated
@@ -209,6 +212,12 @@ FETCH_ROWS = (
      "source": "native", "role": "init", "host": NAM, "eras": NAM_ERAS,
      "stem": "bgrd3d", "cycle": "start", "leads": "f000", "kind": "whole", "region": "nam12",
      "until": NAM_RETIRED, "dest": "nam/bgrd3d00.grib2"},
+    # optional: a native start without it keeps the frozen-fraction split and the table albedos and says so in one
+    # line (sources.stage_native), so a missing file is reported, not counted as a failed required request
+    {"name": "nam-bgrdsf00-land", "licence": "NOAA/NCEP NAM, US government work (public domain), AWS NODD noaa-nam-pds",
+     "source": "native", "role": "init", "optional": True, "host": NAM, "eras": NAM_ERAS,
+     "stem": "bgrdsf", "cycle": "start", "leads": "f000", "kind": "subset", "records": "nam_land", "region": "nam12",
+     "until": NAM_RETIRED, "dest": "nam/bgrdsf00.land.grib2"},
     {"name": "nam-bgrdsf", "licence": "NOAA/NCEP NAM, US government work (public domain), AWS NODD noaa-nam-pds",
      "source": "native", "role": "referee", "host": NAM, "eras": NAM_ERAS,
      "stem": "bgrdsf", "cycle": "start", "leads": "every3", "kind": "whole", "region": "nam12",
@@ -579,8 +588,8 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
             continue
         # a start whose row has no boundary entry (native NAM analysis, rap) takes the GFS boundaries, as operational
         # NAM (CONTRACT section 5); a row with a fallback (rap) also needs the fallback's start file
-        required = (row["role"] == "init" and row["source"] in (source, fsrc)) or \
-                   (row["role"] == "boco" and row["source"] in (source, bsrc))
+        required = ((row["role"] == "init" and row["source"] in (source, fsrc)) or
+                    (row["role"] == "boco" and row["source"] in (source, bsrc))) and not row.get("optional")
         # A regional analysis (a SOURCES row with a fallback: rap, hrrr) is read only by its own start. Fetched as an
         # optional extra it added 101 MB (RAP) + 193 MB (HRRR) to every CONUS fetch, gfs and native starts included.
         if row["role"] == "init" and not required and (srcmod.SOURCES.get(row["source"]) or {}).get("fallback"):

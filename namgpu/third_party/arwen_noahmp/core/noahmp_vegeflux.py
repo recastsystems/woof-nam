@@ -19,13 +19,13 @@ gfortran does with a default-kind real literal.  Double rounding through
 binary64 is innocuous for ``+ - * /`` and ``sqrt`` on binary32 operands
 (53 >= 2*24 + 2), so the intermediate Python float carries no extra precision.
 
-Transcendentals go through :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, which reproduces
-glibc 2.39's ``logf``/``expf``/``powf``/``atanf`` bit for bit.  ``numpy``'s
+Transcendentals go through :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, which matches
+the reference libm's ``logf``/``expf``/``powf``/``atanf`` bit for bit.  ``numpy``'s
 float32 transcendentals and "FP64 then round once" are both *different
 functions* and cannot hold a max_ulp 0 gate.  This lane originally carried its
 own ``logf``/``atanf``/``sqrtf`` in ``noahmp_vegeflux_libm``; that module was
-folded into ``noahmp_libm`` after the two transcriptions were shown to agree
-bit for bit on 3,875,000 arguments and on every pinned glibc word in
+folded into ``noahmp_libm`` after the two implementations were shown to agree
+bit for bit on 3,875,000 arguments and on every pinned reference word in
 ``gpuwm/data/noahmp/oracle/``.
 
 Integer powers follow gfortran's expansion, which is not associativity-free:

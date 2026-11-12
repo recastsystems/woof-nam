@@ -41,7 +41,7 @@ def one(cfgpath):
     except Exception as e:  # noqa: BLE001
         out["coriolis"] = f"FAILED {type(e).__name__}: {e}"
     ce_e, ce_n, cn_e, cn_n = (cp.asnumpy(a) for a in wr._coefficients(ctx))
-    he_e, he_n, hn_e, hn_n = (cp.asnumpy(a) for a in iwr._coefficients(ctx))   # io-wind-rotate V vectors
+    he_e, he_n, hn_e, hn_n = (cp.asnumpy(a) for a in iwr.v_coefficients(ctx))   # io-wind-rotate V vectors
     rt = {}
     for name, (ue, vn) in {"westerly": (10.0, 0.0), "southerly": (0.0, 10.0)}.items():
         ug = ue * ce_e + vn * ce_n          # earth -> grid (init-gfs-wind-rotate at V)

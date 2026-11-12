@@ -71,7 +71,7 @@ SUPPORTED_GDT = (0, 32769, 30)   # 30: Lambert conformal (HRRR), placed by sourc
 REFUSED_SCAN_BITS = 0x10
 GDT_NAM_ROTATED = 32769
 GDT32769_SHAPE_OF_EARTH = 6      # WMO Code Table 3.2 code 6: sphere of radius 6371229.0 m
-GRID_RELATIVE_UV_BIT = 0x08      # WMO Code Table 3.3 bit 5 (value 8): u, v relative to the grid
+GRID_RELATIVE_UV_BIT = 0x08      # WMO-No. 306 flag table 3.3 bit 5 (value 8): u, v relative to the grid
 WIND_COMPONENTS = {(0, 2, 2), (0, 2, 3)}   # (discipline, category, parameter): U and V wind
 _INV_REQUIRED = ("index", "discipline", "category", "parameter", "level_type", "level_value", "gdt",
                  "nx", "ny", "scan_mode", "resolution_flags", "shape_of_earth", "bitmap",

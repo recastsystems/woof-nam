@@ -2,11 +2,25 @@ Build fix/noah/{VEGPARM,SOILPARM,GENPARM}.TBL in the layout NMMB's LSM_PARM_INIT
 (phys/module_LS_NOAHLSM.F90:1298-1547): VEGPARM first section 'IGBP', 11 items per row
 (IINDEX, ALBEDO, Z0, SHDFAC, NROOT, RS, RGL, HS, SNUP, LAI, MAXALB).
 
-Why: the NCEP NAM fix VEGPARM.TBL (IGBP first, old 10-column layout) is not published anywhere we
-can fetch. This builds the IGBP rows from WRF V3.0's MODIFIED_IGBP_MODIS_NOAH section (WRF public
-domain, www2.mmm.ucar.edu/wrf/src/WRFV3.0.TAR.gz): SHDFAC, NROOT, RS, RGL, HS, SNUP, MAXALB as given (NROOT 0 on water raised to 1, as in the WRF V2 USGS water row);
-ALBEDO, Z0 and LAI are the midpoints of WRF's min/max pairs. SOILPARM (STAS first) and GENPARM are
-WRF V3.0's files unchanged. NAMED GAP: replace with the NCEP NAM fix tables when found; the NAM state
-carries its own ALBASE / Z0BASE / VEGFRC, so the table ALBEDO/Z0 are fallbacks in NOAH_LSM_INIT.
+VEGPARM.TBL and GENPARM.TBL are NCEP's operational NMMB Noah tables, byte for byte: the IGBP-first
+IGBP_VEGPARM.TBL and the GENPARM.TBL of the HMON package's NMMB fix set (hmon.v3.2.13/fix/nmmb on the
+NCO code site, NOAA US government work). HMON runs the same NMMB module_LS_NOAHLSM as the NAM
+(land_surface: noah). The NAM's own fix copies (nam_VEGPARM.TBL, nam_GENPARM.TBL, copied to VEGPARM.TBL
+and GENPARM.TBL by scripts/exnam_fcst.sh:630-633) were taken off the NCO site when the NAM retired and
+could not be fetched. The tables carry SALP 4.0 and the IGBP SNUP list 0.080 x5, 0.020, 0.020, 0.060,
+0.040, 0.020, 0.010, 0.020, 0.020, 0.020, 0.013, 0.013, 0.010, 0.020, 0.020, 0.020 m. With SFLX's SNUP = 4*SNUP (module_LS_NOAHLSM.F90:1989) they
+reproduce the archived NAM's surface albedo over snow. The WRF V3.0 MODIFIED_IGBP_MODIS_NOAH stand-in that came before them had
+SNUP 0.04 and SALP 2.6, which halved the snow cover fraction on shallow and moderate snow.
 
-    python tools/build_noah_fix.py <WRFV3/run dir> [dest=fix/noah]
+SOILPARM.TBL is NCEP's operational NMMB soil table, byte for byte, from the same HMON fix set (its STAS
+section only, 19 classes). It replaced WRF V3.0's STAS table, which differed in several classes (sand
+MAXSMC 0.339 against NCEP's 0.395, BB 2.79 against 4.05; clay MAXSMC 0.468 against 0.457; organic,
+bedrock, playa and lava too). The awphys soil-table records (namgpu/products/land_cloud.py: POROS, SMREF, WILT, SMDRY)
+carry these values (sand 0.395, 0.236, 0.023, 0.023). The GFS start does
+not rescale soil moisture by the table's porosity (namgpu/init/soil_start.py rows; init-native-sfc uses
+the init tables in namgpu/data/noah_tables for the urban remap and the frozen-soil split only).
+
+The NAM state carries its own ALBASE / Z0BASE / VEGFRC, so the table ALBEDO/Z0/SHDFAC are fallbacks in
+NOAH_LSM_INIT.
+
+    python tools/build_noah_fix.py [dest=fix/noah]

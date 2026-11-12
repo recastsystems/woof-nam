@@ -11,9 +11,9 @@ binary32 and every arithmetic boundary is pinned to ``numpy.float32``.
 
 ``WDFCND1``/``WDFCND2`` and ``ROSR12`` are already pinned in
 :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_leaves` and are imported, not re-transcribed.
-Transcendentals come from :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, the verified glibc
-transcriptions; neither ``numpy.exp`` on float32 nor "compute in float64 and
-round once" reproduces glibc's ``expf``/``powf`` bit for bit.
+Transcendentals come from :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, the verified FP32
+routines; neither ``numpy.exp`` on float32 nor "compute in float64 and
+round once" reproduces the reference libm's ``expf``/``powf`` bit for bit.
 
 Pinned option identity
 ----------------------

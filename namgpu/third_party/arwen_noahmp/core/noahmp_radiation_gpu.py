@@ -19,7 +19,7 @@ Three things this deliberately does not do.
 * It does not split RADIATION into an ALBEDO launch and a SURRAD launch with
   :2787-2790 on the host.  Five host statements per land column is exactly the
   per-column CPython this seam exists to remove.
-* It does not widen ``glibc_powf``'s domain guard.  See
+* It does not widen ``f32_powf``'s domain guard.  See
   :data:`POWF_DOMAIN_NOTE`.
 """
 
@@ -63,11 +63,11 @@ OUTPUT_NAMES = (
     "fsr", "fsrv", "fsrg",
 )
 
-#: What the five narrow ``glibc_powf`` copies do outside their domain, and why
+#: What the five narrow ``f32_powf`` copies do outside their domain, and why
 #: RADIATION is the first conversion that had to answer it.
 POWF_DOMAIN_NOTE = (
-    "noahmp_radiation.cu's glibc_powf returns NaN for a subnormal or negative "
-    "base rather than taking glibc's sign/zero/inf path.  RADIATION reaches "
+    "noahmp_radiation.cu's f32_powf returns NaN for a subnormal or negative "
+    "base rather than taking the reference libm's sign/zero/inf path.  RADIATION reaches "
     "powf at exactly two live sites -- SNOW_AGE's (1-FAGE)**10 style term and "
     "TWOSTREAM's EXP-free algebra -- and "
     "tests/test_noahmp_radiation_cuda.py::test_the_powf_domain_guard_fires "

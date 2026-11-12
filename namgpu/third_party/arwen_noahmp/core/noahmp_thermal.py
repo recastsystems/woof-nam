@@ -27,8 +27,8 @@ Conventions shared with the oracle and with ``namgpu.third_party.arwen_noahmp.co
 * ROSR12 is not re-transcribed here; ``namgpu.third_party.arwen_noahmp.core.noahmp_leaves.rosr12`` is
   already pinned at ``max_ulp 0`` and HSTEP imports it, so a failure in the
   tridiagonal sweep localises to one module.
-* Transcendentals go through ``namgpu.third_party.arwen_noahmp.core.noahmp_libm`` (glibc 2.39's
-  ``logf``/``powf``), never numpy float32 and never "FP64 then round once".
+* Transcendentals go through ``namgpu.third_party.arwen_noahmp.core.noahmp_libm`` (our FP32
+  ``logf``/``powf``, bit for bit with the reference libm), never numpy float32 and never "FP64 then round once".
 
 Option identity: the pinned WRF Registry default.  What that kills inside this
 group, asserted rather than ported:

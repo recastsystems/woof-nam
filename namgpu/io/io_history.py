@@ -38,37 +38,95 @@ _PROCS_LOCK = threading.Lock()
 
 
 def writers() -> int:
-    """Writer processes (NAMGPU_HISTORY_WRITERS; default min(4, cores / 4), at least 1; 0 = the writer thread)."""
+    """Writer processes (NAMGPU_HISTORY_WRITERS; default min(4, cores / 4), at least 1; 0 = the writer thread).
+    cores = the ones this process may use (namgpu.cores.usable: affinity set and cgroup quota), not the host's."""
     v = os.environ.get("NAMGPU_HISTORY_WRITERS", "").strip()
     if v:
         return max(0, int(v))
-    return max(1, min(4, (os.cpu_count() or 4) // 4))
+    from namgpu import cores
+    return max(1, min(4, cores.usable() // 4))
 
 
 def _pool() -> ProcessPoolExecutor:
     global _PROCS
     with _PROCS_LOCK:
         if _PROCS is None:
-            import multiprocessing as mp  # noqa: PLC0415
-            # never fork the CUDA process: forkserver (or spawn) children import only numpy/netCDF4
-            method = "forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn"
-            _PROCS = ProcessPoolExecutor(max_workers=writers(), mp_context=mp.get_context(method))
+            from namgpu import cores as _cores  # noqa: PLC0415
+            # never fork the CUDA process: forkserver (or spawn) children import only numpy/netCDF4; the forkserver's
+            # socket goes in a short folder when TMPDIR is long
+            _PROCS = ProcessPoolExecutor(max_workers=writers(), mp_context=_cores.pool_context())
     return _PROCS
 
 
+# Each hour's block is /dev/shm/woof-nam-hist-<pid>-<n> (namgpu/io/scratch.py: a later run removes the blocks of a
+# process that has ended). Before a block is written, /dev/shm must hold it plus SHM_RESERVE_B: /dev/shm is a tmpfs,
+# and a page written past its end is a bus error that kills the forecast with no message (the 0.2.1 candidate's
+# arctic-front rerun, rc 135 at +3 h, with 43 GB of an earlier run's column views in a 62 GB /dev/shm). Short of room,
+# the thread waits for this run's own blocks in flight to be written and freed; still short, it writes the hour
+# itself from the pinned buffers (the single-writer route: same bytes, slower) and says so in one line.
+SHM = "/dev/shm"
+SHM_RESERVE_B = int(float(os.environ.get("NAMGPU_HISTORY_SHM_RESERVE_MIB", "2048")) * 1024 * 1024)
+_LIVE: dict = {}                 # block name -> SharedMemory, while its file is written
+_INFLIGHT: list = []             # the writer-process futures of those blocks
+_SEQ = iter(range(1 << 62))
+
+
+def _shm_room(need: int) -> tuple[bool, int]:
+    from .scratch import free_bytes  # noqa: PLC0415
+    if not Path(SHM).is_dir():
+        return True, 0           # no /dev/shm here (not Linux): multiprocessing places the block itself
+    free = free_bytes(SHM)
+    return free >= need + SHM_RESERVE_B, free
+
+
+def _unlink(name: str) -> None:
+    shm = _LIVE.pop(name, None)
+    if shm is None:
+        return
+    try:
+        shm.close()
+        shm.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _stage_and_submit(path, staged):
-    """Writer thread: copies out of the pinned buffers into shared memory, then hands the file to a process."""
-    shm, meta = finish_payload_shm(staged)
+    """Writer thread: copies out of the pinned buffers into shared memory, then hands the file to a process (or,
+    when /dev/shm has no room for the block, writes the file here; see SHM_RESERVE_B)."""
+    from .history import shm_bytes  # noqa: PLC0415
+    need = shm_bytes(staged)
+    ok, free = _shm_room(need)
+    for f in ([] if ok else list(_INFLIGHT)):
+        try:
+            f.result()
+        except BaseException:  # noqa: BLE001  (the file's own error is raised by drain/_ready_for_next)
+            pass
+        ok, free = _shm_room(need)
+        if ok:
+            break
+    if not ok:
+        print(f"io-history: {SHM} has {free / 1e9:.1f} GB free, under this hour's {need / 1e9:.1f} GB block plus "
+              f"{SHM_RESERVE_B / 1e9:.1f} GB: {Path(path).name} is written by the writer thread, not through shared "
+              "memory (slower)", flush=True)
+        return stage_and_write(path, staged)
+    from .scratch import own  # noqa: PLC0415
+    own(SHM)                           # this process is alive for a sweep in any PID namespace (scratch.own)
+    name = f"woof-nam-hist-{os.getpid()}-{next(_SEQ)}"
+    shm, meta = finish_payload_shm(staged, name=name)
+    _LIVE[name] = shm
     try:
         fut = _pool().submit(write_from_shm, str(path), shm.name, meta)
     except BaseException:
-        shm.close()
-        shm.unlink()
+        _unlink(name)
         raise
+    _INFLIGHT.append(fut)
 
-    def _free(_f, shm=shm):
-        shm.close()
-        shm.unlink()
+    def _free(f, name=name):
+        _unlink(name)
+        try:
+            _INFLIGHT.remove(f)
+        except ValueError:
+            pass
     fut.add_done_callback(_free)
     return fut
 
@@ -102,9 +160,16 @@ def shutdown() -> None:
     global _PROCS
     with _PROCS_LOCK:
         p, _PROCS = _PROCS, None
+    from .scratch import disown_all  # noqa: PLC0415
     if p is None:
+        for name in list(_LIVE):
+            _unlink(name)
+        disown_all()             # no block is left: this process's owner lock file goes too (scratch.own)
         return
     p.shutdown(wait=True)
+    for name in list(_LIVE):     # a block whose writer died before its done-callback ran
+        _unlink(name)
+    disown_all()                 # no block is left: this process's owner lock file goes too (scratch.own)
     try:
         from multiprocessing import forkserver  # noqa: PLC0415
         stop = getattr(forkserver._forkserver, "_stop", None)

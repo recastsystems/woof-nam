@@ -1,7 +1,8 @@
 """woof-nam doctor: what this machine has for WOOF-NAM, and what its card can run.
 
 Checks, each one line: the card (nvidia-smi: name, memory, driver), CuPy and NVRTC (a small kernel compiled and run),
-the WPS_GEOG terrain and land data a new grid's static build reads, the map renderer, the GRIB2 writer of
+the WPS_GEOG terrain every run reads and the land
+data a new grid's static build reads (optional: the 12 km run does not read it), the map renderer, the GRIB2 writer of
 `woof-nam products`, gpuwm-hex (only TEMPO, MYNN v6.1 and the suites built on them need it), and what fits on the card by the same memory estimate the `nest` and `run` doors refuse with
 (nest/domain.py vram_estimate): the 12 km CONUS grid and the largest square 3 km nest.
 Exit 0 when the card and CuPy work (missing data and writers are listed with the command that fetches them),
@@ -51,13 +52,27 @@ def cupy_check() -> tuple[bool, str]:
 
 
 def terrain() -> tuple[bool, str]:
+    """The 30-arc-sec terrain every run reads (gravity-wave drag): topo_gmted2010_30s."""
+    from namgpu.init import static_build as sb
+    roots = sb.geog_roots()
+    try:
+        path = sb.dataset(roots, "topo_gmted2010_30s")
+    except FileNotFoundError:
+        return False, ("topo_gmted2010_30s not under NAMGPU_GEOG, WPS_GEOG or ~/WPS_GEOG (every run reads it; "
+                       "`gpuwm fetch-geog --datasets topo_gmted2010_30s --root ~/WPS_GEOG`)")
+    return True, f"topo_gmted2010_30s under {path.parent}"
+
+
+def nest_land() -> tuple[bool, str]:
+    """The land sets a static build reads: the nests, the suite and every grid but the 12 km parent build their
+    static fields from them on first use. The 12 km run does not read them, so without them the line is optional."""
     from namgpu.init import static_build as sb
     roots = sb.geog_roots()
     try:
         rows = sb.resolve_datasets(roots, soil=sb.soil_set())
     except Exception as e:  # noqa: BLE001
-        return False, (f"{str(e).splitlines()[0]} (new nest grids build their static fields from it; "
-                       f"`gpuwm fetch-geog --root ~/WPS_GEOG`)")
+        return False, (f"{str(e).splitlines()[0]} (the 12 km run does not need it; nests, the suite and the other "
+                       f"grids build their static fields from it: `gpuwm fetch-geog --root ~/WPS_GEOG`)")
     return True, f"{len(rows)} WPS_GEOG datasets under {', '.join(str(r) for r in roots)}"
 
 
@@ -151,10 +166,11 @@ def main(argv=None) -> int:
     ok, msg = cupy_check()
     _line("ok" if ok else "FAILED", "cupy/nvrtc", msg)
     bad += 0 if ok else 1
-    for what, fn in (("terrain data", terrain), ("map renderer", renderer), ("GRIB2 writer", writer),
-                     ("gpuwm-hex", hex_check)):
+    for what, fn, absent in (("terrain", terrain, "missing"), ("nest land data", nest_land, "optional"),
+                             ("map renderer", renderer, "missing"), ("GRIB2 writer", writer, "missing"),
+                             ("gpuwm-hex", hex_check, "missing")):
         ok, msg = fn()
-        _line("ok" if ok else "missing", what, msg)
+        _line("ok" if ok else absent, what, msg)
     if c is not None:
         print("what this card can run now (the doors' memory estimate against the free memory):", flush=True)
         for line in what_fits(c):

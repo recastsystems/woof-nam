@@ -365,9 +365,10 @@ u("io-history-fields", O, "-",
   "Build the wrfout-shaped history fields on device: PSFC, theta, P, PH, QVAPOR, QCLOUD, QRAIN, "
   "QICE, QSNOW, earth-relative U10/V10, RAINNC/RAINC from NMMB arrays. In: state -> fields.",
   mode="new", deps=["io-wind-rotate"])
-u("io-wind-rotate", O, "nam_post0.fd/PROF_NMMB.f:2115-2150,2232-2237",
-  "Rotate grid-relative V-point winds (3-D and 10 m) to earth-relative H-point winds: each in-domain V neighbour rotated with its exact inverse of init-gfs-wind-rotate's map, then averaged (decision: pole inside domain, see kernel). In: U, V, U10, V10 -> UEARTH, VEARTH, UE10, VE10.",
-  mode="port")
+u("io-wind-rotate", O, "-",
+  "Earth-relative winds at H points: U10/V10 turned with the H-point grid angle of the rotated-pole map; "
+  "U/V averaged from the four V neighbours in grid components, then turned. In: U, V, U10, V10 -> "
+  "UEARTH, VEARTH, UE10, VE10.", mode="new")
 u("io-history", O, "-", "Write one history NetCDF per output hour (io/history.py). In: fields -> file.",
   mode="new", deps=["io-history-fields"])
 u("io-history-rust", O, "-", "Bind the gpuwm Rust NetCDF writer (libnetcdf_writer.so) for history.",

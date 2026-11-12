@@ -37,7 +37,7 @@ import numpy as np
 
 UNIT = "phys_noahmp_driver"
 ENV = "NAMGPU_LSM"
-KAPPA = np.float32(0.28589641)          # io_history_fields: T2 = TSHLTR * (PSHLTR*1e-5)**CAPA
+KAPPA = np.float32(0.28589641)          # R/CP (nmm/module_CONSTANTS.F90 CAPA)
 NSOIL = 4
 DZS = np.array([0.1, 0.3, 0.6, 1.0], dtype=np.float32)
 

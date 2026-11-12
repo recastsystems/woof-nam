@@ -16,14 +16,19 @@ Sources (NCEP NAM v4.2.11, commit 83df4e13):
                            the corners' lat/lon bounding box on a fixed 1.27 km Lambert master grid (4289 x 2753, La1
                            20.192, Lo1 -121.554, LoV -95, Latin 25); Alaska their i/j range on a 1.488 km polar
                            stereographic master (3297 x 2209, La1 40.530, Lo1 -178.571, LoV -150) with 100 points
-                           of padding. The post writes the corners (latlons_corners.txt) in millidegrees.
+                           of padding. These are NCEP grids 90 and 92 of Office Note 388, Table B.
+  Projections: Snyder, J. P., 1987: Map Projections: A Working Manual, USGS Professional Paper 1395 (Lambert
+                           conformal conic and polar stereographic on a sphere; see products.sets.OutGrid), on the
+                           sphere NCEP's GRIB2 grid definitions declare (shape of earth 6, WMO-No. 306 code table
+                           3.2); WMO-No. 306 GRIB2 templates 3.30 and 3.20 for the first point and the axes.
   NOAA's files: s3://noaa-nam-pds nam.YYYYMMDD/nam.tHHz.firewxnest_center_latlon (NCEP's points 2026-10-20 to
-                           2026-11-03) and nam.20261103 nam.t06z.firewxnest.hiresf01.tm00.grib2 (its decoded grid).
+                           2026-11-03) and nam.20261103 nam.tHHz.firewxnest.hiresf01.tm00.grib2 (their decoded grids).
 
-Checked against NOAA's 06Z 2026-11-03 file: the grid this module builds for 42.0 N, -122.3 (i/j_parent_start
+Checked against NOAA's 2026-11-03 files: the grid this module builds for 42.0 N, -122.3 (i/j_parent_start
 259/818 in the CONUS nest) covers NOAA's 184,183 bitmap points with 610 edge points of difference (the nearest-
-neighbour half-cell rim), and every shift of one parent cell either way is worse. The 00/12Z output grid comes out
-exactly as NOAA's (543 x 379, La1 36.487, Lo1 244.377).
+neighbour half-cell rim), and every shift of one parent cell either way is worse. Both output grids come out exactly
+as NOAA's: 00/12Z 543 x 379, La1 36.487, Lo1 244.377; 06/18Z 646 x 389, La1 39.182, Lo1 233.507 (its box starts west
+of the master grid, at master column -11).
 """
 from __future__ import annotations
 
@@ -63,12 +68,10 @@ FIREWX_MASTER = {
     "alaska": {"kind": "nps", "nx": 3297, "ny": 2209, "la1": 40.530, "lo1": -178.571, "lov": -150.0,
                "lad": 60.0, "dx": 1488.0, "pad": 100},
 }
-W3_RERTH = 6.3712e6                     # w3lib W3FB06/07/11/12 earth radius
 # The output grids NOAA's own files carry for NCEP's last points (decoded from nam.20261103 tHHz.firewxnest.hiresf01:
-# grid_def, La1/Lo1, Nx/Ny). firewx_output_grid's port of nam_firewx_gridspecs.fd reproduces the 00/12Z grid
-# exactly; at 06/18Z, where the box starts west of the master grid (master i about -10.36), NOAA's file starts one
-# master column further west (i -11: 646 columns, Lo1 233.507, where the port gives 645 and 233.521). The suite writes
-# NOAA's grid for these points, so its files match NOAA's file for file; any other point takes the computed grid.
+# grid_def, La1/Lo1, Nx/Ny). firewx_output_grid reproduces both exactly (at 06/18Z the box starts west of the master
+# grid: the corners' SW index is about -10.36 and NOAA's box starts at master column -11, the floor). The suite writes
+# these strings for these points; any other point takes the computed grid.
 FIREWX_NOAA_GRIDS = {
     (39.0, -112.0): "lambert:265:25:25 244.377:543:1270 36.487:379:1270",
     (42.0, -122.3): "lambert:265:25:25 233.507:646:1270 39.182:389:1270",
@@ -184,94 +187,63 @@ def firewx_start(parent: dict, lat: float, lon: float, im: int = 333, jm: int = 
 
 
 def h_corners(g: dict) -> dict:
-    """Geographic (lat, lon) of the four corner H points: sw, se, nw, ne (the post's latlons_corners)."""
+    """Geographic (lat, lon) of the four corner H points: sw, se, nw, ne."""
     w, s = g["wbd"], g["sbd"]
     e, n = w + (g["im"] - 1) * g["dlmd"], s + (g["jm"] - 1) * g["dphd"]
     f = lambda x, y: to_geographic(x, y, g["tph0d"], g["tlm0d"])
     return {"sw": f(w, s), "se": f(e, s), "nw": f(w, n), "ne": f(e, n)}
 
 
-def _w3_lambert(f: dict):
-    """w3lib W3FB11 (lat/lon -> i,j) and W3FB12 (i,j -> lat/lon), tangent Lambert, NH."""
-    d = math.pi / 180.0
-    an = math.sin(f["latin"] * d)
-    cosltn = math.cos(f["latin"] * d)
-    k = W3_RERTH * (cosltn ** (1.0 - an)) * (1.0 + an) ** an / an
-    rm = lambda lat: k * (math.cos(lat * d) / (1.0 + math.sin(lat * d))) ** an
-    elonv = f["lov"] % 360.0
+def master_projection(f: dict):
+    """(fwd, inv) on master grid f: fwd(lat, lon) -> 1-based fractional (i, j), inv(i, j) -> (lat, lon) with lon in
+    -180..180. f["kind"] "lambert" is a tangent Lambert conformal grid (true at Latin), "nps" a north polar
+    stereographic grid true at LaD; point (1, 1) is (La1, Lo1). The projection is products.sets.OutGrid (Snyder 1987,
+    USGS PP 1395, on a sphere) with the earth radius of NCEP's GRIB2 grid definitions (shape of earth 6, WMO-No. 306
+    code table 3.2: 6371229 m), so these boxes and the files' own section 3 share one sphere."""
+    from namgpu.products.sets import OutGrid, _ij
+    if f["kind"] == "lambert":
+        g = OutGrid("lambert", f["nx"], f["ny"], f["la1"], f["lo1"] % 360.0, f["dx"], f["dx"], lov=f["lov"] % 360.0,
+                    latin1=f["latin"], latin2=f["latin"])
+    elif f["kind"] == "nps":
+        g = OutGrid("polar", f["nx"], f["ny"], f["la1"], f["lo1"] % 360.0, f["dx"], f["dx"], lov=f["lov"] % 360.0,
+                    lad=f["lad"])
+    else:
+        raise ValueError(f"master grid kind {f['kind']!r}")
 
-    def lon_adj(lon):
-        lon = lon % 360.0
-        if lon - elonv > 180.0:
-            lon -= 360.0
-        if lon - elonv < -180.0:
-            lon += 360.0
-        return lon
-    arg1 = an * (lon_adj(f["lo1"]) - elonv) * d
-    polei = 1.0 - rm(f["la1"]) * math.sin(arg1) / f["dx"]
-    polej = 1.0 + rm(f["la1"]) * math.cos(arg1) / f["dx"]
+    def fwd(lat: float, lon: float) -> tuple[float, float]:
+        return _ij(g, lat, lon)
 
-    def fwd(lat, lon):
-        arg = an * (lon_adj(lon) - elonv) * d
-        return polei + rm(lat) * math.sin(arg) / f["dx"], polej - rm(lat) * math.cos(arg) / f["dx"]
+    def inv(i: float, j: float) -> tuple[float, float]:
+        la, lo = g.latlon_ij(i - 1.0, j - 1.0)
+        return float(la), ((float(lo) + 180.0) % 360.0) - 180.0
 
-    def inv(xi, xj):
-        xx, yy = (xi - polei) * f["dx"], (polej - xj) * f["dx"]
-        r = math.hypot(xx, yy)
-        lat = 90.0 - 2.0 * math.atan((r / k) ** (1.0 / an)) / d
-        lon = elonv + math.atan2(xx, yy) / d / an
-        return lat, ((lon + 180.0) % 360.0) - 180.0
-    return fwd, inv
-
-
-def _w3_polar(f: dict):
-    """w3lib W3FB06 (lat/lon -> i,j) and W3FB07 (i,j -> lat/lon), north polar stereographic true at 60 N."""
-    d = math.pi / 180.0
-    gi2 = (W3_RERTH * (1.0 + math.sin(60.0 * d)) / f["dx"]) ** 2
-    orient = f["lov"] % 360.0
-
-    def r_of(lat):
-        return math.sqrt(gi2 * math.cos(lat * d) ** 2 / (1.0 + math.sin(lat * d)) ** 2)
-    a1 = (f["lo1"] % 360.0 - orient) * d + math.pi / 2.0
-    xp = 1.0 - r_of(f["la1"]) * math.cos(a1)
-    yp = 1.0 - r_of(f["la1"]) * math.sin(a1)
-
-    def fwd(lat, lon):
-        a = (lon % 360.0 - orient) * d + math.pi / 2.0
-        return xp + r_of(lat) * math.cos(a), yp + r_of(lat) * math.sin(a)
-
-    def inv(xi, xj):
-        x, y = xi - xp, xj - yp
-        r2 = x * x + y * y
-        lat = math.asin((gi2 - r2) / (gi2 + r2)) / d
-        lon = orient + math.atan2(y, x) / d - 90.0
-        return lat, ((lon + 180.0) % 360.0) - 180.0
     return fwd, inv
 
 
 def firewx_output_grid(g: dict, location: str) -> dict:
-    """The fire-weather hiresf grid for this nest (sorc/nam_firewx_gridspecs.fd): the corners in millidegrees as
-    the post writes them (truncated), the box on the master grid (CONUS: the bounding box of the corner lat/lons, no
+    """The fire-weather hiresf grid for this nest (sorc/nam_firewx_gridspecs.fd): the corners in millidegrees
+    (truncated), the box on the master grid (CONUS: the bounding box of the corner lat/lons, no
     padding; Alaska: the corners' i/j range with 100 points of padding), its SW point, and the wgrib2 -new_grid spec
-    nam_prdgen_nest.sh passes."""
+    nam_prdgen_nest.sh passes. Master indices are the floor of the fractional (i, j), which is what NOAA's 06/18Z file
+    shows where the box starts west of the master grid (column -11 for a SW index of -10.36)."""
     m = FIREWX_MASTER[location]
     corners = {k: (math.trunc(lat * 1000.0) / 1000.0, math.trunc(lon * 1000.0) / 1000.0)
                for k, (lat, lon) in h_corners(g).items()}
     if m["kind"] == "lambert":
-        fwd, inv = _w3_lambert(m)
+        fwd, inv = master_projection(m)
         lats = [c[0] for c in corners.values()]
         lons = [c[1] % 360.0 for c in corners.values()]
         xsw, ysw = fwd(min(lats), min(lons))
         xne, yne = fwd(max(lats), max(lons))
-        isw, jsw, ine, jne = int(xsw), int(ysw), int(xne), int(yne)
+        isw, jsw, ine, jne = math.floor(xsw), math.floor(ysw), math.floor(xne), math.floor(yne)
         lat0, lon0 = inv(float(isw), float(jsw))
         nx, ny = ine - isw + 1, jne - jsw + 1
         spec = (f"lambert:{int(m['lov'] % 360)}:{int(m['latin'])}:{int(m['latin'])} {lon0 % 360.0:.3f}:{nx}:"
                 f"{int(m['dx'])} {lat0:.3f}:{ny}:{int(m['dx'])}")
     else:
-        fwd, inv = _w3_polar(m)
+        fwd, inv = master_projection(m)
         ij = [fwd(lat, lon) for lat, lon in corners.values()]
-        ii, jj = [int(x) for x, _ in ij], [int(y) for _, y in ij]
+        ii, jj = [math.floor(x) for x, _ in ij], [math.floor(y) for _, y in ij]
         isw, jsw = min(ii) - m["pad"], min(jj) - m["pad"]
         ine, jne = max(ii) + m["pad"], max(jj) + m["pad"]
         lat0, lon0 = inv(float(isw), float(jsw))

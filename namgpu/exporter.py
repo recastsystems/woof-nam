@@ -1,9 +1,9 @@
 """The GRIB2 writer `woof-nam products` drives: rw_rrfs_upp, gpuwm's Rust field-set writer (crate rw-grib2export).
 
-`woof-nam products` hands each history hour to `rw_rrfs_upp --profile-json`, which computes the post fields and
+`woof-nam products` hands each history hour to `rw_rrfs_upp --profile-json`, which computes the derived fields and
 writes the GRIB2 file. The build with the NAM awphys profile is not in a gpuwm release yet, so woof-nam carries its
 own copy: a prebuilt Linux x86-64 binary attached to the woof-nam GitHub release named by ASSET_RELEASE, built in
-the manylinux_2_28 image gpuwm builds its own Linux bridges in (it runs on glibc 2.28 and later). Its exact size and
+the manylinux_2_28 image gpuwm builds its own Linux bridges in (it runs on any manylinux_2_28 Linux: RHEL 8, Debian 10, Ubuntu 20.04 and later). Its exact size and
 SHA-256 are pinned below. `woof-nam fetch-bridges` (or the first `woof-nam products`) downloads it, checks both pins
 and only then installs it under ~/.woof-nam/bridges/. A file that fails a pin is deleted, never installed.
 
@@ -32,12 +32,12 @@ from pathlib import Path
 NAME = "rw_rrfs_upp"
 REPO = "recastsystems/woof-nam"
 # the woof-nam release whose assets carry this writer (a dev build fetches from the release it leads to)
-ASSET_RELEASE = "v0.2.0"
-# built from gpuwm 712ca847a9a38d68faa37eb86383196855e4db04 (crate rw-grib2export, bin rw_rrfs_upp) with Rust 1.94.0
+ASSET_RELEASE = "v0.2.1"
+# built from gpuwm f127ff79d4118a322cb144cc1a63e4e063d16d8d (crate rw-grib2export, bin rw_rrfs_upp) with Rust 1.94.0
 # in quay.io/pypa/manylinux_2_28_x86_64@sha256:c2261579b9c2e5d45aa93312f73e2a302182e3e977b558581a1838d6fed3d8e6
 PINS = {
-    "linux-x86_64": {"asset": "rw_rrfs_upp-linux-x86_64", "bytes": 16904352,
-                     "sha256": "9937ff91c753e7370f6ba6d3b6562b8acde611840f9c76c2191842644411264a"},
+    "linux-x86_64": {"asset": "rw_rrfs_upp-linux-x86_64", "bytes": 16850680,
+                     "sha256": "09c2dff1d8461b21577e83272bb31d07dd71d149d39a453e6f40c9d32742274f"},
 }
 FETCH_CMD = "woof-nam fetch-bridges"
 

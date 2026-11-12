@@ -10,11 +10,11 @@
 // NITERB=5, NSNOW=3, NSOIL=4.
 //
 // NOT a standalone translation unit: compiled AFTER noahmp_leaves.cu
-// (gpuwm/core/noahmp_kernel_sources.py), which supplies the single glibc
-// 2.39 device transcription (r_exp / r_log / r_pow, nmp_d2f_rn), the
+// (gpuwm/core/noahmp_kernel_sources.py), which supplies the single FP32
+// device implementation (r_exp / r_log / r_pow, nmp_d2f_rn), the
 // AD/SU/MU/DV rounding-pinned macros, and the NMP_* physical constants.
-// ATAN is not in that unit, so this file carries its own copy of glibc's
-// s_atanf.c under the ng_ prefix, exactly as noahmp_bareflux.cu does.
+// ATAN is not in that unit, so this file carries its own copy of the FP32
+// atanf under the ng_ prefix, exactly as noahmp_bareflux.cu does.
 //
 // Every FP32 operation is rounding-pinned (AD/SU/MU/DV/__fsqrt_rn) so
 // NVRTC's default contraction cannot fuse a site gfortran did not fuse;
@@ -73,11 +73,10 @@ __device__ __forceinline__ float ng_tdc(float t)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 atanf -- sysdeps/ieee754/flt-32/s_atanf.c (fdlibm kernel).
+// FP32 atanf, our own implementation (fdlibm kernel).
 // Plain FP32 multiplies and adds, never contracted (atanf is not an ifunc,
 // so there is no -mfma rebuild to match).  Same table as
-// noahmp_bareflux.cu's C_ATAN, including the 0x3EAAAAAB aT[0] that glibc's
-// own source comment mis-states.
+// noahmp_bareflux.cu's C_ATAN, including the 0x3EAAAAAB aT[0].
 // --------------------------------------------------------------------------
 __constant__ unsigned int NG_ATAN[19] = {
     0x3EED6338u, 0x3F490FDAu, 0x3F7B985Eu, 0x3FC90FDAu,

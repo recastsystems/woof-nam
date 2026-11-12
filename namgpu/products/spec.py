@@ -167,14 +167,13 @@ def profile(rows: list[dict] | None = None, name: str = "nam-awphys", noaa_path:
             if a.endswith(".1") and b == a[:-2] + ".2":
                 fields[i]["pair_next"] = True
     # NCEP grid 218 and nest-grid messages carry resolution flags 0x38: increments given, winds grid-relative
-    # isobaric records made as NAM's own post makes them (NCEP UPP MDL2P, NMM): rw_rrfs_upp's upp-nmm rule
-    doc = {"profile": name, "resolution_flags": 0x38, "isobaric_rule": "upp-nmm", "fields": fields}
+    # isobaric records by the writer's NMMB isobaric rule, "nmm-isobaric" (a key the writer reads)
+    doc = {"profile": name, "resolution_flags": 0x38, "isobaric_rule": "nmm-isobaric", "fields": fields}
     if mask_carrier:
         doc["mask_carrier"] = mask_carrier
     if pair_uv:
-        # NAM's nest hiresf00 carries its 3 h bucket averages and accumulations as 0-0 day windows
+        # NCEP's nest hiresf00 carries its 3 h bucket averages and accumulations as zero-length windows, unit hour
         doc["initial_window_stats"] = [0, 1]
-        doc["initial_window_unit"] = 2
     return doc, left
 
 

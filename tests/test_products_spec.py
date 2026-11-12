@@ -48,7 +48,7 @@ def test_core_records_are_mapped():
 
 def test_isobaric_group_is_mapped():
     # every isobaric record of awphys06 (HGT/TMP/RH/UGRD/VGRD/VVEL/TKE x39, DZDT x42, ABSV x5) has a source, and the
-    # profile asks the writer for the NMM isobaric rule (NAM post MDL2P), not the WOOF post isobaric fields
+    # profile asks the writer for its NMMB isobaric rule (nmm-isobaric), not the WOOF post isobaric fields
     rows = [r for r in spec.read() if r["t1"] == 100 and r["t2"] is None]
     count = {}
     for r in rows:
@@ -57,11 +57,11 @@ def test_isobaric_group_is_mapped():
     assert count == {"HGT": 39, "TMP": 39, "RH": 39, "UGRD": 39, "VGRD": 39, "VVEL": 39, "DZDT": 42, "ABSV": 5,
                      "var0_19_11": 39}
     assert {r["source"] for r in rows if r["name"] == "var0_19_11"} == {"Q2_ON_ISOBARIC_SFC"}
-    assert spec.profile()[0]["isobaric_rule"] == "upp-nmm"
+    assert spec.profile()[0]["isobaric_rule"] == "nmm-isobaric"
 
 
 def test_convective_and_reflectivity_records_are_mapped():
-    """Convective, precipitation and reflectivity: NAM's own post definitions (namgpu/products/awphys.tsv notes; gpuwm rrfs_upp.rs module namc)."""
+    """Convective, precipitation and reflectivity records have their sources (namgpu/products/awphys.tsv)."""
     by = {r["rec"]: r for r in spec.read()}
     want = {
         "2": "REFD_ON_HYBRID_LVL", "3": "carrier:COMPOSITE", "11": "NAM_RETOP_ON_ENTIRE_ATMOS",
@@ -78,8 +78,10 @@ def test_convective_and_reflectivity_records_are_mapped():
     # 0.2.15/0.2.16 at 0-6000 m in NAM's awphys are the vertical shear (VUCSH/VVCSH), not storm motion
     assert (by["355"]["dcp"], by["355"]["level"], by["355"]["level2"]) == ("0.2.15", "103:0", "103:6000")
     # records the port cannot produce honestly stay unmapped, with the reason in the note
-    for rec in ("334", "392"):
+    for rec in ("392",):
         assert by[rec]["source"] in ("", "-") and by[rec]["note"].startswith("LEFT OUT"), rec
+    # the snowfall water accumulation is rebuilt from the 3 h ACSNOW bucket (tests/test_products_snowfall_bucket.py)
+    assert by["334"]["source"] == "carrier:WEASD_S12"
     # the categorical precipitation type: the dominant type (namgpu.products.ptype, ptype-winter lane)
     for rec, nm in (("336", "CSNOW"), ("337", "CICEP"), ("338", "CFRZR"), ("339", "CRAIN")):
         assert by[rec]["source"] == "carrier:NAM_" + nm, rec

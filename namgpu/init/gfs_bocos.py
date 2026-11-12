@@ -175,11 +175,37 @@ def write_boco(path: Path, t0, old, new, tboco: float = TBOCO):
     tmp.replace(path)
 
 
-def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: int = 0, generation: int | None = None):
+def on_stream(ctx):
+    """The run's stream as this thread's current stream (nothing to enter when the run has none)."""
+    stream = getattr(ctx, "stream", None)
+    return stream if stream is not None else contextlib.nullcontext()
+
+
+def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: int = 0, generation: int | None = None,
+          only=None):
     """Write every boco file for a run of `hours` hours. Returns the folder.
     from_hour (a storm-following window that lands at that hour, namgpu/nest/prepare.py): only the intervals from
     from_hour on, still named in hours from the run start (READ_BC names a file from the step count, which a
-    moving run keeps from its start); generation is recorded in the folder's BOCO-SOURCE.json with the grid."""
+    moving run keeps from its start); generation is recorded in the folder's BOCO-SOURCE.json with the grid.
+    only (a resumed run, resume_check): the interval starts to write; every other file in the folder, and the
+    folder's marker, are left as they are.
+
+    The whole build runs with ctx.stream as the current stream, whoever calls it. The kernels of the decode and of
+    both interpolations are launched on ctx.stream (a non-blocking stream), while strips() copies the state, and the
+    column stacks and write_boco's differences are plain array operations on the calling thread's current stream. A
+    caller that had not entered ctx.stream (the resume door of the 0.2.1 candidate) ran those on the default stream,
+    which does not wait for a non-blocking one: a boundary strip was copied before the kernels that fill it had
+    run. Breakage this prevents: a resumed run's rebuilt boco.0006 held the +6 h values at 114,853 points of the
+    +9 h strip (tendency exactly 0) and a pressure tendency of 2.25 Pa/s, and differed on every rebuild; the next
+    run stopped at its first step with RAD_PRSLK1 not positive (arctic front 2020-10-24 00Z, 2026-11-11)."""
+    with on_stream(ctx):
+        out = _build(ctx, hours, out_dir, log, from_hour, generation, only)
+    if getattr(ctx, "stream", None) is not None:
+        ctx.stream.synchronize()
+    return out
+
+
+def _build(ctx, hours, out_dir, log, from_hour, generation, only):
     import cupy as cp
     from types import SimpleNamespace
     from namgpu import state as statemod
@@ -202,6 +228,14 @@ def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: in
         files = [(fh, p) for fh, p in files if fh >= int(from_hour)]
         if len(files) < 2:
             raise ValueError(f"{UNIT}: from_hour {from_hour} leaves no boundary interval before +{hours} h")
+    if only is not None:
+        # the two boundary times of each interval asked for, and no other: a file that is there is not decoded again
+        only = {int(h) for h in only}
+        times = only | {h + interval_h for h in only}
+        files = [(fh, p) for fh, p in files if fh in times]
+        if not only or len(files) != len(times):
+            raise ValueError(f"{UNIT}: only={sorted(only)}: not interval starts of this build "
+                             f"(every {interval_h} h from +{int(from_hour)} h, before +{hours} h)")
     missing = [str(p) for _, p in files if not p.is_file()]
     if missing:
         raise FileNotFoundError(f"{UNIT}: {bname} boundary files missing: {missing[:3]} (run init-fetch-case)")
@@ -212,7 +246,7 @@ def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: in
     static, _ = gfs_start.load_static(bctx)
     st.add("HGT_M", static["HGT_SFC"].shape)[...] = static["HGT_SFC"]
     tmpdir = str(Path(ctx.case_dir).resolve().parents[1] / "scratch")
-    prev = None
+    prev, written = None, 0
     # Decode PREFETCH boundary times ahead on worker threads (each decode is ~11 grib2_dump processes plus the
     # device placement, on bctx.stream) while this thread interpolates the current one: the decodes of one time
     # used ~5 of 24 cores and the boundary stage was a series of them (58 s for 17 times, nests 2026-11-04).
@@ -242,32 +276,83 @@ def build(ctx, hours: int, out_dir: Path | None = None, log=print, from_hour: in
         bad = {n: int(sum(int((~cp.isfinite(x)).sum()) for x in v)) for n, v in cur.items()}
         if any(bad.values()):
             raise RuntimeError(f"{UNIT}: non-finite boundary values at +{fh} h: {bad}")
-        if prev is not None:
+        # with `only`, two times in a row can be the ends of two different intervals (a gap between them): no file
+        if prev is not None and fh - files[k - 1][0] == interval_h and (only is None or files[k - 1][0] in only):
             t0 = ctx.start + timedelta(hours=files[k - 1][0])
             name = out_dir / f"boco.{files[k - 1][0]:04d}"
             write_boco(name, t0, prev, cur, tboco=float(interval_h * 3600))
+            written += 1
             log(f"{UNIT}: {name.name} (+{files[k - 1][0]} h -> +{fh} h)")
         prev = cur
     pool.shutdown()
     if reads is not None:
         reads.close()
-    import json
-    from namgpu import config as configmod
-    mk = _marker(ctx.start, hours, files, age_h, interval_h, bname, configmod.grid_stamp(ctx.cfg))
-    if from_hour or generation is not None:
-        mk.update(from_hour=int(from_hour), generation=generation)
-    # The case folder boco-<domain> is shared by every source of the cycle with that domain name. Breakage this
-    # prevents: a parent nest (hourly files, SOURCE.json) overwrote a GFS nest's boco.0000 while the GFS marker
-    # BOCO-SOURCE.json still matched, so the next GFS run of that domain reused the parent's hourly boco.0000
-    # (tboco 3600 instead of 10800) and its moving segment asked for boco.0016 (P1 Ampil, 2026-11-05 06:29Z).
-    (out_dir / "SOURCE.json").unlink(missing_ok=True)          # parent_bocos' marker: its files are gone
-    (out_dir / "BOCO-SOURCE.json").write_text(json.dumps(mk))
-    log(f"{UNIT}: {len(files) - 1} boco files from the {age_h} h old cycle "
+    if only is None:
+        import json
+        from namgpu import config as configmod
+        mk = _marker(ctx.start, hours, files, age_h, interval_h, bname, configmod.grid_stamp(ctx.cfg))
+        if from_hour or generation is not None:
+            mk.update(from_hour=int(from_hour), generation=generation)
+        # The case folder boco-<domain> is shared by every source of the cycle with that domain name. Breakage this
+        # prevents: a parent nest (hourly files, SOURCE.json) overwrote a GFS nest's boco.0000 while the GFS marker
+        # BOCO-SOURCE.json still matched, so the next GFS run of that domain reused the parent's hourly boco.0000
+        # (tboco 3600 instead of 10800) and its moving segment asked for boco.0016 (P1 Ampil, 2026-11-05 06:29Z).
+        (out_dir / "SOURCE.json").unlink(missing_ok=True)          # parent_bocos' marker: its files are gone
+        (out_dir / "BOCO-SOURCE.json").write_text(json.dumps(mk))
+    log(f"{UNIT}: {written} boco files from the {age_h} h old cycle "
         f"({ctx.start - timedelta(hours=age_h):%Y-%m-%d %HZ}) in {out_dir}")
     del st, bctx
     from namgpu import devmem  # noqa: PLC0415
     devmem.release()
     return out_dir
+
+
+def resume_check(ctx, from_fhr: float, hours: float, log=print, build_fn=None) -> list:
+    """A resumed run (woof-nam run --resume): before its first step, every boco file from the resume hour to the
+    run's end is there, or is built now from the raw boundary inputs in the case folder (the missing files only,
+    the others are left as they are); when those inputs are not there either, stop here in one line naming the `woof-nam fetch`
+    that brings them. Returns the names built. Breakage it prevents: `--resume <run>/restart --hours 60` after a run
+    made with `--hours 20` stopped at +21 h with FileNotFoundError boco.0021, because the init had built the
+    boundary files only to the first run's end (nam-gust case 2022-01-03 12Z, 2026-11-11 02:02Z)."""
+    from namgpu.domains import bc_hours
+    from namgpu.init import sources as srcmod
+    _, row = srcmod.source_row(ctx)
+    if row["kind"] == "nam_history":
+        # one-way nest: the boundaries come from the parent's history, as the init builds them (parent_bocos)
+        from namgpu import config as configmod
+        from namgpu.init import parent_bocos
+        out_dir = Path(ctx.case_dir) / configmod.boco_dirname(ctx.cfg)
+        if not parent_bocos.current(out_dir, int(hours + 0.999), ctx):
+            parent_bocos.build(ctx, int(hours + 0.999), out_dir)
+        return []
+    bname, brow = boundary_row(ctx)
+    interval = int(brow["boundary"]["interval_h"])
+    total = bc_hours(hours, interval)
+    bdir = Path(getattr(ctx, "boco_dir", None) or boco_dir(ctx))
+    first = int(float(from_fhr) // interval) * interval
+    missing = [fh for fh in range(first, total, interval) if not (bdir / f"boco.{fh:04d}").is_file()]
+    if not missing:
+        return []
+    names = f"boco.{missing[0]:04d}" + (f" to boco.{missing[-1]:04d}" if len(missing) > 1 else "")
+    need = set(missing) | {fh + interval for fh in missing}     # the two boundary times of each missing interval
+    raw = [p for fh, p in source_files(ctx.case_dir, ctx.start, total, brow, ctx.cfg) if fh in need]
+    absent = [p for p in raw if not p.is_file()]
+    if absent:
+        age = srcmod.boco_age_h(brow, ctx.cfg, start=ctx.start)
+        src = getattr(ctx, "init_source", None) or bname
+        one = absent[0].relative_to(ctx.case_dir) if absent[0].is_relative_to(ctx.case_dir) else absent[0]
+        raise SystemExit(
+            f"resume to +{float(hours):g} h needs {names} in {bdir}, and {len(absent)} of their {bname} inputs are "
+            f"not in {ctx.case_dir} (first: {one}). "
+            f"Bring them, then resume again: woof-nam fetch --cycle {ctx.start:%Y%m%d%H} --hours {total} "
+            f"--case-dir {ctx.case_dir} --source {src} --boco-age {age} --inputs-only")
+    log(f"{UNIT}: resume to +{float(hours):g} h: building {names} in {bdir} from the {bname} inputs in the case folder")
+    # Only the missing files are written. A file that is there is the one the first leg (or an earlier resume) built
+    # from the same inputs, and another run of the same case may be reading it; building it again would cost one
+    # decode and one interpolation per file for the same bytes.
+    (build_fn or build)(ctx, total, bdir, log=log, from_hour=missing[0], only=missing)
+    ctx.boco_dir = str(bdir)
+    return [f"boco.{fh:04d}" for fh in missing]
 
 
 def run(ctx, hours: int | None = None):

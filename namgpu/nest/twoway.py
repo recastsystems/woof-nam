@@ -19,8 +19,8 @@ What NMMB does and this port follows (nam.v4.2.11, 83df4e13c1; NMMB core, US gov
   two-way    module_NESTING.F90:12355-12670 CHILD_2WAY_BOOKKEEPING (update points, here once), 12671-12904
              GENERATE_2WAY_DATA, module_PARENT_CHILD_CPL_COMP.F90:22032-22458 PARENT_2WAY_UPDATE: kernels/nest_2way.cu.
              Fields T, Q, CW (H) and U, V (V); PD is not fed back. Weight 2way_wgt (NMMB's own 2-way test: 1.0).
-Not ported: the NEMS/ESMF framework and the MPI exchange between task sets (one process needs no messages; the LGPL
-NEMS tree was not read); moving nests (COMPUTE_STORM_MOTION, MOVING_NEST_BOOKKEEPING; the NAM nests did not move).
+Not ported: the NEMS/ESMF framework and the MPI exchange between task sets (one process needs no messages); moving
+nests (COMPUTE_STORM_MOTION, MOVING_NEST_BOOKKEEPING; the NAM nests did not move).
 Differences from NAM, stated: each domain runs its own TDFI before the coupled loop (the nest's filter takes its own
 start-source boundaries); the nest starts from its own source analysis at its own resolution (NAM's input_ready: true
 shape, without NAM's cycled 3 km first guess and GSI). The operational NAM ran its nests concurrent one-way

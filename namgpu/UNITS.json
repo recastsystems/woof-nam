@@ -5,9 +5,9 @@
   "case": "cases/2025-03-14_12z",
   "done_rule": "kernel compiles; wrapper runs once on a full-size random State without NaN/Inf; Fortran-to-CUDA diff review finds no missing term (CONTRACT.md section 6)",
   "counts": {
-    "port": 213,
+    "port": 212,
     "skip": 42,
-    "new": 27,
+    "new": 28,
     "copy-arwen": 37,
     "total": 319
   },
@@ -1535,9 +1535,9 @@
     {
       "id": "io-wind-rotate",
       "group": "io",
-      "fortran": "sorc/nam_post0.fd/PROF_NMMB.f:2115-2150,2232-2237",
-      "purpose": "Rotate grid-relative V-point winds (3-D and 10 m) to earth-relative H-point winds: each in-domain V neighbour rotated with its exact inverse of init-gfs-wind-rotate's map, then averaged (decision: pole inside domain, see kernel). In: U, V, U10, V10 -> UEARTH, VEARTH, UE10, VE10.",
-      "mode": "port",
+      "fortran": "-",
+      "purpose": "Earth-relative winds at H points for the history, maps and products: U10/V10 (H points) turned with the H-point angle between grid i and geographic east from the rotated-pole map; U/V (V points) averaged to H over the four V neighbours in grid components, then turned. In: U, V, U10, V10 -> UEARTH, VEARTH, UE10, VE10.",
+      "mode": "new",
       "deps": [],
       "wrapper": "namgpu.io.io_wind_rotate",
       "kernel": "namgpu/kernels/io_wind_rotate.cu",
@@ -2495,7 +2495,7 @@
       "wrapper": "namgpu.physics.noah.phys_noah_parm_tables",
       "kernel": "",
       "status": "done",
-      "note": "standalone kernel: tools/check-phys-noah-parm-tables.py PASS; tables are fix/noah (WRF V3.0 MODIFIED_IGBP_MODIS_NOAH, STAS): the NCEP NAM fix VEGPARM.TBL is a named gap"
+      "note": "standalone kernel: tools/check-phys-noah-parm-tables.py PASS; tables are fix/noah (NCEP NMMB IGBP VEGPARM and GENPARM from the HMON v3.2.13 fix set; SOILPARM WRF V3.0 STAS, a named gap)"
     },
     {
       "id": "phys-noah-driver",

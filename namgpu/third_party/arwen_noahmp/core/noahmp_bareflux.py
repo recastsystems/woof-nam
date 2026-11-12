@@ -17,9 +17,9 @@ to float32 through :func:`~namgpu.third_party.arwen_noahmp.core.noahmp_libm.f32`
 gfortran rounds, and every expression is grouped the way Fortran's
 left-to-right associativity for equal-precedence operators groups it.  Where
 the Fortran writes ``LOG``, ``ATAN`` or ``**0.25`` on a REAL(4), gfortran emits
-a call to glibc ``logf`` / ``atanf`` / ``powf``; those are *not* correctly
-rounded and are taken from :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, which reproduces
-glibc 2.39's own algorithms.  ``SQRT`` is the hardware ``sqrtss``, which is
+a call to the reference libm's ``logf`` / ``atanf`` / ``powf``; those are *not* correctly
+rounded and are taken from :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm`, which matches
+them bit for bit.  ``SQRT`` is the hardware ``sqrtss``, which is
 correctly rounded, so :func:`math.sqrt` on a float32-rounded operand matches.
 
 Pinned option identity

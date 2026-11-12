@@ -30,8 +30,8 @@ Precision contract
 left-to-right, precedence-respecting evaluation orders it, because at
 ``-O0 -ffp-contract=off`` gfortran neither reassociates nor contracts.
 
-``EXP``/``LOG``/``**`` are glibc calls in the oracle, so they route through
-:mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm` (glibc 2.39 ``expf``/``logf``/``powf``), never
+``EXP``/``LOG``/``**`` are calls into the reference libm in the oracle, so they route through
+:mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm` (FP32 ``expf``/``logf``/``powf``), never
 through numpy or ``math``.  ``SQRT`` is IEEE-correctly-rounded and maps to
 ``np.sqrt`` on float32, matching the ``sqrtss`` gfortran emits inline.
 

@@ -17,7 +17,7 @@ module's conventions:
 * ``kind_phys`` is ``kind(1.0)``, i.e. FP32.  Every literal is materialised as
   ``np.float32`` so no expression silently widens.
 * Transcendentals go through ``namgpu.third_party.arwen_noahmp.core.noahmp_libm``.  gfortran on x86-64
-  lowers ``EXP``/``LOG``/``ATAN`` to glibc's ``expf``/``logf``/``atanf`` and a
+  lowers ``EXP``/``LOG``/``ATAN`` to the reference libm's ``expf``/``logf``/``atanf`` and a
   **real** constant exponent -- ``x**0.5``, ``x**0.25``, ``x**(-0.25)`` -- to
   ``powf``, none of which is correctly rounded.  An **integer** constant
   exponent is different again: ``FV**3`` becomes libgcc's ``__powisf2``, which
@@ -67,7 +67,7 @@ CPAIR = F(1004.64)
 
 
 def _sqrtf(x) -> np.float32:
-    """``SQRT`` on REAL(4).  glibc's ``sqrtf`` is the SSE instruction, which is
+    """``SQRT`` on REAL(4).  The reference libm's ``sqrtf`` is the SSE instruction, which is
     correctly rounded, so numpy agrees with it bit for bit."""
     return np.sqrt(F(x), dtype=F)
 

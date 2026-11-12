@@ -8,8 +8,8 @@
 // output vector, so parity is checked slot for slot with no repacking.
 //
 // COMPOSITION: this translation unit is compiled *after* noahmp_leaves.cu (see
-// gpuwm/core/noahmp_thermal_gpu.py).  PHASECHANGE and FRH2O need glibc 2.39's
-// powf and logf, and there must be exactly one transcription of those on the
+// gpuwm/core/noahmp_thermal_gpu.py).  PHASECHANGE and FRH2O need the reference libm's
+// powf and logf, and there must be exactly one implementation of those on the
 // device -- two copies could drift and only one of them would be audited.  The
 // arithmetic macros and the module constants below are #ifndef-guarded so this
 // file is still self-consistent if that prefix ever changes shape.
@@ -350,7 +350,7 @@ void noahmp_thermal_tsnosoi(const real* __restrict__ xs,
 // (:5666-5667, :5687, :5804-5805).  XMF (:5646, :5751, :5789) accumulates into
 // a local that nothing reads, so it is not computed here.
 //
-// r_pow is glibc 2.39's powf, transcribed once in noahmp_leaves.cu: gfortran
+// r_pow is our FP32 powf, implemented once in noahmp_leaves.cu: gfortran
 // routes `x ** y` with a REAL exponent through powf, and neither CUDA's powf
 // nor "FP64 then round once" reproduces it.
 
@@ -617,7 +617,7 @@ void noahmp_thermal_phasechange(const real* __restrict__ xs,
 // ISOIL is a pure index and is fixed at 1, so BEXP, PSISAT and SMCMAX arrive
 // as scalars.  DICE (:5852) is a named constant the body never uses.
 //
-// ALOG is glibc's logf and `x ** y` is glibc's powf: r_log and r_pow, from
+// ALOG is the reference libm's logf and `x ** y` is the reference libm's powf: r_log and r_pow, from
 // noahmp_leaves.cu.  CUDA's own logf/powf are different functions.
 
 __constant__ real NMP_FRH2O_CONST[3] = { 8.0f, 5.5f, 0.005f };  // CK BLIM ERR

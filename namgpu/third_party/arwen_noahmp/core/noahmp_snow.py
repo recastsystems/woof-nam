@@ -31,9 +31,9 @@ fixture rather than by comment alone:
   fixture under ``-finit-real=snan`` and requiring byte-identical output.
 
 COMPACT is the only leaf in this file that evaluates a transcendental.  It
-calls :func:`namgpu.third_party.arwen_noahmp.core.noahmp_libm.expf`, the verified glibc transcription,
+calls :func:`namgpu.third_party.arwen_noahmp.core.noahmp_libm.expf`, the verified FP32 implementation,
 because neither ``numpy.exp`` on float32 nor "compute in float64 and round
-once" reproduces glibc's ``expf`` bit for bit.
+once" reproduces the reference libm's ``expf`` bit for bit.
 """
 
 from __future__ import annotations

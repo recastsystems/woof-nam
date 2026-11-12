@@ -40,6 +40,40 @@ import time
 
 _STATE: dict = {}
 _HITS = [0, 0.0]     # requests that met the cap (each returned the unused whole blocks first), host seconds in them
+_GATE = [None]       # the run's card gate (namgpu.cardgate.Forecast) when a GRIB2 follower shares the card
+
+
+def card_gate(gate) -> None:
+    """Register the run's card gate (run_forecast, when it starts the GRIB2 follower). From then on a request that
+    the driver refuses although the pool may take it claims the card from the follower and is asked again
+    (namgpu.cardgate says what broke without it), and release() hands the card back. The gate's state line says from
+    now on that the forecast is on the card; each release() says it gave memory back (the follower reruns a refused
+    stage then, cardgate.wait_release)."""
+    _GATE[0] = gate
+    if gate is not None and hasattr(gate, "running"):
+        gate.running()
+
+
+def card_release() -> None:
+    """Hand the card back to the follower (release() does it at every release point)."""
+    g = _GATE[0]
+    if g is not None and g.claimed():
+        g.release()
+
+
+def card_end() -> None:
+    """The step loop has ended (the door calls this): hand the card back and say so in the gate's state line, so a
+    follower never waits on a forecast that is only writing its receipt and maps, and its later refusals count as
+    someone else's memory."""
+    card_release()
+    g = _GATE[0]
+    if g is not None and hasattr(g, "ended"):
+        g.ended()
+
+
+def _claim_card(n: int) -> bool:
+    g = _GATE[0]
+    return bool(g is not None and g.claim(int(n)))
 
 
 def _round(n: int) -> int:
@@ -98,6 +132,11 @@ def setup() -> dict:
                                     break
                                 except OOM:
                                     if pool.total_bytes() + _round(n) <= pool.get_limit():
+                                        # the driver has no memory for a request the pool may take: with a GRIB2
+                                        # follower on the card, wait until its work in flight has ended and ask
+                                        # again (cardgate); a second refusal with the card claimed is a real one
+                                        if _claim_card(n):
+                                            continue
                                         raise
                                     continue
                             top = _STATE.get("ceiling", ceiling)   # lowered to the forecast's at forecast_start
@@ -196,6 +235,10 @@ def release(stream=None) -> int:
         cp.cuda.Device().synchronize()
     before = p.total_bytes()
     p.free_all_blocks()
+    card_release()                   # the memory a claim was for is back with the driver: the follower goes on
+    g = _GATE[0]
+    if g is not None and hasattr(g, "released"):
+        g.released()                 # a follower stage refused card memory reruns now (cardgate.wait_release)
     return int(before - p.total_bytes())
 
 
@@ -229,4 +272,7 @@ def stats() -> dict:
         if "init_reserved_high_gib" in _STATE:
             out.update(init_reserved_high_gib=_STATE["init_reserved_high_gib"])
         out.update(cap_hits=_HITS[0], cap_hit_s=round(_HITS[1], 3))
+    if _GATE[0] is not None:
+        # times the driver refused the forecast while the GRIB2 follower held memory, and the seconds waited for it
+        out.update(card_claims=_GATE[0].claims, card_wait_s=round(_GATE[0].waited_s, 2))
     return out

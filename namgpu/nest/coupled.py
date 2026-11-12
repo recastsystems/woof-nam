@@ -617,6 +617,8 @@ def launch(a, argv) -> int:
     idfile.unlink(missing_ok=True)
     shutil.rmtree(str(idfile) + ".hostcomm", ignore_errors=True)
     shm = Path("/dev/shm") / f"namgpu-coupled-{os.getpid()}"
+    from namgpu.io import scratch as _scr
+    _scr.own(shm.parent)               # this process is alive for a sweep in any PID namespace (scratch.own)
     shutil.rmtree(shm, ignore_errors=True)
     shm.mkdir(parents=True)
     writers = []

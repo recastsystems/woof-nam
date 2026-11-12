@@ -270,7 +270,7 @@ gas_update reopens the CO2 file during the forecast. Paths a unit writes must be
 | module_MICROPHYSICS (GSMDRIVE -> FER_HIRES) | T, Q, CW, F_ICE, F_RAIN, F_RIMEF, QC/QR/QS, PREC, ACPREC, SR, TRAIN, REFL_10CM, AVRAIN | `ctx.st` |
 | module_DIAGNOSE (MAX_FIELDS_HR), module_QUASIPOST | hourly maxima (REFDMAX, UPHLMAX, ...), MSLP, ... | `ctx.st`, then history |
 | module_DIGITAL_FILTER_NMM | filtered initial state | `ctx.st` |
-| io-wind-rotate (port of PROF_NMMB.f rotation) | UEARTH, VEARTH (earth-relative H-point winds, 3-D); UE10, VE10 (10 m) | `ctx.st` |
+| io-wind-rotate (no Fortran routine; rotated-pole map, namgpu/io/io_wind_rotate.py) | UEARTH, VEARTH (earth-relative winds at H points, LM levels), UE10, VE10 | `ctx.st` history scratch, then history U, V, U10, V10 |
 
 ## 5. NAM 12 km CONUS parent configuration (namgpu/parm/nam_configfile)
 

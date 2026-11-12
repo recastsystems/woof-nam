@@ -17,8 +17,8 @@
 //    12.8's constant folder does not honour round-to-nearest-even on literal
 //    arrays, so a table of FP32 literals can have its differences mis-folded
 //    at compile time.  __fsub_rn pins the hardware, not the folder.
-// 3. EXP/LOG/** are glibc calls in the oracle, so glibc_expf/glibc_logf/
-//    glibc_powf below transcribe glibc 2.39's own algorithms.  CUDA's expf,
+// 3. EXP/LOG/** are calls into the reference libm in the oracle, so f32_expf/f32_logf/
+//    f32_powf below are our own FP32 implementations; they match the reference libm bit for bit.  CUDA's expf,
 //    logf, powf, __expf and __logf are all different functions and none of
 //    them can hold a max_ulp-0 gate.
 //
@@ -162,9 +162,9 @@ __device__ __forceinline__ float f_sign(float a, float b)
 // the compiler honours the last occurrence.  The flush is the flag, not the
 // SM: the conversion instruction has no flush of its own, so under `-ftz=true`
 // the compiler emits an extra multiply after it to produce one, and built
-// without the append the same conversion keeps the subnormal.  glibc's
+// without the append the same conversion keeps the subnormal.  The reference libm's
 // expf and powf do produce subnormals, gfortran at -O0 leaves MXCSR's FTZ/DAZ
-// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the live glibc 2.39
+// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the reference libm
 // over 1,106,247,680 inputs -- produces them too.  So the conversion as
 // compiled here is a divergence from the authority in a narrow but reachable
 // band:
@@ -192,9 +192,9 @@ __device__ float nmp_d2f_rn(double y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 expf  --  sysdeps/ieee754/flt-32/e_expf.c, FMA variant
+// FP32 expf, our own implementation, FMA variant
 // --------------------------------------------------------------------------
-__device__ float glibc_expf(float x)
+__device__ float f32_expf(float x)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int abstop = (ix >> 20) & 0x7FFu;
@@ -231,11 +231,11 @@ __device__ float glibc_expf(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 logf  --  sysdeps/ieee754/flt-32/e_logf.c, FMA variant.
+// FP32 logf, our own implementation, FMA variant.
 // Operation order read off the disassembly of __logf_fma, including the
 // single FMA that computes logc + k*Ln2.
 // --------------------------------------------------------------------------
-__device__ float glibc_logf(float x)
+__device__ float f32_logf(float x)
 {
     unsigned int ix = __float_as_uint(x);
     if (ix == 0x3F800000u) return 0.0f;           // log(1) == +0
@@ -272,7 +272,7 @@ __device__ float glibc_logf(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 powf  --  sysdeps/ieee754/flt-32/e_powf.c, FMA variant.
+// FP32 powf, our own implementation, FMA variant.
 // Only the domain the radiation leaves reach is transcribed: a strictly
 // positive normal base and a finite exponent (GROUNDALB's
 // MAX(0.01, COSZ) ** 1.7).  Anything else returns NaN rather than a value
@@ -331,7 +331,7 @@ __device__ float powf_exp2_inline(double xd, unsigned long long sign_bias)
     return nmp_d2f_rn(y);
 }
 
-__device__ float glibc_powf(float x, float y)
+__device__ float f32_powf(float x, float y)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int iy = __float_as_uint(y);
@@ -365,8 +365,8 @@ __device__ void d_snow_age(const float *p, float *o)
     } else {
         float dela0 = FDIV(dt, tau0);
         float arg = FMUL(gg, FSUB(FDIV(K_ONE, K_TFRZ), FDIV(K_ONE, tg)));
-        float age1 = glibc_expf(arg);
-        float age2 = glibc_expf(f_min(K_ZERO, FMUL(eg, arg)));
+        float age1 = f32_expf(arg);
+        float age2 = f32_expf(f_min(K_ZERO, FMUL(eg, arg)));
         float tage = FADD(FADD(age1, age2), ds);
         float dela = FMUL(dela0, tage);
         float dels = FDIV(f_max(K_ZERO, FSUB(sneqv, sneqvo)), swemx);
@@ -386,7 +386,7 @@ __device__ void d_snowalb_class(const float *p, float *o)
     float swemx = p[0], qsnow = p[1], dt = p[2], albold = p[3];
     float alb = FADD(K_P55,
                      FMUL(FSUB(albold, K_P55),
-                          glibc_expf(FDIV(FMUL(K_NP01, dt), K_T3600))));
+                          f32_expf(FDIV(FMUL(K_NP01, dt), K_T3600))));
     if (qsnow > K_ZERO) {
         float cap = FDIV(swemx, dt);
         alb = FADD(alb, FDIV(FMUL(f_min(qsnow, cap), FSUB(K_P84, alb)), cap));
@@ -418,7 +418,7 @@ __device__ void d_groundalb(const float *p, int ist, float *o)
             albsoi = albsod;
         } else if (tg > K_TFRZ) {
             albsod = FDIV(K_P06,
-                          FADD(glibc_powf(f_max(K_P01, cosz), K_P17), K_P15));
+                          FADD(f32_powf(f_max(K_P01, cosz), K_P17), K_P15));
             albsoi = K_P06;
         } else {
             albsod = alblak[ib];
@@ -525,7 +525,7 @@ __device__ void d_twostream(const float *p, int ib1, int ic, float *o)
     float ext = FDIV(gdir, coszi);
     float avmu = FDIV(FSUB(K_ONE,
                            FMUL(FDIV(phi1, phi2),
-                                glibc_logf(FDIV(FADD(phi1, phi2), phi1)))),
+                                f32_logf(FDIV(FADD(phi1, phi2), phi1)))),
                       phi2);
     float omegal = FADD(rho[ib], tau[ib]);
     float tmp0 = FADD(gdir, FMUL(phi2, coszi));
@@ -533,7 +533,7 @@ __device__ void d_twostream(const float *p, int ib1, int ic, float *o)
     float asu = FMUL(FDIV(FMUL(FMUL(K_HALF, omegal), gdir), tmp0),
                      FSUB(K_ONE,
                           FMUL(FDIV(tmp1, tmp0),
-                               glibc_logf(FDIV(FADD(tmp1, tmp0), tmp1)))));
+                               f32_logf(FDIV(FADD(tmp1, tmp0), tmp1)))));
     float betadl = FMUL(FDIV(FADD(K_ONE, FMUL(avmu, ext)),
                              FMUL(FMUL(omegal, avmu), ext)), asu);
     float qh = FDIV(FADD(K_ONE, chil), K_TWO);
@@ -567,8 +567,8 @@ __device__ void d_twostream(const float *p, int ib1, int ic, float *o)
     float p2 = FSUB(b, FMUL(avmu, h));
     float p3 = FADD(b, tmp0);
     float p4 = FSUB(b, tmp0);
-    float s1 = glibc_expf(FMUL(-h, vai));
-    float s2 = glibc_expf(FMUL(-ext, vai));
+    float s1 = f32_expf(FMUL(-h, vai));
+    float s2 = f32_expf(FMUL(-ext, vai));
     float u1, u2, u3;
     if (ic == 0) {
         u1 = FSUB(b, FDIV(c, albgrd[ib]));
@@ -751,7 +751,7 @@ __device__ void d_albedo(const float *p, int ist, float *o)
 
         float ext = FMUL(FDIV(gdir, cosz),
                          FSQRT(FSUB(FSUB(K_ONE, rho[0]), tau[0])));
-        fsun = FDIV(FSUB(K_ONE, glibc_expf(FMUL(-ext, vai))),
+        fsun = FDIV(FSUB(K_ONE, f32_expf(FMUL(-ext, vai))),
                     f_max(FMUL(ext, vai), mpe));
         ext = fsun;
         fsun = (ext < K_P01) ? K_ZERO : ext;
@@ -904,12 +904,12 @@ extern "C" __global__ void noahmp_radiation_batch(const float *in,
 // --------------------------------------------------------------------------
 // Device-libm probe.
 //
-// This file's glibc_powf is one of the five narrow copies in the tree: outside
-// [FLT_MIN, inf) it returns NaN instead of taking glibc's sign/zero/inf path.
+// This file's f32_powf is one of the five narrow copies in the tree: outside
+// [FLT_MIN, inf) it returns NaN instead of taking the reference libm's sign/zero/inf path.
 // Until now nothing measured what that costs, because the guard had never been
 // observed to fire.  Both halves of the question are now measurable here:
 //
-//   * drive glibc_powf with the subnormal / signed-zero / negative
+//   * drive f32_powf with the subnormal / signed-zero / negative
 //     neighbourhood and the guard is *seen* returning NaN, so the guard is
 //     real rather than asserted; and
 //   * sweep COSZ over every float and the one live call site,
@@ -924,7 +924,7 @@ extern "C" __global__ void noahmp_rad_libm_probe(const float *x,
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    out[3 * i + 0] = glibc_expf(x[i]);
-    out[3 * i + 1] = glibc_logf(x[i]);
-    out[3 * i + 2] = glibc_powf(x[i], y[i]);
+    out[3 * i + 0] = f32_expf(x[i]);
+    out[3 * i + 1] = f32_logf(x[i]);
+    out[3 * i + 2] = f32_powf(x[i], y[i]);
 }

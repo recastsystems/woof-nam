@@ -18,7 +18,7 @@
 // either re-transcribing them -- which is the one thing a composition lane
 // must not do -- or pulling five .cu files into one translation unit, which is
 // blocked by exactly the obstacle noahmp_energy.cu records: several of those
-// files each define their own glibc_logf / glibc_expf / glibc_powf / f_min /
+// files each define their own f32_logf / f32_expf / f32_powf / f_min /
 // f_max, so any two of them together are duplicate definitions.  Hoisting a
 // single device libm is a real and worthwhile refactor across four other
 // lanes' files, and it is not this lane's to make.

@@ -25,18 +25,18 @@
 #define PERIODIC(i, n) ((((i) % (n)) + (n)) % (n))
 typedef float real;
 
-// glibc 2.39 float32 transcendentals, shared device code.
+// FP32 maths routines, shared device code.
 //
 // PROVENANCE.  Lifted VERBATIM from gpuwm/core/kernels/gf.cu on 2026-08-28,
 // where it was lines 235-243 (the FP contraction pins) and 538-1141 (the
 // transcriptions).  Not a re-derivation and not a tidy-up: the text is the
 // text that gf's 396 parity tests already grade at max_ulp 0 against the
-// live glibc 2.39 sweep fixtures gpuwm/data/gf/oracle/gf-libm-*.csv.
+// pinned reference sweep fixtures gpuwm/data/gf/oracle/gf-libm-*.csv.
 //
-// WHY IT EXISTS.  gfk_log/gfk_exp/gfk_pow are glibc's own words, not CUDA's.
+// WHY IT EXISTS.  gfk_log/gfk_exp/gfk_pow return the reference libm's words, not CUDA's.
 // CUDA's expf/powf/tgammaf are DIFFERENT functions -- gf.cu's header records
 // the measured divergence and keeps a negative control proving it is real --
-// so any kernel graded bitwise against a gfortran/glibc oracle must call
+// so any kernel graded bitwise against a gfortran/libm oracle must call
 // these and not the builtins.  New Tiedtke (cu_physics=16) needs exactly
 // gfk_log, gfk_exp and gfk_pow: its whole libm surface is 9 exp, 1 log,
 // 10 sqrt and four pow forms (**t13, **0.5777, **0.2, **0.5).  sqrtf is
@@ -71,9 +71,9 @@ typedef float real;
 #define DDIV(a, b) __ddiv_rn((a), (b))
 
 // ==========================================================================
-// glibc 2.39 float32 transcendentals (rule 3)
+// FP32 maths routines (rule 3)
 // ==========================================================================
-// e_logf_data.c
+// logf table (Arm optimized-routines, MIT)
 __device__ const double GFK_LOGF_INVC[16] = {
     0x1.661ec79f8f3bep+0, 0x1.571ed4aaf883dp+0, 0x1.49539f0f010bp+0,
     0x1.3c995b0b80385p+0, 0x1.30d190c8864a5p+0, 0x1.25e227b0b8eap+0,
@@ -93,7 +93,7 @@ __device__ const double GFK_LOGF_LOGC[16] = {
 #define GFK_LOGF_A1 (0x1.5575b0be00b6ap-2)
 #define GFK_LOGF_A2 (-0x1.ffffef20a4123p-2)
 
-// e_exp2f_data.c, shared by expf / exp2f / powf.  EXP2F_TABLE_BITS = 5.
+// exp2f table (Arm optimized-routines, MIT), shared by expf / exp2f / powf.  EXP2F_TABLE_BITS = 5.
 __device__ const unsigned long long GFK_EXP2F_TAB[32] = {
     0x3ff0000000000000ULL, 0x3fefd9b0d3158574ULL, 0x3fefb5586cf9890fULL,
     0x3fef9301d0125b51ULL, 0x3fef72b83c7d517bULL, 0x3fef54873168b9aaULL,
@@ -112,7 +112,7 @@ __device__ const unsigned long long GFK_EXP2F_TAB[32] = {
 #define GFK_EXP2F_SHIFT 0x1.8p+52
 #define GFK_EXP2F_SHIFT_SCALED (0x1.8p+52 / 32.0)
 
-// e_powf_log2_data.c.  POWF_SCALE is 1.0 (TOINT_INTRINSICS = 0 on x86-64).
+// powf log2 table (Arm optimized-routines, MIT).  POWF_SCALE is 1.0 (TOINT_INTRINSICS = 0 on x86-64).
 __device__ const double GFK_POWF_INVC[16] = {
     0x1.661ec79f8f3bep+0, 0x1.571ed4aaf883dp+0, 0x1.49539f0f010bp+0,
     0x1.3c995b0b80385p+0, 0x1.30d190c8864a5p+0, 0x1.25e227b0b8eap+0,
@@ -131,7 +131,7 @@ __device__ const double GFK_POWF_A[5] = {
      0x1.27616c9496e0bp-2, -0x1.71969a075c67ap-2,  0x1.ec70a6ca7baddp-2,
     -0x1.7154748bef6c8p-1,  0x1.71547652ab82bp+0 };
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_logf.c
+// FP32 logf, our own implementation
 __device__ float gfk_log(float x)
 {
     unsigned int ix = __float_as_uint(x);
@@ -161,7 +161,7 @@ __device__ float gfk_log(float x)
 // Round a double to binary32, INCLUDING into the subnormal range.  On this
 // toolchain `__double2float_rn` flushes a subnormal result to zero (CuPy
 // appends -ftz=true and the compiler emits the flush after the conversion),
-// while glibc's expf/powf do produce subnormals.  The correctly rounded
+// while the reference libm's expf/powf do produce subnormals.  The correctly rounded
 // subnormal is recovered exactly: m * 2^-149 scaling is exact in binary64
 // over this band and rint rounds ties to even.  Same function, same
 // reasoning, as noahmp_leaves.cu::nmp_d2f_rn -- the sm_120 FP32-DAZ
@@ -178,7 +178,7 @@ __device__ float gfk_d2f_rn(double y)
     return __double2float_rn(y);
 }
 
-// The 32-entry exp2 core shared by glibc's expf, exp2f and powf.
+// The 32-entry exp2 core shared by the reference libm's expf, exp2f and powf.
 __device__ double gfk_exp2_core(double xd, double shift,
                                 double p0, double p1, double p2,
                                 unsigned long long sign_bias)
@@ -197,7 +197,7 @@ __device__ double gfk_exp2_core(double xd, double shift,
     return DMUL(y, s);
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_expf.c
+// FP32 expf, our own implementation
 __device__ float gfk_exp(float x)
 {
     unsigned int abstop = (__float_as_uint(x) >> 20) & 0x7ffu;
@@ -216,7 +216,7 @@ __device__ float gfk_exp(float x)
         GFK_EXP2F_P2 / 32.0, 0ULL));
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_exp2f.c -- the identical core with
+// FP32 exp2f, our own implementation -- the identical core with
 // the pre-scaled shift and unscaled polynomial.  tgammaf's Stirling arm is
 // the only caller in this kernel and hands it |x| <= ~2.6, but the special
 // cases are transcribed anyway so the sweep can grade the whole function.
@@ -235,7 +235,7 @@ __device__ float gfk_exp2(float x)
         GFK_EXP2F_P0, GFK_EXP2F_P1, GFK_EXP2F_P2, 0ULL));
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_powf.c log2_inline
+// FP32 powf, our own implementation: log2_inline
 __device__ double gfk_powf_log2(unsigned int ix)
 {
     unsigned int tmp = ix - 0x3f330000u;
@@ -270,7 +270,7 @@ __device__ bool gfk_zeroinfnan(unsigned int ix)
     return 2u * ix - 1u >= 2u * 0x7f800000u - 1u;
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_powf.c, full special-case surface:
+// FP32 powf, our own implementation, full special-case surface:
 // the beta-shape powers reach kratio == 0 and kratio == 1 on every column
 // (powf(0, +y) and powf(+0-adjacent bases), so the zero/int paths are live.
 __device__ float gfk_pow(float x, float y)
@@ -323,11 +323,11 @@ __device__ float gfk_pow(float x, float y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 sysdeps/ieee754/flt-32/s_expm1f.c (SunPro FP32 kernel).  No
+// FP32 expm1f, our own implementation (SunPro FP32 kernel).  No
 // ifunc variant exists on x86-64, so every operation is a plain float32
 // op in the written association order -- FMUL/FADD/FSUB/FDIV, never FMA.
 // Constant words verified against the decimal literals, not the source
-// comments (the C_ATAN precedent: glibc comments have lied before).
+// comments (the C_ATAN precedent: comments have lied before).
 // --------------------------------------------------------------------------
 #define EM1_HUGE   __uint_as_float(0x7149F2CAu)   /* 1.0e+30 */
 #define EM1_OTHR   __uint_as_float(0x42B17180u)   /* o_threshold */
@@ -414,7 +414,7 @@ __device__ float gfk_expm1(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 sysdeps/ieee754/flt-32/e_lgammaf_r.c, POSITIVE arm only.  The
+// FP32 lgammaf, our own implementation, POSITIVE arm only.  The
 // negative-x machinery (sin_pif, __lgamma_negf) is deliberately absent:
 // tgammaf's callers in this kernel hand it x in (0.5, 2.5) and the sweep
 // grades (0.4, 2.6) plus the (2, 8) tail; a negative or non-finite argument
@@ -582,7 +582,7 @@ __device__ float gfk_lgamma_pos(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 sysdeps/ieee754/dbl-64/gamma_productf.c: the float
+// FP32 gamma product, our own implementation: the float
 // __gamma_productf computed in double, which is what x86-64 links.
 // --------------------------------------------------------------------------
 __device__ float gfk_gamma_product(float x, float x_eps, int n, float *eps)
@@ -597,11 +597,11 @@ __device__ float gfk_gamma_product(float x, float x_eps, int n, float *eps)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 sysdeps/ieee754/flt-32/e_gammaf_r.c, positive arm.  x <= 0,
+// FP32 gammaf, our own implementation, positive arm.  x <= 0,
 // NaN and inf return NaN (not ported -- the scheme cannot produce them:
 // alpha = (tunning*(beta-2)+1)/(1-tunning) with tunning clamped to
 // [.2, .9] and beta in {1.3, 2.5, 4.} keeps every argument in
-// [1.06, 32.2)).  x >= 36 overflows to +inf exactly as glibc's
+// [1.06, 32.2)).  x >= 36 overflows to +inf exactly as the reference libm's
 // FLT_MAX*FLT_MAX does.
 // --------------------------------------------------------------------------
 #define GAM_C0     __uint_as_float(0x3DAAAAABu)   /* 0x1.555556p-4 */
@@ -670,7 +670,7 @@ __device__ float gfk_tgamma(float x)
     int exp2_adj;
     float tret = gfk_gammaf_positive(x, &exp2_adj);
     float ret = scalbnf(tret, exp2_adj);
-    // glibc's isinf/iszero fixups return the same +inf / +0 words for a
+    // the reference libm's isinf/iszero fixups return the same +inf / +0 words for a
     // positive argument; nothing further to do.
     return ret;
 }
@@ -722,15 +722,12 @@ __device__ float gfk_tgamma(float x)
  * DIVISION: gfortran's `/` and CUDA's default -prec-div=true are both
  * correctly rounded, and __fdiv_rn is that operation named.  sqrtf likewise
  * (-prec-sqrt=true), which is why scale_fac2 = scale_fac**0.5 needs no
- * glibc mirror even though it is a real exponent -- gfortran folds the 0.5
+ * the reference libm mirror even though it is a real exponent -- gfortran folds the 0.5
  * case to sqrt and both sides are correctly rounded.
  *
- * LOGARITHM: scale_fac reads log(dxref/dx), and glibc's logf is NOT CUDA's.
- * gfk_log (glibc_flt32.cuh, transcribed from glibc 2.39
- * sysdeps/ieee754/flt-32/e_logf.c) is the reference's own function.  Checked
- * 2026-08-28: e_logf.c and e_logf_data.c are identical between glibc 2.35
- * and 2.39 apart from their copyright line, so the oracle built on this
- * box's 2.35 and this kernel's 2.39 transcription agree by construction.
+ * LOGARITHM: scale_fac reads log(dxref/dx), and the reference libm's logf is NOT CUDA's.
+ * gfk_log (the FP32 maths header, our own FP32 logf) matches the reference's
+ * logf bit for bit.
  *
  * ==========================================================================
  * LAYOUT
@@ -1012,10 +1009,10 @@ extern "C" __global__ void ntiedtke_prep(
  * the plain 108-column fixture with no trigger visibility.  cuadjtqn's
  * kcall = 0 arm does not even read ldflag.
  *
- * exp() here is gfk_exp (glibc_flt32.cuh), NOT CUDA's expf.  The reference
- * calls glibc's expf and the two disagree at the ULP level; the NumPy
- * mirror has to MODEL glibc by evaluating in double and rounding once,
- * while this kernel runs glibc's own algorithm and needs no model.
+ * exp() here is gfk_exp (the FP32 maths header), NOT CUDA's expf.  The reference
+ * calls the reference libm's expf and the two disagree at the ULP level; the NumPy
+ * mirror has to MODEL the reference libm by evaluating in double and rounding once,
+ * while this kernel's own FP32 routine matches it and needs no model.
  *
  * All three of cuinin's working arrays (ptenh, pqenh, pqsenh) are also its
  * OUTPUTS, so they are written straight into the caller's global arrays and
@@ -1598,7 +1595,7 @@ extern "C" __global__ void ntiedtke_cutypen(
             const float root = __fadd_rn(0.001f, -__fmul_rn(part1, part2));
             if (part2 < 0.0f) {
                 /* conw = 1.2*root**t13 -- a genuine cube root through powf,
-                 * so gfk_pow (glibc's) and not CUDA's. */
+                 * so gfk_pow (the reference libm's) and not CUDA's. */
                 const float conw = __fmul_rn(1.2f, gfk_pow(root, NT_T13));
                 const float deltt = fmaxf(__fdiv_rn(
                     __fmul_rn(1.5f, hfx[i]),

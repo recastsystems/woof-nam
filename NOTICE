@@ -21,8 +21,8 @@ Origins
 |                                | namgpu/third_party/arwen_noahmp/,                   |                               |
 |                                | namgpu/physics/{myj,jsfc,noah,ruc,ysu,mynn,gf,      |                               |
 |                                | ntiedtke,arwen_mp,noahmp,rrtmg_wrf,rrtmgp}/         |                               |
-| FP32 libm transcriptions in    | namgpu/third_party/arwen*/core/kernels/ (glibc      | MIT (Arm optimized-routines), |
-| ArWen kernels (glibc 2.39)     | float routines; LICENSE-third-party.txt beside them)| FDLIBM/SunPro notice          |
+| FP32 maths routines in ArWen   | namgpu/third_party/arwen*/core/kernels/ (our own    | MIT (Arm optimized-routines), |
+| kernels                        | implementation; LICENSE-third-party.txt beside them)| FDLIBM/SunPro notice          |
 | NOAA-GSL UGWP drag suite       | namgpu/kernels/phys_ugwp_oro.cu,                    | Apache-2.0 (NOAA-GSL/UGWP     |
 |                                | namgpu/physics/gwd/phys_ugwp_driver.py,             | LICENSE, commit 4108d491470c; |
 |                                | tools/ugwp-oro/                                     | LICENSE-UGWP-Apache-2.0.txt)  |
@@ -36,7 +36,9 @@ Origins
 |                                | (namgpu/physics/rrtmg_wrf/)                         |                               |
 | TEMPO microphysics (NCAR/NOAA) | runs from gpuwm-hex (hexcore), not shipped here;    | Apache-2.0                    |
 |                                | glue namgpu/kernels/phys_tempo_driver.cu            |                               |
-| WRF Noah tables (stand-in)     | namgpu/data/fix/noah/, namgpu/data/noah_tables/     | WRF public-domain statement   |
+| NCEP NMMB Noah tables (HMON    | namgpu/data/fix/noah/ (PROVENANCE.txt)              | US Government data            |
+| fix set)                       |                                                     |                               |
+| WRF Noah tables (v4.6.1)       | namgpu/data/noah_tables/                            | WRF public-domain statement   |
 | Ferrier table                  | namgpu/data/ferrier/ETAMPNEW_DATA.expanded_rain     | NOAA / WRF public domain      |
 | Map basemap (Natural Earth,    | namgpu/data/basemap/ (unmodified)                   | Natural Earth: public domain; |
 | US Census county boundaries)   |                                                     | Census: US Government work    |
@@ -47,6 +49,10 @@ Origins
 | Data fetched at run time       | --source ifs, ifs-0p25: ECMWF open data             | CC BY 4.0 (ECMWF)             |
 |                                | --source era5: ERA5 (Copernicus C3S), read from     | CC BY 4.0 (Copernicus);       |
 |                                | Google's public ARCO-ERA5 copy                      | attribution below             |
+| GRIB2 writer and helper        | rw_rrfs_upp, rw_asos, rw_stage4: built from gpuwm   | Apache-2.0 (gpuwm)            |
+| programs (gpuwm), fetched      | (crates rw-grib2export, rw-obs), release assets     |                               |
+| at run time                    | fetched by woof-nam fetch-bridges, pinned by size   |                               |
+|                                | and SHA-256 (not in this repository)                |                               |
 
 ==========================================================================
 NOAA / NCEP NAM
@@ -136,10 +142,8 @@ Each keeps its original header and names the ArWen path it came from.
 WRF (NCAR/UCAR)
 ==========================================================================
 
-The Noah land-surface tables (namgpu/data/fix/noah/, namgpu/data/noah_tables/) are from WRF V3.0
-and v4.6.1. The NAM's own VEGPARM.TBL was never published; namgpu/data/fix/noah/VEGPARM.TBL is a
-stand-in built from WRF's MODIFIED_IGBP_MODIS_NOAH table (namgpu/data/fix/noah/PROVENANCE.txt). UCAR's notice, kept verbatim in
-namgpu/data/noah_tables/LICENSE-WRF.txt:
+The Noah land-surface tables in namgpu/data/noah_tables/ are WRF v4.6.1's. UCAR's notice, kept
+verbatim in namgpu/data/noah_tables/LICENSE-WRF.txt:
 
   WRF was developed at the National Center for Atmospheric Research (NCAR) which is operated by
   the University Corporation for Atmospheric Research (UCAR). NCAR and UCAR make no proprietary
@@ -157,6 +161,9 @@ namgpu/data/noah_tables/LICENSE-WRF.txt:
 NOAA data shipped in this package, and data fetched at run time
 ==========================================================================
 
+- Noah land-surface tables in namgpu/data/fix/noah/ (VEGPARM.TBL, GENPARM.TBL, SOILPARM.TBL): NCEP's
+  operational NMMB tables from the HMON package's NMMB fix set (hmon.v3.2.13/fix/nmmb), byte for byte
+  (PROVENANCE.txt beside them). US Government data.
 - NOAA fix files (CO2 history and monthly cycle, ozone climatology, solar constant, surface
   emissivity index) in namgpu/data/fix/, unmodified copies from the NOAA global fix bucket
   (fix/am/20220805; tools/fetch_fix.sh fetches them again). US Government data.

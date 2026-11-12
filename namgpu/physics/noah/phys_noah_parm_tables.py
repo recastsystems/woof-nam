@@ -37,8 +37,9 @@ v4.6.1 files with a different VEG layout; the VEG parse refuses them.
 Declared residue (stated, not hidden):
   * MPI_BCAST sends NROTBL as MPI_REAL while it is INTEGER (module_LS_NOAHLSM.F90:153, :1410). Both
     are 4 bytes, so the bits arrive unchanged; the port keeps the INTEGER type.
-  * The NAM fix VEGPARM.TBL is not available. The VEG section follows the Fortran read rules, but its
-    values have not been checked against the NAM file. That check is open (see UNITS.json note).
+  * The shipped VEGPARM.TBL and GENPARM.TBL are NCEP's operational NMMB tables (HMON v3.2.13 fix/nmmb,
+    IGBP first), and so is SOILPARM.TBL (its STAS section); the NAM's own copies left the NCO site with
+    the NAM (fix/noah/PROVENANCE.txt).
 """
 from __future__ import annotations
 
@@ -201,8 +202,11 @@ def _veg(r: _Reader, mminlu: str, out: NoahParmTables) -> None:
         v = r.read(11)
         _int(v[0])
         nrot = _int(v[4])
-        if not 1 <= nrot <= NSOIL:
-            raise NoahParmTableError(f"VEGPARM row {lc + 1}: NROTBL={nrot} outside 1..NSOIL={NSOIL}")
+        # NROTBL 0 is a real NCEP value: the NMMB IGBP table gives the water class (17) no root layers. Water
+        # never reaches SFLX (static VGTYP is 0 on water, and NOAHLSM runs land points only), so the Fortran
+        # stores it as read. A land column with NROOT outside 1..NSOIL is NaN-poisoned by phys_noah_transp.
+        if not 0 <= nrot <= NSOIL:
+            raise NoahParmTableError(f"VEGPARM row {lc + 1}: NROTBL={nrot} outside 0..NSOIL={NSOIL}")
         arr["NROTBL"][lc] = nrot
         arr["ALBTBL"][lc] = _strtof(v[1])
         arr["Z0TBL"][lc] = _strtof(v[2])

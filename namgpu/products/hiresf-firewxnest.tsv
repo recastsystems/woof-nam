@@ -674,14 +674,14 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 626	PRATE	0.1.7	1:0	-	max	-	carrier:NAMH_PRATE_MAX	-	io-max-fields PRATEMAX (mm/h) / 3600
 627	SRWEQ	0.1.12	1:0	-	max	-	carrier:NAMH_SRWEQ_MAX	-	io-max-fields FPRATEMAX (mm/h) / 3600
 628	NCPCP	0.1.9	1:0	-	acc	since:1h	carrier:NCPCP_S1	-	grid-scale precipitation over the 1 h bucket
-629	SNOM	0.1.16	1:0	-	acc	since:1h	carrier:NAMH_SNOM_ACC	-	ACSNOM * 1000 (snow melt, 1 h bucket)
+629	SNOM	0.1.16	1:0	-	acc	since:1h	carrier:NAMH_SNOM_ACC	-	ACSNOM (snow melt, 1 h bucket)
 630	SSRUN	1.0.193	1:0	-	acc	since:1h	carrier:NAMH_SSRUN_ACC	-	SSROFF (surface runoff, 1 h bucket)
 631	BGRUN	1.0.192	1:0	-	acc	since:1h	carrier:NAMH_BGRUN_ACC	-	BGROFF (subsurface runoff, 1 h bucket)
 632	HGT	0.3.5	245:0	-	-	-	NAM_HGT_WETBULB_ZERO	-	as awphys rec 335
-633	CSNOW	0.1.195	1:0	-	-	-	carrier:NAM_CSNOW	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.05 mm/h; nearest point
-634	CICEP	0.1.194	1:0	-	-	-	carrier:NAM_CICEP	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.05 mm/h; nearest point
-635	CFRZR	0.1.193	1:0	-	-	-	carrier:NAM_CFRZR	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.05 mm/h; nearest point
-636	CRAIN	0.1.192	1:0	-	-	-	carrier:NAM_CRAIN	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.05 mm/h; nearest point
+633	CSNOW	0.1.195	1:0	-	-	-	carrier:NAM_CSNOW	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.01 mm/h; nearest point
+634	CICEP	0.1.194	1:0	-	-	-	carrier:NAM_CICEP	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.01 mm/h; nearest point
+635	CFRZR	0.1.193	1:0	-	-	-	carrier:NAM_CFRZR	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.01 mm/h; nearest point
+636	CRAIN	0.1.192	1:0	-	-	-	carrier:NAM_CRAIN	-	dominant precipitation type (namgpu.products.ptype); PREC/(DT NPHS) >= 0.01 mm/h; nearest point
 637	LHTFL	0.0.10	1:0	-	ave	since:1h	carrier:NAMH_LHTFL_AVE	-	-SFCLHX / ASRFC
 638	SHTFL	0.0.11	1:0	-	ave	since:1h	carrier:NAMH_SHTFL_AVE	-	-SFCSHX / ASRFC
 639	GFLUX	2.0.193	1:0	-	ave	since:1h	carrier:NAMH_GFLUX_AVE	-	SUBSHX / ASRFC
@@ -750,10 +750,10 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 702	USWRF	0.4.193	1:0	-	-	-	carrier:NAM_USWRF	-	as awphys rec 401
 703	ULWRF	0.5.193	1:0	-	-	-	carrier:NAM_ULWRF	-	as awphys rec 402
 704	CSDSF	0.4.196	1:0	-	-	-	-	-	clear-sky downward shortwave: not in the history
-705	HLCY	0.7.8	103:3000	103:0	-	-	NAM_HLCY_ON_SPEC_HGT_LVL_ABOVE_GRND	-	CALHEL, the record's depth
-706	HLCY	0.7.8	103:1000	103:0	-	-	NAM_HLCY_ON_SPEC_HGT_LVL_ABOVE_GRND	-	CALHEL, the record's depth
-707.1	USTM	0.2.194	103:6000	103:0	-	-	NAM_USTM_ON_SPEC_HGT_LVL_ABOVE_GRND	-	CALHEL storm motion
-707.2	VSTM	0.2.195	103:6000	103:0	-	-	NAM_VSTM_ON_SPEC_HGT_LVL_ABOVE_GRND	-	CALHEL storm motion
+705	HLCY	0.7.8	103:3000	103:0	-	-	NAM_HLCY_ON_SPEC_HGT_LVL_ABOVE_GRND	-	storm-relative helicity over the record's depth
+706	HLCY	0.7.8	103:1000	103:0	-	-	NAM_HLCY_ON_SPEC_HGT_LVL_ABOVE_GRND	-	storm-relative helicity over the record's depth
+707.1	USTM	0.2.194	103:6000	103:0	-	-	NAM_USTM_ON_SPEC_HGT_LVL_ABOVE_GRND	-	storm motion, u component
+707.2	VSTM	0.2.195	103:6000	103:0	-	-	NAM_VSTM_ON_SPEC_HGT_LVL_ABOVE_GRND	-	storm motion, v component
 708	UPHL	0.7.197	103:5000	103:2000	-	-	-	-	Left out: history has hourly UH extremes but no instantaneous native-grid UH; recomputing after interpolation changes vorticity and its vertical integral.
 709	VUCSH	0.2.15	103:0	103:6000	-	-	NAM_VUCSH_ON_SPEC_HGT_LVL_ABOVE_GRND_0-6km	-	as awphys rec 355
 710	VVCSH	0.2.16	103:0	103:6000	-	-	NAM_VVCSH_ON_SPEC_HGT_LVL_ABOVE_GRND_0-6km	-	as awphys rec 356
@@ -771,40 +771,40 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 720	PRES	0.3.0	103:80	-	-	-	NAM_PRES_AGL	-	as awphys rec 364
 721.1	UGRD	0.2.2	103:80	-	-	-	UGRD_ON_SPEC_HGT_LVL_ABOVE_GRND	-	as awphys rec 365.1
 721.2	VGRD	0.2.3	103:80	-	-	-	VGRD_ON_SPEC_HGT_LVL_ABOVE_GRND	-	as awphys rec 365.2
-722	TMP	0.0.0	102:305	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+722	TMP	0.0.0	102:305	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 723.1	UGRD	0.2.2	102:305	-	-	-	NAM_UGRD_MSL	-	
 723.2	VGRD	0.2.3	102:305	-	-	-	NAM_VGRD_MSL	-	
-724	TMP	0.0.0	102:457	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+724	TMP	0.0.0	102:457	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 725.1	UGRD	0.2.2	102:457	-	-	-	NAM_UGRD_MSL	-	
 725.2	VGRD	0.2.3	102:457	-	-	-	NAM_VGRD_MSL	-	
-726	TMP	0.0.0	102:610	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+726	TMP	0.0.0	102:610	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 727.1	UGRD	0.2.2	102:610	-	-	-	NAM_UGRD_MSL	-	
 727.2	VGRD	0.2.3	102:610	-	-	-	NAM_VGRD_MSL	-	
-728	TMP	0.0.0	102:914	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+728	TMP	0.0.0	102:914	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 729.1	UGRD	0.2.2	102:914	-	-	-	NAM_UGRD_MSL	-	
 729.2	VGRD	0.2.3	102:914	-	-	-	NAM_VGRD_MSL	-	
-730	TMP	0.0.0	102:1524	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+730	TMP	0.0.0	102:1524	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 731.1	UGRD	0.2.2	102:1524	-	-	-	NAM_UGRD_MSL	-	
 731.2	VGRD	0.2.3	102:1524	-	-	-	NAM_VGRD_MSL	-	
-732	TMP	0.0.0	102:1829	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+732	TMP	0.0.0	102:1829	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 733.1	UGRD	0.2.2	102:1829	-	-	-	NAM_UGRD_MSL	-	
 733.2	VGRD	0.2.3	102:1829	-	-	-	NAM_VGRD_MSL	-	
-734	TMP	0.0.0	102:2134	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+734	TMP	0.0.0	102:2134	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 735.1	UGRD	0.2.2	102:2134	-	-	-	NAM_UGRD_MSL	-	
 735.2	VGRD	0.2.3	102:2134	-	-	-	NAM_VGRD_MSL	-	
-736	TMP	0.0.0	102:2743	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+736	TMP	0.0.0	102:2743	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 737.1	UGRD	0.2.2	102:2743	-	-	-	NAM_UGRD_MSL	-	
 737.2	VGRD	0.2.3	102:2743	-	-	-	NAM_VGRD_MSL	-	
-738	TMP	0.0.0	102:3658	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+738	TMP	0.0.0	102:3658	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 739.1	UGRD	0.2.2	102:3658	-	-	-	NAM_UGRD_MSL	-	
 739.2	VGRD	0.2.3	102:3658	-	-	-	NAM_VGRD_MSL	-	
-740	TMP	0.0.0	102:4572	-	-	-	NAM_TMP_MSL	-	UPP FDLVL: linear in height, lowest level under the ground
+740	TMP	0.0.0	102:4572	-	-	-	NAM_TMP_MSL	-	temperature at the record's height above mean sea level
 741.1	UGRD	0.2.2	102:4572	-	-	-	NAM_UGRD_MSL	-	
 741.2	VGRD	0.2.3	102:4572	-	-	-	NAM_VGRD_MSL	-	
 742	HGT	0.3.5	4:0	-	-	-	NAM_HGT_0C	-	as awphys rec 366
 743	RH	0.1.1	4:0	-	-	-	RH_ON_0C_ISOTHERM	-	as awphys rec 367
 744	HGT	0.3.5	204:0	-	-	-	HGT_ON_HGHST_TROP_FRZ_LVL	-	
-745	PRES	0.3.0	108:3000	108:0	-	-	NAM_PRES_PDIFF	-	UPP BNDLYR layer mean
+745	PRES	0.3.0	108:3000	108:0	-	-	NAM_PRES_PDIFF	-	layer-mean pressure of the record's pressure layer above ground
 746	TMP	0.0.0	108:3000	108:0	-	-	NAM_TMP_PDIFF	-	as awphys rec 368
 747	POT	0.0.2	108:3000	108:0	-	-	NAM_POT_PDIFF	-	
 748	RH	0.1.1	108:3000	108:0	-	-	NAM_RH_PDIFF	-	as awphys rec 369
@@ -816,32 +816,32 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 753	VVEL	0.2.8	108:3000	108:0	-	-	NAM_VVEL_PDIFF	-	
 754	PWAT	0.1.3	108:3000	108:0	-	-	NAM_PWAT_PDIFF	-	
 755	PLI	0.7.0	108:3000	108:0	-	-	NAM_PLI_ON_SPEC_PRES_ABOVE_GRND_30-0mb	-	as awphys rec 371
-756	PRES	0.3.0	108:6000	108:3000	-	-	NAM_PRES_PDIFF	-	UPP BNDLYR layer mean
+756	PRES	0.3.0	108:6000	108:3000	-	-	NAM_PRES_PDIFF	-	layer-mean pressure of the record's pressure layer above ground
 757	TMP	0.0.0	108:6000	108:3000	-	-	NAM_TMP_PDIFF	-	as awphys rec 372
 758	RH	0.1.1	108:6000	108:3000	-	-	NAM_RH_PDIFF	-	as awphys rec 373
 759	SPFH	0.1.0	108:6000	108:3000	-	-	NAM_SPFH_PDIFF	-	
 760.1	UGRD	0.2.2	108:6000	108:3000	-	-	NAM_UGRD_PDIFF	-	as awphys rec 374.1
 760.2	VGRD	0.2.3	108:6000	108:3000	-	-	NAM_VGRD_PDIFF	-	as awphys rec 374.2
-761	PRES	0.3.0	108:9000	108:6000	-	-	NAM_PRES_PDIFF	-	UPP BNDLYR layer mean
+761	PRES	0.3.0	108:9000	108:6000	-	-	NAM_PRES_PDIFF	-	layer-mean pressure of the record's pressure layer above ground
 762	TMP	0.0.0	108:9000	108:6000	-	-	NAM_TMP_PDIFF	-	as awphys rec 375
 763	RH	0.1.1	108:9000	108:6000	-	-	NAM_RH_PDIFF	-	as awphys rec 376
 764	SPFH	0.1.0	108:9000	108:6000	-	-	NAM_SPFH_PDIFF	-	
 765.1	UGRD	0.2.2	108:9000	108:6000	-	-	NAM_UGRD_PDIFF	-	as awphys rec 377.1
 765.2	VGRD	0.2.3	108:9000	108:6000	-	-	NAM_VGRD_PDIFF	-	as awphys rec 377.2
 766	VVEL	0.2.8	108:9000	108:6000	-	-	NAM_VVEL_PDIFF	-	
-767	PRES	0.3.0	108:12000	108:9000	-	-	NAM_PRES_PDIFF	-	UPP BNDLYR layer mean
+767	PRES	0.3.0	108:12000	108:9000	-	-	NAM_PRES_PDIFF	-	layer-mean pressure of the record's pressure layer above ground
 768	TMP	0.0.0	108:12000	108:9000	-	-	NAM_TMP_PDIFF	-	as awphys rec 378
 769	RH	0.1.1	108:12000	108:9000	-	-	NAM_RH_PDIFF	-	as awphys rec 379
 770	SPFH	0.1.0	108:12000	108:9000	-	-	NAM_SPFH_PDIFF	-	
 771.1	UGRD	0.2.2	108:12000	108:9000	-	-	NAM_UGRD_PDIFF	-	as awphys rec 380.1
 771.2	VGRD	0.2.3	108:12000	108:9000	-	-	NAM_VGRD_PDIFF	-	as awphys rec 380.2
-772	PRES	0.3.0	108:15000	108:12000	-	-	NAM_PRES_PDIFF	-	UPP BNDLYR layer mean
+772	PRES	0.3.0	108:15000	108:12000	-	-	NAM_PRES_PDIFF	-	layer-mean pressure of the record's pressure layer above ground
 773	TMP	0.0.0	108:15000	108:12000	-	-	NAM_TMP_PDIFF	-	as awphys rec 381
 774	RH	0.1.1	108:15000	108:12000	-	-	NAM_RH_PDIFF	-	as awphys rec 382
 775	SPFH	0.1.0	108:15000	108:12000	-	-	NAM_SPFH_PDIFF	-	
 776.1	UGRD	0.2.2	108:15000	108:12000	-	-	NAM_UGRD_PDIFF	-	as awphys rec 383.1
 776.2	VGRD	0.2.3	108:15000	108:12000	-	-	NAM_VGRD_PDIFF	-	as awphys rec 383.2
-777	PRES	0.3.0	108:18000	108:15000	-	-	NAM_PRES_PDIFF	-	UPP BNDLYR layer mean
+777	PRES	0.3.0	108:18000	108:15000	-	-	NAM_PRES_PDIFF	-	layer-mean pressure of the record's pressure layer above ground
 778	TMP	0.0.0	108:18000	108:15000	-	-	NAM_TMP_PDIFF	-	as awphys rec 384
 779	RH	0.1.1	108:18000	108:15000	-	-	NAM_RH_PDIFF	-	as awphys rec 385
 780	SPFH	0.1.0	108:18000	108:15000	-	-	NAM_SPFH_PDIFF	-	
@@ -863,11 +863,11 @@ rec	name	dcp	level	level2	stat	window	source	bits	note
 795	LAND	2.0.0	1:0	-	-	-	carrier:NAM_LAND	-	as awphys rec 393
 796	ICEC	10.2.0	1:0	-	-	-	carrier:NAM_ICEC	-	as awphys rec 394
 797	ALBDO	0.19.1	1:0	-	-	-	carrier:NAM_ALBDO	-	as awphys rec 395
-798	SNFALB	0.19.193	1:0	-	-	-	carrier:NAMH_SNFALB	-	ALBASE * 100
-799	MXSALB	0.19.192	1:0	-	-	-	carrier:NAMH_MXSALB	-	MXSNAL * 100
-800	WTMP	10.3.0	1:0	-	-	-	carrier:NAMH_WTMP	-	SST
+798	SNFALB	0.19.193	1:0	-	-	-	carrier:NAMH_SNFALB	-	ALBASE x 100 on land; 6 on open water, 65 on sea ice
+799	MXSALB	0.19.192	1:0	-	-	-	carrier:NAMH_MXSALB	-	MXSNAL x 100 on land; 6 on open water, 60 on sea ice
+800	WTMP	10.3.0	1:0	-	-	-	carrier:NAMH_WTMP	-	SST on open water, surface temperature elsewhere
 801	WEASD	0.1.13	1:0	-	-	-	carrier:NAM_WEASD	-	as awphys rec 316
 802	SNOD	0.1.11	1:0	-	-	-	carrier:NAM_SNOD	-	as awphys rec 318
 803	APCP	0.1.8	1:0	-	acc	since:1h	carrier:APCP_S1	-	RAINNC + RAINC over NCEP's 1 h fire-weather bucket, budget interpolation
-804	WEASD	0.1.13	1:0	-	acc	since:1h	carrier:NAMH_WEASD_ACC	-	ACSNOW * 1000 (NMMB 1 h bucket), budget
+804	WEASD	0.1.13	1:0	-	acc	since:1h	carrier:NAMH_WEASD_ACC	-	ACSNOW, kg m-2 (NMMB 1 h bucket), budget
 805	TCDC	0.6.1	200:0	-	-	-	carrier:NAM_TCDC	-	as awphys rec 398

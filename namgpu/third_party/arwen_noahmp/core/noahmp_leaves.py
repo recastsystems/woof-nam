@@ -22,8 +22,8 @@ Conventions that the oracle and these references share:
   ``ISNOW``, ROSR12 entries above ``NTOP``) are returned as 0.0, matching the
   harness pre-fill.  Callers must not consume them.
 * Transcendentals go through ``namgpu.third_party.arwen_noahmp.core.noahmp_libm``, which reproduces
-  glibc 2.39's ``expf``/``logf``/``log10f``/``powf`` bit for bit.  Rounding the
-  FP64 result once -- the usual shim -- is **not** sufficient here: glibc's
+  the reference libm's ``expf``/``logf``/``log10f``/``powf`` bit for bit.  Rounding the
+  FP64 result once -- the usual shim -- is **not** sufficient here: the reference libm's
   ``log10f`` is the 1993 SunPro FP32 reduction and disagrees with the
   correctly-rounded result on 18.47% of the FP32 domain (0.1, 1.0], which is
   exactly TDFCND's ``LOG10(SATRATIO)`` domain.  gfortran also routes a real
@@ -73,8 +73,8 @@ def _slot(k: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# glibc-faithful FP32 transcendentals.  See gpuwm/core/noahmp_libm.py for the
-# provenance and the measured verification against the live glibc 2.39.
+# bit-faithful FP32 transcendentals.  See gpuwm/core/noahmp_libm.py for the
+# provenance and the measured verification against the reference libm.
 # ---------------------------------------------------------------------------
 from namgpu.third_party.arwen_noahmp.core.noahmp_libm import expf as _expf        # noqa: E402
 from namgpu.third_party.arwen_noahmp.core.noahmp_libm import log10f as _log10f    # noqa: E402

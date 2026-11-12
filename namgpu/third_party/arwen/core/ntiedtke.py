@@ -208,7 +208,7 @@ def _nt_module():
     """nam-gpu copy: compile kernels/ntiedtke_assembled.cu once per process.
 
     That file is the exact string gpuwm.core.kernels.module_source("ntiedtke") hands NVRTC in ArWen
-    (CUDA_DEFINES preamble + common.cuh + glibc_flt32.cuh + ntiedtke.cu), compiled with ArWen's own
+    (CUDA_DEFINES preamble + common.cuh + FP32 maths header + ntiedtke.cu), compiled with ArWen's own
     options ("-std=c++17",).
     """
     global _NT_MODULE

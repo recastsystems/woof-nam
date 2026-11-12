@@ -6,7 +6,7 @@
 None of them is inside the gpuwm wheel, so before this a `pip install` could not run `woof-nam score` (it asked for a
 GPUWM_BRIDGES folder holding rw_asos and rw_stage4) or the UGWP option on a grid with no cached statistics (it asked
 for a `cargo build` in a checkout). woof-nam carries prebuilt Linux x86-64 copies attached to the woof-nam GitHub
-release named in parm/helper_pins.json, built like rw_rrfs_upp (manylinux_2_28: glibc 2.28 and later). Their exact size
+release named in parm/helper_pins.json, built like rw_rrfs_upp (manylinux_2_28). Their exact size
 and SHA-256 are pinned there. `woof-nam fetch-bridges` downloads them with the writer; a door that needs one and does
 not find it downloads it by itself, checks both pins and only then installs it. A file that fails a pin is deleted.
 

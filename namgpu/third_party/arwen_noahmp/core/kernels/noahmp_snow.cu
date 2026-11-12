@@ -14,7 +14,7 @@
 //
 // 1. Every float32 operation uses an explicit rounding intrinsic
 //    (__fadd_rn/__fsub_rn/__fmul_rn/__fdiv_rn) and every float64 operation
-//    inside glibc_expf uses __dadd_rn/__dsub_rn/__dmul_rn/__fma_rn.  That
+//    inside f32_expf uses __dadd_rn/__dsub_rn/__dmul_rn/__fma_rn.  That
 //    pins the hardware rounding mode AND makes nvcc's contraction pass a
 //    no-op, so -fmad=true cannot fuse a site gfortran did not fuse.
 // 2. Every constant lives in __constant__ memory as a bit pattern.  ptxas
@@ -23,8 +23,8 @@
 //    at compile time; __fsub_rn pins the hardware, not the folder.  COMBINE's
 //    DZMIN triple is exactly such a table, which is why C_DZMIN is in
 //    __constant__ memory rather than a local literal array.
-// 3. COMPACT's three EXP calls are glibc expf in the oracle, so glibc_expf
-//    below transcribes glibc 2.39's own algorithm.  CUDA's expf, __expf and
+// 3. COMPACT's three EXP calls are the reference libm's expf in the oracle, so f32_expf
+//    below is our own FP32 implementation; it matches the reference libm bit for bit.  CUDA's expf, __expf and
 //    exp2f are all different functions and none can hold a max_ulp-0 gate.
 //
 // Layer index convention is WRF's: -NSNOW+1 (top) .. 0 (bottom) for snow,
@@ -58,7 +58,7 @@
 #define OUT_STRIDE 41 /* NSTATE + up to 4 extras   */
 
 // --------------------------------------------------------------------------
-// glibc __exp2f_data, as glibc stores it (double bit patterns)
+// the Arm exp2f table (MIT; LICENSE-third-party.txt), as double bit patterns
 // --------------------------------------------------------------------------
 __constant__ unsigned long long C_EXP2F_TAB[32] = {
     0x3FF0000000000000ULL, 0x3FEFD9B0D3158574ULL, 0x3FEFB5586CF9890FULL, 0x3FEF9301D0125B51ULL,
@@ -77,7 +77,7 @@ __constant__ unsigned long long C_EXP2F_MISC[3] = {
 __constant__ unsigned long long C_EXP2F_POLY_SCALED[3] = {
     0x3EBC6AF84B912394ULL, 0x3F2EBFCE50FAC4F3ULL, 0x3F962E42FF0C52D6ULL,
 };
-// glibc expf's cutoffs: 0x1.62e42ep6 (overflow), -0x1.9fe368p6 (underflow)
+// the reference libm expf's cutoffs: 0x1.62e42ep6 (overflow), -0x1.9fe368p6 (underflow)
 __constant__ unsigned long long C_EXPF_LIMITS[2] = {
     0x40562E42E0000000ULL, 0xC059FE3680000000ULL,
 };
@@ -189,9 +189,9 @@ __device__ __forceinline__ float f_min(float a, float b) { return (b < a) ? b : 
 // the compiler honours the last occurrence.  The flush is the flag, not the
 // SM: the conversion instruction has no flush of its own, so under `-ftz=true`
 // the compiler emits an extra multiply after it to produce one, and built
-// without the append the same conversion keeps the subnormal.  glibc's
+// without the append the same conversion keeps the subnormal.  The reference libm's
 // expf and powf do produce subnormals, gfortran at -O0 leaves MXCSR's FTZ/DAZ
-// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the live glibc 2.39
+// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the reference libm
 // over 1,106,247,680 inputs -- produces them too.  So the conversion as
 // compiled here is a divergence from the authority in a narrow but reachable
 // band:
@@ -219,9 +219,9 @@ __device__ float nmp_d2f_rn(double y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 expf -- sysdeps/ieee754/flt-32/e_expf.c, FMA variant
+// FP32 expf, our own implementation, FMA variant
 // --------------------------------------------------------------------------
-__device__ float glibc_expf(float x)
+__device__ float f32_expf(float x)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int abstop = (ix >> 20) & 0x7FFu;
@@ -382,17 +382,17 @@ __device__ void compact(Col *c, float dt, const int *imelt, const float *ficeold
         if (voidf > K_P001 && SNICE(j) > K_P1) {
             float bi = FDIV(SNICE(j), DZSNSO(j));
             float td = f_max(K_ZERO, FSUB(K_TFRZ, STC(j)));
-            float dexpf = glibc_expf(FMUL(-K_C4, td));
+            float dexpf = f32_expf(FMUL(-K_C4, td));
 
             float ddz1 = FMUL(-K_C3, dexpf);
             if (bi > K_DM)
-                ddz1 = FMUL(ddz1, glibc_expf(FMUL(K_NEG46EM3, FSUB(bi, K_DM))));
+                ddz1 = FMUL(ddz1, f32_expf(FMUL(K_NEG46EM3, FSUB(bi, K_DM))));
 
             if (SNLIQ(j) > FMUL(K_P01, DZSNSO(j)))
                 ddz1 = FMUL(ddz1, K_C5);
 
             float ddz2 = FDIV(FMUL(-FADD(burden, FMUL(K_HALF, wx)),
-                                   glibc_expf(FSUB(FMUL(K_NEG008, td), FMUL(K_C2, bi)))),
+                                   f32_expf(FSUB(FMUL(K_NEG008, td), FMUL(K_C2, bi)))),
                               K_ETA0);
 
             float ddz3;
@@ -918,16 +918,16 @@ extern "C" __global__ void noahmp_snow_snowwater(const float *in, const int *iin
     q[NSTATE + 2] = p1; q[NSTATE + 3] = p2;
 }
 
-// Standalone probe for the glibc expf transcription, so a mis-folded table
+// Standalone probe for the FP32 expf routine, so a mis-folded table
 // entry cannot hide inside a leaf that never reaches it.
 extern "C" __global__ void noahmp_snow_expf_probe(const float *x, float *y, int n)
 {
     TID_GUARD(n)
-    y[tid] = glibc_expf(x[tid]);
+    y[tid] = f32_expf(x[tid]);
 }
 
-// Negative control.  CUDA's own expf is a different function from glibc's and
-// must be seen to disagree, otherwise the glibc transcription above could be
+// Negative control.  CUDA's own expf is a different function from the reference libm's and
+// must be seen to disagree, otherwise the FP32 routine above could be
 // passing by coincidence rather than by construction.
 extern "C" __global__ void noahmp_snow_expf_native_probe(const float *x, float *y, int n)
 {

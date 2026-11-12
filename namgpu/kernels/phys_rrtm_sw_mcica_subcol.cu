@@ -6,12 +6,12 @@
 //
 // Ported to CUDA for WOOF-NAM from phys/radsw_main_nmmb.f:1827-1984 (subroutine mcica_subcol,
 // nam.v4.2.11, 83df4e13c1). Notice (source header of radsw_main_nmmb.f): sw-rrtm3 radiation
-// package, NCEP modifications of the RRTM-SW radiation code from AER Inc. The random-number calls
-// of the source use the Mersenne-twister module phys/mersenne_twister.f (LGPL). That file is NOT
-// copied and was NOT read for this port: the generator below is written from the published MT19937
-// algorithm (Matsumoto and Nishimura 1998) with the tempering and real-conversion arithmetic of the
-// published algorithm. The seeding (mt(0) = seed, mt(i) = 69069 * mt(i-1)) is the one the port was
-// written against; it is not yet checked against the module (open item in the wrapper docstring).
+// package, NCEP modifications of the RRTM-SW radiation code from AER Inc. The sub-column random
+// numbers are MT19937 as Matsumoto and Nishimura publish it (ACM Trans. Model. Comput. Simul. 8,
+// 3-30, 1998): the 624-word state, the twist with matrix A, the tempering masks, and a 32-bit word
+// over 2**32 as the real draw. The state is seeded with mt(0) = seed, mt(i) = 69069 * mt(i-1)
+// (32-bit wrap), the initialisation of the paper's code. Whether NAM's stream also advances the
+// generator after seeding is not established (open item in the wrapper docstring).
 //
 // What the routine computes, per column (one thread per (i, j)):
 //   seed the generator with ipseed (0 -> 4357), draw the stream in the order the Fortran does,
@@ -65,7 +65,7 @@ struct McicaRng {
     int mti;
 };
 
-// random_setseed_t: mt(0) = seed (0 -> iseed), mt(i) = 69069 * mt(i-1) with 32-bit wrap; mti = n.
+// Seeding: mt(0) = seed (0 -> iseed), mt(i) = 69069 * mt(i-1) with 32-bit wrap; mti = n.
 __device__ inline void mcica_setseed(McicaRng& r, int inseed)
 {
     unsigned int ii = (inseed == 0) ? (unsigned int)MCICA_ISEED : (unsigned int)inseed;
@@ -97,7 +97,7 @@ __device__ inline void mcica_twist(McicaRng& r)
 // One draw: tempering, then the real conversion:
 //   y >= 0 : real(y) / 2**32
 //   y <  0 : (real(y) + 2**32) / 2**32
-// Single-precision edge kept as in the source: for y in [-128, -1] the numerator rounds to 2**32,
+// Single-precision edge: for y in [-128, -1] the numerator rounds to 2**32,
 // so the draw is exactly 1.0 and a clear layer (cldf = 0, tem1 = 1) still passes cdfunc >= tem1.
 __device__ inline float mcica_next(McicaRng& r)
 {

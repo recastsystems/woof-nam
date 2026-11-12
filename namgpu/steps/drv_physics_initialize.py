@@ -49,7 +49,7 @@ from namgpu import kernels, slab
 UNIT = "drv_physics_initialize"
 NXPKAP = 11001
 # NAM_NOAH_FIX_DIR (the NCEP NAM fix tables) when set, else namgpu/data/fix/noah built by tools/build_noah_fix.py
-# (IGBP-first tables in the NMMB layout; named gap until the NCEP NAM fix VEGPARM.TBL is found).
+# (IGBP-first tables in the NMMB layout: NCEP's NMMB VEGPARM, GENPARM and SOILPARM, see PROVENANCE.txt).
 from namgpu import paths  # noqa: E402
 
 NOAH_TBL_DIR = Path(os.environ.get("NAM_NOAH_FIX_DIR") or paths.FIX / "noah")

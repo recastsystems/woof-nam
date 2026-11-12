@@ -9,14 +9,14 @@ Scope, stated once so it is not overclaimed elsewhere: this kernel is
 **ENERGY's own arithmetic**, not the whole column.  The six subsystems ENERGY
 composes each have a device port in a sibling ``.cu`` already, and running them
 inside this kernel is blocked by three things in other lanes' files -- three
-copies of the device glibc libm with the same symbol names, ``TSNOSOI``/
+copies of the device FP32 maths routines with the same symbol names, ``TSNOSOI``/
 ``PHASECHANGE`` exposed only as ``__global__`` entry points, and per-lane flat
 fixture packings in place of physical argument lists.  Their results are
 therefore fed in from the same pinned fixture.  See the kernel's header comment.
 
 ``noahmp_energy.cu`` is compiled **after** ``noahmp_leaves.cu``: ENERGY needs
-glibc 2.39's ``powf`` and ``expf`` on the device, and there must be exactly one
-transcription of those in the tree.  ``expm1f``/``tanhf`` are new here because
+the reference libm's ``powf`` and ``expf`` on the device, and there must be exactly one
+implementation of those in the tree.  ``expm1f``/``tanhf`` are new here because
 ENERGY's ``FSNO`` is the only ``TANH`` in Noah-MP.
 
 This is a validation surface, not a runtime path: Noah-MP is not dispatchable

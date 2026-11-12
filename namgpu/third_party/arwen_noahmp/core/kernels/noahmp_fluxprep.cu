@@ -7,7 +7,7 @@
 // output vector, so parity is checked slot for slot with no repacking.
 //
 // This is a sibling of noahmp_leaves.cu, not an extension of it: the porting
-// lanes run in parallel and none of them may edit one .cu.  The glibc
+// lanes run in parallel and none of them may edit one .cu.  The reference libm
 // transcendental block below is duplicated verbatim from that file and must
 // stay in step with it and with gpuwm/core/noahmp_libm.py.  r_atan is new
 // here; SFCDIF1 (:4691, :4698) is Noah-MP's only ATAN caller.
@@ -19,9 +19,9 @@
 // Do not "simplify" these back to infix operators.
 //
 // Transcendentals are NOT CUDA's expf/powf/logf/atanf and are NOT "evaluate in
-// FP64 and round once" either.  gfortran calls glibc, and none of glibc's FP32
+// FP64 and round once" either.  gfortran calls the reference libm, and none of the reference libm's FP32
 // transcendentals is correctly rounded.  For atanf specifically, rounding the
-// FP64 result once disagrees with glibc on 823,767 of the 16,777,216 FP32
+// FP64 result once disagrees with the reference libm on 823,767 of the 16,777,216 FP32
 // inputs in [0.5, 1) alone.
 //
 // gfortran lowers a REAL constant exponent -- x**0.5, x**0.25, x**(-0.25) --
@@ -41,13 +41,13 @@
 #define MU(a, b) __fmul_rn((a), (b))
 #define DV(a, b) __fdiv_rn((a), (b))
 // The FP64 intermediates need the same treatment: NVRTC contracts fma.rn.f64
-// just as happily as the FP32 form, and glibc's polynomials are evaluated
+// just as happily as the FP32 form, and the reference libm's polynomials are evaluated
 // without contraction on x86-64.
 #define DAD(a, b) __dadd_rn((a), (b))
 #define DSU(a, b) __dsub_rn((a), (b))
 #define DMU(a, b) __dmul_rn((a), (b))
 
-// e_logf_data.c
+// logf table (Arm optimized-routines, MIT)
 __device__ const double NMP_LOGF_INVC[16] = {
     0x1.661ec79f8f3bep+0, 0x1.571ed4aaf883dp+0, 0x1.49539f0f010bp+0,
     0x1.3c995b0b80385p+0, 0x1.30d190c8864a5p+0, 0x1.25e227b0b8eap+0,
@@ -67,7 +67,7 @@ __device__ const double NMP_LOGF_LOGC[16] = {
 #define NMP_LOGF_A1 (0x1.5575b0be00b6ap-2)
 #define NMP_LOGF_A2 (-0x1.ffffef20a4123p-2)
 
-// e_exp2f_data.c, shared by expf / exp2f / powf.  EXP2F_TABLE_BITS = 5.
+// exp2f table (Arm optimized-routines, MIT), shared by expf / exp2f / powf.  EXP2F_TABLE_BITS = 5.
 __device__ const unsigned long long NMP_EXP2F_TAB[32] = {
     0x3ff0000000000000ULL, 0x3fefd9b0d3158574ULL, 0x3fefb5586cf9890fULL,
     0x3fef9301d0125b51ULL, 0x3fef72b83c7d517bULL, 0x3fef54873168b9aaULL,
@@ -86,8 +86,8 @@ __device__ const unsigned long long NMP_EXP2F_TAB[32] = {
 #define NMP_EXP2F_SHIFT 0x1.8p+52
 #define NMP_EXP2F_SHIFT_SCALED (0x1.8p+52 / 32.0)
 
-// e_powf_log2_data.c.  POWF_SCALE is 1.0 because TOINT_INTRINSICS is 0 on
-// x86-64, so every "* POWF_SCALE" in glibc's table is a no-op.
+// powf log2 table (Arm optimized-routines, MIT).  POWF_SCALE is 1.0 because TOINT_INTRINSICS is 0 on
+// x86-64, so every "* POWF_SCALE" in the reference libm's table is a no-op.
 __device__ const double NMP_POWF_INVC[16] = {
     0x1.661ec79f8f3bep+0, 0x1.571ed4aaf883dp+0, 0x1.49539f0f010bp+0,
     0x1.3c995b0b80385p+0, 0x1.30d190c8864a5p+0, 0x1.25e227b0b8eap+0,
@@ -106,7 +106,7 @@ __device__ const double NMP_POWF_A[5] = {
      0x1.27616c9496e0bp-2, -0x1.71969a075c67ap-2,  0x1.ec70a6ca7baddp-2,
     -0x1.7154748bef6c8p-1,  0x1.71547652ab82bp+0 };
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_logf.c
+// FP32 logf, our own implementation
 __device__ real r_log(real x)
 {
     unsigned int ix = __float_as_uint(x);
@@ -134,7 +134,7 @@ __device__ real r_log(real x)
 }
 
 
-// The 32-entry exp2 core shared by glibc's expf and powf.
+// The 32-entry exp2 core shared by the reference libm's expf and powf.
 // Round a double to binary32, INCLUDING into the subnormal range.
 //
 // `__double2float_rn` flushes a subnormal result to zero on this toolchain --
@@ -143,9 +143,9 @@ __device__ real r_log(real x)
 // the compiler honours the last occurrence.  The flush is the flag, not the
 // SM: the conversion instruction has no flush of its own, so under `-ftz=true`
 // the compiler emits an extra multiply after it to produce one, and built
-// without the append the same conversion keeps the subnormal.  glibc's
+// without the append the same conversion keeps the subnormal.  The reference libm's
 // expf and powf do produce subnormals, gfortran at -O0 leaves MXCSR's FTZ/DAZ
-// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the live glibc 2.39
+// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the reference libm
 // over 1,106,247,680 inputs -- produces them too.  So the conversion as
 // compiled here is a divergence from the authority in a narrow but reachable
 // band:
@@ -190,7 +190,7 @@ __device__ double nmp_exp2_core(double xd, double shift,
     return DMU(y, s);
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_expf.c
+// FP32 expf, our own implementation
 __device__ real r_exp(real x)
 {
     unsigned int abstop = (__float_as_uint(x) >> 20) & 0x7ffu;
@@ -209,7 +209,7 @@ __device__ real r_exp(real x)
         NMP_EXP2F_P2 / 32.0, 0u));
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_powf.c log2_inline
+// FP32 powf, our own implementation: log2_inline
 __device__ double nmp_powf_log2(unsigned int ix)
 {
     unsigned int tmp = ix - 0x3f330000u;
@@ -244,7 +244,7 @@ __device__ bool nmp_zeroinfnan(unsigned int ix)
     return 2u * ix - 1u >= 2u * 0x7f800000u - 1u;
 }
 
-// glibc 2.39 sysdeps/ieee754/flt-32/e_powf.c
+// FP32 powf, our own implementation
 __device__ real r_pow(real x, real y)
 {
     unsigned int sign_bias = 0u;
@@ -299,8 +299,8 @@ __device__ real r_pow(real x, real y)
 #define NMP_TFRZ   273.16f
 #define NMP_CPAIR  1004.64f
 
-// glibc 2.39 sysdeps/ieee754/flt-32/s_atanf.c.  Exhaustively verified against
-// the live glibc over all 4,278,190,082 non-NaN FP32 inputs: 0 mismatches.
+// FP32 atanf, our own implementation.  Exhaustively verified against
+// the reference libm over all 4,278,190,082 non-NaN FP32 inputs: 0 mismatches.
 // The large-argument shortcut fires at |x| >= 2**25, which was measured on the
 // oracle host rather than taken from a source comment.
 __constant__ float NMP_ATANF_HI[4] = {

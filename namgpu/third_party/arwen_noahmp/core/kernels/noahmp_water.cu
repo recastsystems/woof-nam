@@ -27,7 +27,7 @@
 // start of its host-facing kernels, and noahmp_snow.cu from `#define NSNOW 3`
 // to the start of its entry points; drop from the snow copy the four pieces
 // the soil copy already provides (the __exp2f_data tables, the rounding-pinned
-// FADD/DADD macros, f_max/f_min, and glibc_expf); drop the per-leaf host
+// FADD/DADD macros, f_max/f_min, and f32_expf); drop the per-leaf host
 // layout macros from both; and move the snow lane's private constant table
 // into its own namespace, C_F32 -> C_SN_F32 and K_* -> SN_K_*.  Nothing else
 // is touched, so every arithmetic site keeps the exact form its own lane's
@@ -37,7 +37,7 @@
 //
 // 1. Every float32 operation uses an explicit rounding intrinsic
 //    (__fadd_rn/__fsub_rn/__fmul_rn/__fdiv_rn) and every float64 operation
-//    inside glibc_expf/glibc_powf uses __dadd_rn/__dsub_rn/__dmul_rn/
+//    inside f32_expf/f32_powf uses __dadd_rn/__dsub_rn/__dmul_rn/
 //    __fma_rn.  That pins the hardware rounding mode AND makes nvcc's
 //    contraction pass a no-op, so -fmad=true cannot fuse a site gfortran did
 //    not fuse.
@@ -45,13 +45,13 @@
 //    12.8's constant folder does not honour round-to-nearest-even on literal
 //    arrays.  WATER's own three constants (1000.0, 0.001 and WSLMAX) are in
 //    C_W_F32 below for the same reason.
-// 3. EXP and ** are glibc calls in the oracle, so glibc_expf and glibc_powf
-//    transcribe glibc 2.39's own algorithms.  CUDA's expf, __expf, exp2f and
+// 3. EXP and ** are calls into the reference libm in the oracle, so f32_expf and f32_powf
+//    are our own FP32 implementations; they match the reference libm bit for bit.  CUDA's expf, __expf, exp2f and
 //    powf are all different functions and none can hold a max_ulp-0 gate.
 //
 // And the fourth thing this file must NOT do, which WATER inherits from
 // SOILWATER: vectorise the frozen-fraction loop the way gfortran does at
-// WRF's own -O2, where it calls glibc's libmvec _ZGVbN4v_expf.  The fixture
+// WRF's own -O2, where it calls the reference libm's libmvec _ZGVbN4v_expf.  The fixture
 // is built at -O0 and build_water.sh fails on any _ZGV* symbol; see
 // gpuwm/data/noahmp/oracle/PROVENANCE-water.md.
 //
@@ -88,7 +88,7 @@
 
 
 // --------------------------------------------------------------------------
-// glibc __exp2f_data / __powf_log2_data, as glibc stores them
+// the Arm exp2f and powf log2 tables (MIT; LICENSE-third-party.txt), as bit patterns
 // --------------------------------------------------------------------------
 __constant__ unsigned long long C_EXP2F_TAB[32] = {
     0x3FF0000000000000ULL, 0x3FEFD9B0D3158574ULL, 0x3FEFB5586CF9890FULL, 0x3FEF9301D0125B51ULL,
@@ -276,9 +276,9 @@ __device__ __forceinline__ float f_neg(float a)
 // the compiler honours the last occurrence.  The flush is the flag, not the
 // SM: the conversion instruction has no flush of its own, so under `-ftz=true`
 // the compiler emits an extra multiply after it to produce one, and built
-// without the append the same conversion keeps the subnormal.  glibc's
+// without the append the same conversion keeps the subnormal.  The reference libm's
 // expf and powf do produce subnormals, gfortran at -O0 leaves MXCSR's FTZ/DAZ
-// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the live glibc 2.39
+// clear, and `namgpu.third_party.arwen_noahmp.core.noahmp_libm` -- verified against the reference libm
 // over 1,106,247,680 inputs -- produces them too.  So the conversion as
 // compiled here is a divergence from the authority in a narrow but reachable
 // band:
@@ -306,9 +306,9 @@ __device__ float nmp_d2f_rn(double y)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 expf  --  sysdeps/ieee754/flt-32/e_expf.c, FMA variant
+// FP32 expf, our own implementation, FMA variant
 // --------------------------------------------------------------------------
-__device__ float glibc_expf(float x)
+__device__ float f32_expf(float x)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int abstop = (ix >> 20) & 0x7FFu;
@@ -345,7 +345,7 @@ __device__ float glibc_expf(float x)
 }
 
 // --------------------------------------------------------------------------
-// glibc 2.39 powf  --  sysdeps/ieee754/flt-32/e_powf.c, FMA variant.
+// FP32 powf, our own implementation, FMA variant.
 // Only the domain this group reaches is transcribed: a strictly positive
 // normal base and a finite exponent.  Anything else returns NaN rather than a
 // value this kernel cannot vouch for.
@@ -403,12 +403,12 @@ __device__ float powf_exp2_inline(double xd, unsigned long long sign_bias)
     return nmp_d2f_rn(y);
 }
 
-__device__ float glibc_powf(float x, float y)
+__device__ float f32_powf(float x, float y)
 {
     unsigned int ix = __float_as_uint(x);
     unsigned int iy = __float_as_uint(y);
-    if (ix == 0x3F800000u) return 1.0f;           // 1**y, glibc's fast exit
-    // glibc's zeroinfnan path, restricted to the one sub-case this group
+    if (ix == 0x3F800000u) return 1.0f;           // 1**y, the reference libm's fast exit
+    // the reference libm's zeroinfnan path, restricted to the one sub-case this group
     // reaches: +0 ** (finite, positive, non-integer) is +0.  CANWATER hits it
     // whenever FWET is exactly 0, which is every dry-canopy case.
     if (ix == 0u && (iy & 0x80000000u) == 0u && (iy & 0x7F800000u) != 0x7F800000u
@@ -437,10 +437,10 @@ __device__ void d_wdfcnd1(float smc, float fcr, float smcmax, float bexp,
 {
     float factr = f_max(W_0P01, FDIV(smc, smcmax));                  // :9177
     float expon = FADD(bexp, W_TWO);                                 // :9178
-    float w = FMUL(dwsat, glibc_powf(factr, expon));                 // :9179
+    float w = FMUL(dwsat, f32_powf(factr, expon));                 // :9179
     w = FMUL(w, FSUB(K_ONE, fcr));                                   // :9180
     expon = FADD(FMUL(W_TWO, bexp), W_THREE);                        // :9184
-    float c = FMUL(dksat, glibc_powf(factr, expon));                 // :9185
+    float c = FMUL(dksat, f32_powf(factr, expon));                 // :9185
     c = FMUL(c, FSUB(K_ONE, fcr));                                   // :9186
     *wdf = w;
     *wcnd = c;
@@ -456,18 +456,18 @@ __device__ void d_wdfcnd2(float smc, float sice, float smcmax, float bexp,
     float factr2 = f_max(W_0P01, FDIV(smc, smcmax));                 // :9217
     factr1 = f_min(factr1, factr2);                                  // :9218
     float expon = FADD(bexp, W_TWO);                                 // :9219
-    float w = FMUL(dwsat, glibc_powf(factr2, expon));                // :9220
+    float w = FMUL(dwsat, f32_powf(factr2, expon));                // :9220
     if (sice > K_ZERO) {                                             // :9222
         // (500*SICE)**3.0 has a REAL constant exponent, so gfortran routes it
         // through powf: it rounds once, not three times.
         float vkwgt = FDIV(K_ONE,
-                           FADD(K_ONE, glibc_powf(FMUL(W_500, sice), W_THREE)));
+                           FADD(K_ONE, f32_powf(FMUL(W_500, sice), W_THREE)));
         w = FADD(FMUL(vkwgt, w),
                  FMUL(FMUL(FSUB(K_ONE, vkwgt), dwsat),
-                      glibc_powf(factr1, expon)));
+                      f32_powf(factr1, expon)));
     }
     expon = FADD(FMUL(W_TWO, bexp), W_THREE);                        // :9229
-    *wcnd = FMUL(dksat, glibc_powf(factr2, expon));                  // :9230
+    *wcnd = FMUL(dksat, f32_powf(factr2, expon));                  // :9230
     *wdf = w;
 }
 
@@ -538,7 +538,7 @@ __device__ void d_canwater(float ch2op, float dt, float fcev, float fctr,
     } else {
         fwet = FDIV(f_max(K_ZERO, canliq), f_max(maxliq, K_1EM6_LIQF));
     }
-    fwet = glibc_powf(f_min(fwet, K_ONE), K_0P667);                  // :6364
+    fwet = f32_powf(f_min(fwet, K_ONE), K_0P667);                  // :6364
 
     float qmeltc = K_ZERO, qfrzc = K_ZERO;
     float cmc = FADD(canliq, canice);                                // :6370
@@ -604,7 +604,7 @@ __device__ void d_infil(const float *par, float dt, const float *zsoil,
         dd = FADD(dd, dmax[k]);
     }
 
-    float val = FSUB(K_ONE, glibc_expf(f_neg(FMUL(par[P_KDT], dt1))));  // :7674
+    float val = FSUB(K_ONE, f32_expf(f_neg(FMUL(par[P_KDT], dt1))));  // :7674
     float ddt = FMUL(dd, val);                                       // :7675
     float px = f_max(K_ZERO, FMUL(qinsur, dt));                      // :7676
     float infmax = FDIV(FMUL(px, FDIV(ddt, FADD(px, ddt))), dt);     // :7677
@@ -619,7 +619,7 @@ __device__ void d_infil(const float *par, float dt, const float *zsoil,
         // multiplications, never to powf.
         ssum = FADD(ssum, FDIV(FMUL(acrt, acrt), K_FLOATK2));        // J = 1
         ssum = FADD(ssum, FDIV(acrt, K_FLOATK1));                    // J = 2
-        fcr = FSUB(K_ONE, FMUL(glibc_expf(f_neg(acrt)), ssum));      // :7693
+        fcr = FSUB(K_ONE, FMUL(f32_expf(f_neg(acrt)), ssum));      // :7693
     }
 
     infmax = FMUL(infmax, fcr);                                      // :7698
@@ -779,9 +779,9 @@ __device__ void d_soilwater(const float *par, int urban, float dt,
     for (int k = 0; k < NSOIL; ++k) {                                // :7333
         float fice = f_min(K_ONE, FDIV(sice[k], par[P_SMCMAX + k]));
         fcr[k] = FDIV(f_max(K_ZERO,
-                            FSUB(glibc_expf(f_neg(FMUL(K_A, FSUB(K_ONE, fice)))),
-                                 glibc_expf(f_neg(K_A)))),
-                      FSUB(K_ONE, glibc_expf(f_neg(K_A))));
+                            FSUB(f32_expf(f_neg(FMUL(K_A, FSUB(K_ONE, fice)))),
+                                 f32_expf(f_neg(K_A)))),
+                      FSUB(K_ONE, f32_expf(f_neg(K_A))));
     }
 
     float sicemax = K_ZERO;                                          // :7341
@@ -1072,17 +1072,17 @@ __device__ void compact(Col *c, float dt, const int *imelt, const float *ficeold
         if (voidf > SN_K_P001 && SNICE(j) > SN_K_P1) {
             float bi = FDIV(SNICE(j), DZSNSO(j));
             float td = f_max(SN_K_ZERO, FSUB(SN_K_TFRZ, STC(j)));
-            float dexpf = glibc_expf(FMUL(-SN_K_C4, td));
+            float dexpf = f32_expf(FMUL(-SN_K_C4, td));
 
             float ddz1 = FMUL(-SN_K_C3, dexpf);
             if (bi > SN_K_DM)
-                ddz1 = FMUL(ddz1, glibc_expf(FMUL(SN_K_NEG46EM3, FSUB(bi, SN_K_DM))));
+                ddz1 = FMUL(ddz1, f32_expf(FMUL(SN_K_NEG46EM3, FSUB(bi, SN_K_DM))));
 
             if (SNLIQ(j) > FMUL(SN_K_P01, DZSNSO(j)))
                 ddz1 = FMUL(ddz1, SN_K_C5);
 
             float ddz2 = FDIV(FMUL(-FADD(burden, FMUL(SN_K_HALF, wx)),
-                                   glibc_expf(FSUB(FMUL(SN_K_NEG008, td), FMUL(SN_K_C2, bi)))),
+                                   f32_expf(FSUB(FMUL(SN_K_NEG008, td), FMUL(SN_K_C2, bi)))),
                               SN_K_ETA0);
 
             float ddz3;
@@ -1773,14 +1773,14 @@ extern "C" __global__ void k_water(const float *par, const float *fin,
     col_store(&col, q, iout + tid);
 }
 
-// Standalone probes for the two glibc transcriptions the assembly is built
+// Standalone probes for the two FP32 routines the assembly is built
 // on, so a mis-folded __constant__ entry cannot hide inside a leaf that never
 // selects it.
 extern "C" __global__ void k_water_expf(const float *x, float *y, int n)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
-    y[tid] = glibc_expf(x[tid]);
+    y[tid] = f32_expf(x[tid]);
 }
 
 extern "C" __global__ void k_water_powf(const float *x, const float *e,
@@ -1788,5 +1788,5 @@ extern "C" __global__ void k_water_powf(const float *x, const float *e,
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
-    y[tid] = glibc_powf(x[tid], e[tid]);
+    y[tid] = f32_powf(x[tid], e[tid]);
 }

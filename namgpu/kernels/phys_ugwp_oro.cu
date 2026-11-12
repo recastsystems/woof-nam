@@ -8,7 +8,7 @@
 // Source: https://github.com/NOAA-GSL/UGWP commit c1c893edcf171af5639af60e3a3a528816f6cc2b (tag MPAS_20241223),
 // bl_ugwp.F:15-1059 (bl_ugwp_run); upstream LICENSE added at 4108d491470c. The column body is the gpuwm-hex
 // CUDA port of that routine (gpuwm-hex src/hexcore/mpasphys/ugwp_oro_v842.py, Apache-2.0), with the
-// glibc-transcribed sinf/powf/expf replaced by the CUDA ones (nam-gpu runs fast numerics, no bitwise goal).
+// bitwise FP32 sinf/powf/expf helpers replaced by the CUDA ones (nam-gpu runs fast numerics, no bitwise goal).
 //
 // NMMB mapping (this file's prologue, the only nam-gpu code here):
 //   column level k (1-based, lowest layer first) = NMMB mass level fl0 = LM - k (0-based, top-down);

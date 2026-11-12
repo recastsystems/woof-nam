@@ -1,7 +1,7 @@
 {
  "schema": "woof-nam.helper-pins/v1",
  "repo": "recastsystems/woof-nam",
- "release": "v0.2.0",
+ "release": "v0.2.1",
  "built": "Rust 1.94.0 in quay.io/pypa/manylinux_2_28_x86_64@sha256:c2261579b9c2e5d45aa93312f73e2a302182e3e977b558581a1838d6fed3d8e6, offline and locked: rw_asos and rw_stage4 from gpuwm 5c948bead2ae47a278caf08ff55c0473c66e2021 (crate rw-obs); rw_hex_ugwp_oro from this repository's tools/ugwp-oro",
  "licence": "Apache-2.0 (gpuwm; tools/ugwp-oro)",
  "helpers": {

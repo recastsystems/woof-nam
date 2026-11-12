@@ -580,7 +580,8 @@ class Suite:
                 with self.lock:
                     states = {d: r.get("state") for d, r in self.rec["domains"].items()}
                 h, _ = self.parent_hours_written()
-                self.say(f"parent hour {h}; " + ", ".join(f"{d} {s}" for d, s in states.items()))
+                ph = f"parent hour {h} complete" if h >= 0 else "parent: no hour complete yet"
+                self.say(f"{ph}; " + ", ".join(f"{d} {s}" for d, s in states.items()))
                 self._write()
         for d in self.plan["domains"]:
             if d == pd and self.a.parent_run is not None:

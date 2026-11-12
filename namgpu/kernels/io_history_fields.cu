@@ -147,66 +147,89 @@ extern "C" __global__ void hist_surface(
     RAINNC[n2] = ACPREC_TOT[n2] * 1000.0f - cu;
 }
 
-// Reflectivity as NAM's post writes it: the microphysics REFL_10CM plus the BMJ convective-rain reflectivity
-// (woof-nam 0.1.3, 2026-11-05). NCEP's NAM post (nam_nceppost.fd MDLFLD.f 247-345 and 2675-2683, as cited in
-// the NAM start study) adds, in Z units, Z = CU_A * R**CU_B (CU_A 300, CU_B 1.4; Marshall-Palmer-type Z-R, the
-// same constants as module_DIAGNOSE's CUREFL, see io_max_fields.cu) for the convective rain rate R (mm/h) =
-// CPRATE * 3.6e6 / (DT*NPHS), from the convective cloud top (CNVTOP, a bottom-up layer number, 1 = lowest) down
-// to the ground: full strength at and below the freezing level (the highest level with T >= 273.15 K, else the
-// lowest level), falling off above it as 10**(-2 dz / max(1000 m, zct - zfrz)), i.e. 20 dBZ weaker at the cloud
-// top. REFC is the column maximum of that sum, REFD its value at a level. Written from that description and the
-// published Z-R constants, not from the post source.
-// Levels with no convective term keep REFL_10CM exactly (no dBZ -> Z -> dBZ round trip), so a column without
-// convective rain is byte-identical to the plain microphysics field.
-// One thread per column. write3 != 0: OUT3 [LM,JM,IM] gets every level; COMP [JM,IM] always gets the maximum.
-#define HR_CU_A   300.0f
-#define HR_CU_B   1.4f
-#define HR_DBZMIN (-20.0f)
-#define HR_ZMIN   0.01f          // 10**(0.1*DBZMIN)
-#define HR_TFRZ   273.15f
-extern "C" __global__ void hist_refl_post(
+// Radar reflectivity with the convective rain included: history REFL_10CM and its column maximum COMPOSITE.
+//
+// The microphysics reflectivity (dBZ) leaves out the precipitation of the convection scheme, which falls in the
+// same columns. That rain is turned into an equivalent reflectivity factor with the WSR-88D default relation
+//     Z = 300 R^1.4        (Z in mm6 m-3, R in mm h-1; Fulton et al. 1998, Wea. Forecasting 13, 377-395,
+//                           section 3d(1), p. 382),
+// the same constants as the model's own CUREFL (nmm/module_DIAGNOSE.F90: CU_A = 300, CU_B = 1.4), and added to the
+// microphysics value in linear units, as the model's MAX_FIELDS_HR and CALMICT add CUREFL:
+//     Z_total = 10^(dBZ_mp / 10) [0 where dBZ_mp is DBZmin] + Z_conv,   dBZ = 10 log10(Z_total) if Z_total > Zmin,
+//     else DBZmin (DBZmin = -20, module_CONSTANTS; Zmin = 0.01, module_DIAGNOSE).
+// R is the scheme's last precipitation over its own call interval: CPRATE (m per call) / (NCNVC DT) in mm h-1.
+// Vertical extent: from the lowest layer up to the highest convective cloud top layer of the output interval
+// (CNVTOP, layers counted from the bottom; 0 = no convective cloud, then the whole column takes the term).
+// Where T < 0 C the precipitation is ice, and the term falls off with height h above the 0 C level z0:
+//     Z_conv(h) = Z_conv * 10^(-(D0 + S h) / 10),   D0 = 3.5 dB, S = 4.0 dB km-1   (layers with T < 0 C)
+// Reflectivity factors are radar-equivalent (water dielectric factor |K_w|^2 = 0.93). For dry ice particles of the
+// same mass, sized by melted diameter, Z_e = (|K_i|^2 / |K_w|^2) (rho_w / rho_i)^2 Z = 0.224 Z (-6.5 dB; Smith 1984,
+// J. Climate Appl. Meteor. 23, 1258-1260); the profile reaches that value 0.75 km above z0, where mixed-phase
+// particles have frozen. Above it the peak reflectivity of convective cores decreases by a few dB per km with
+// height (Heymsfield et al. 2010, J. Atmos. Sci. 67, 285-308, section 3b and Fig. 11: mean peak profiles fall from
+// near their low-level value at the -10 C level, about 6 km, by roughly 2.5 to 3 dB km-1 up to 10 km, over land,
+// ocean and in tropical cyclones). D0 and S are fitted to NCEP's NAM REFD records: the difference REFD(4000 m AGL) -
+// REFD(hybrid level 1) against the height of 4000 m AGL above the 0 C isotherm height (both NCEP records), in
+// columns where the hour's convective precipitation is at least 1 mm and 90% of the total, ten 00-24 h cycles of
+// 2024-2025; least absolute error over 0.75 to 3.5 km above z0, with the term absent (drop of 25 dB or more)
+// left out. z0 is the lowest 0 C crossing of the column, linear in height between layer midpoints; the lowest
+// layer midpoint if that layer is already below 0 C.
+// Columns with no convective rain (CPRATE <= 0) are copied unchanged.
+//
+// One thread per column. REFL, T, Z (layer midpoint height, m), OUT3 are [LM, JM, IM] (l0 = 0 at the top);
+// CPRATE, CNVTOP, COMP are [JM, IM].
+// WRITE3 = 0 writes COMP only (the 3-D field is then computed later into a shared buffer); OUT3 may alias REFL.
+#define HR_CONV_A      300.0f     // Z = A R^B (Fulton et al. 1998; module_DIAGNOSE CU_A)
+#define HR_CONV_B      1.4f       // (module_DIAGNOSE CU_B)
+#define HR_ICE_D0      3.5f       // dB below the liquid value at the 0 C level (fit, see above)
+#define HR_ICE_SLOPE   4.0e-3f    // dB per m above the 0 C level (fit, see above)
+#define HR_DBZMIN      (-20.0f)   // module_CONSTANTS dbzmin
+#define HR_ZMIN        0.01f      // module_DIAGNOSE Zmin
+
+extern "C" __global__ void hist_refl_conv(
     int IM, int JM, int LM,
     const float* __restrict__ REFL, const float* __restrict__ T, const float* __restrict__ Z,
-    const float* __restrict__ CPRATE, const float* __restrict__ CNVTOP, const float rdtphs,
-    const int write3, float* __restrict__ OUT3, float* __restrict__ COMP)
+    const float* __restrict__ CPRATE, const float* __restrict__ CNVTOP,
+    float rate_mmh, int WRITE3,
+    float* OUT3, float* __restrict__ COMP)
 {
     COLUMN_IJ(IM, JM)
-    const size_t c = IDX2(i0, j0, IM);
-    const float cuprate = rdtphs * CPRATE[c];
-    const int cnvtop = (int)CNVTOP[c];
-    const bool has = (cuprate > 0.0f) && (cnvtop >= 1);
-    float cmax = -1.0e30f;
-    if (!has) {
-        for (int l0 = 0; l0 < LM; ++l0) {
-            const float r = REFL[IDX3(i0, j0, l0, IM, JM)];
-            if (write3) OUT3[IDX3(i0, j0, l0, IM, JM)] = r;
-            cmax = fmaxf(cmax, r);
+    const size_t n2 = IDX2(i0, j0, IM);
+    const float cp = CPRATE[n2];
+    float zconv = 0.0f;
+    if (cp > 0.0f) zconv = HR_CONV_A * powf(cp * rate_mmh, HR_CONV_B);
+    int ktop = (int)rintf(CNVTOP[n2]);
+    if (ktop < 1 || ktop > LM) ktop = LM;
+    // 0 C level: the lowest crossing going up from the bottom layer (l0 = LM - 1)
+    float z0 = 3.0e38f;
+    if (zconv > 0.0f) {
+        const size_t nb = IDX3(i0, j0, LM - 1, IM, JM);
+        if (T[nb] < NMMB_TIW) {
+            z0 = Z[nb];
+        } else {
+            for (int l0 = LM - 2; l0 >= 0; --l0) {
+                const size_t nu = IDX3(i0, j0, l0, IM, JM), nl = IDX3(i0, j0, l0 + 1, IM, JM);
+                if (T[nu] < NMMB_TIW) {
+                    const float w = (T[nl] - NMMB_TIW) / (T[nl] - T[nu]);
+                    z0 = Z[nl] + w * (Z[nu] - Z[nl]);
+                    break;
+                }
+            }
         }
-        COMP[c] = cmax;
-        return;
     }
-    // freezing level: the highest level (smallest l0, state levels run top-down) with T >= TFRZ, else the lowest
-    float zfrz = Z[IDX3(i0, j0, LM - 1, IM, JM)];
+    float cmax = HR_DBZMIN;
     for (int l0 = 0; l0 < LM; ++l0) {
-        if (T[IDX3(i0, j0, l0, IM, JM)] >= HR_TFRZ) { zfrz = Z[IDX3(i0, j0, l0, IM, JM)]; break; }
-    }
-    const int kct = min(max(cnvtop - 1, 0), LM - 1);      // bottom-up 0-based
-    const int lct = LM - 1 - kct;                           // state (top-down) index of the cloud-top layer
-    const float zct = Z[IDX3(i0, j0, lct, IM, JM)];
-    const float curefl_s = HR_CU_A * powf(cuprate, HR_CU_B);
-    const float curefl_i = -2.0f / fmaxf(1000.0f, zct - zfrz);
-    for (int l0 = 0; l0 < LM; ++l0) {
-        const size_t p = IDX3(i0, j0, l0, IM, JM);
-        float r = REFL[p];
-        if (l0 >= lct) {
-            const float delz = Z[p] - zfrz;
-            const float fctr = (delz <= 0.0f) ? 1.0f : powf(10.0f, curefl_i * delz);
-            const float zr = powf(10.0f, 0.1f * r);
-            const float zt = zr + fctr * curefl_s;
-            r = fmaxf(HR_DBZMIN, 10.0f * log10f(fmaxf(HR_ZMIN, zt)));
+        const size_t n = IDX3(i0, j0, l0, IM, JM);
+        float dbz = REFL[n];
+        if (zconv > 0.0f && (LM - l0) <= ktop) {
+            const float zc = (T[n] < NMMB_TIW)
+                ? zconv * exp10f(-0.1f * (HR_ICE_D0 + HR_ICE_SLOPE * fmaxf(Z[n] - z0, 0.0f)))
+                : zconv;
+            const float z = ((dbz > HR_DBZMIN) ? exp10f(0.1f * dbz) : 0.0f) + zc;
+            dbz = (z > HR_ZMIN) ? 10.0f * log10f(z) : HR_DBZMIN;
         }
-        if (write3) OUT3[p] = r;
-        cmax = fmaxf(cmax, r);
+        if (WRITE3) OUT3[n] = dbz;
+        cmax = fmaxf(cmax, dbz);
     }
-    COMP[c] = cmax;
+    COMP[n2] = cmax;
 }

@@ -228,7 +228,7 @@ RAP = {
 }
 
 # HRRR 3 km analysis (hrrr.tHHz.wrfprsf00.grib2, CONUS, NCEP template 3.30 Lambert conformal 1799 x 1059, isobaric
-# 1013.2 and 1000-50 hPa every 25 hPa). The same UPP record set as RAP (grib2 .idx of 2026-01-23 12Z): CLMR, CIMIXR,
+# 1013.2 and 1000-50 hPa every 25 hPa). The same NCEP record set as RAP (grib2 .idx of 2026-01-23 12Z): CLMR, CIMIXR,
 # RWMR, SNMR, GRLE on every level, the nine RUC soil nodes, LAND, ICEC, WEASD, SNOD, 2 m T/q, 10 m winds. Two
 # differences: the file has canopy water (CNWAT surface), so it is read rather than set to 0, and it has no isobaric
 # TKE, so Q2 starts at the cold floor (gfs_start.warm_state). Grid and winds: source_grids.LambertGrid.

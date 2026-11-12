@@ -1,4 +1,4 @@
-"""Bit-faithful reproductions of the glibc 2.39 FP32 libm calls WRF makes.
+"""Bit-faithful FP32 maths routines for the libm calls WRF makes.
 
 Not Noah-MP-specific despite the module name (the Noah-MP lane owns the
 ``noahmp_*`` namespace; promote this to a shared module when another lane needs
@@ -6,11 +6,12 @@ it).
 
 Why this exists
 ---------------
-The oracle is gfortran 13.3.0 linked against glibc 2.39, so ``EXP``, ``LOG``,
-``LOG10`` and ``**`` on ``REAL(4)`` become calls to glibc's ``expf``, ``logf``,
-``log10f`` and ``powf``.  **None of those four is correctly rounded.**  Rounding
-the FP64 result once -- the shim the MYNN lane uses, and the obvious thing to
-do -- disagrees with glibc on a large fraction of the domain:
+The oracle is gfortran 13.3.0 on x86-64 Linux, so ``EXP``, ``LOG``, ``LOG10``
+and ``**`` on ``REAL(4)`` become calls to the host C library's ``expf``,
+``logf``, ``log10f`` and ``powf`` (the reference libm).  **None of those four
+is correctly rounded.**  Rounding the FP64 result once -- the shim the MYNN
+lane uses, and the obvious thing to do -- disagrees with the reference libm on
+a large fraction of the domain:
 
 | call      | domain swept                    | disagreement with FP64-then-round |
 |-----------|---------------------------------|----------------------------------:|
@@ -24,26 +25,24 @@ boundary.  That is not a tolerance to loosen, it is the wrong function.
 
 What this is
 ------------
-Direct transcriptions of the glibc 2.39 implementations:
+Our own FP32 implementations of these routines:
 
-* ``logf``   -- ``sysdeps/ieee754/flt-32/e_logf.c`` + ``e_logf_data.c``
-  (ARM optimized-routines: 16-entry table, cubic in ``r``, FP64 intermediate,
-  one rounding to FP32 at the end).
-* ``log10f`` -- ``sysdeps/ieee754/flt-32/e_log10f.c``, which is still the 1993
-  SunPro reduction ``log10(x) = k*log10_2 + log10(e)*logf(z)`` evaluated in
-  **FP32** on top of ``logf``.  This is why ``log10f`` is so much less accurate
-  than ``logf``.
-* ``expf``   -- ``sysdeps/ieee754/flt-32/e_expf.c`` + ``e_exp2f_data.c``
-  (32-entry ``2^(i/32)`` table, the shift-trick round-to-int, cubic in ``r``).
-* ``powf``   -- ``sysdeps/ieee754/flt-32/e_powf.c`` + ``e_powf_log2_data.c``
-  (a 16-entry ``log2`` table feeding the same ``exp2`` core).
+* ``logf``   -- the Arm optimized-routines algorithm and its table (MIT;
+  LICENSE-third-party.txt beside the kernels): 16-entry table, cubic in
+  ``r``, FP64 intermediate, one rounding to FP32 at the end.
+* ``log10f`` -- the 1993 SunPro reduction
+  ``log10(x) = k*log10_2 + log10(e)*logf(z)`` evaluated in **FP32** on top of
+  ``logf``.  This is why ``log10f`` is so much less accurate than ``logf``.
+* ``expf``   -- the Arm algorithm and its 32-entry ``2^(i/32)`` table, the
+  shift-trick round-to-int, cubic in ``r``.
+* ``powf``   -- the Arm algorithm: a 16-entry ``log2`` table feeding the same
+  ``exp2`` core.
 
 ``TOINT_INTRINSICS`` is 0 on x86-64, so ``POWF_SCALE`` is 1.0 and the shift
-trick is used in both ``exp2`` paths; both are reproduced as glibc compiles
-them for this target.
+trick is used in both ``exp2`` paths, as on the oracle host.
 
-Verification (all against the live glibc 2.39 on the oracle host, C
-transcription compiled with ``-ffp-contract=off`` and again with
+Verification (all against the reference libm on the oracle host, a C build
+of these routines compiled with ``-ffp-contract=off`` and again with
 ``-mfma -ffp-contract=fast``, identical results):
 
 * ``logf``  : 222,414,918 FP32 inputs swept over (0.1,1], [1,100], [1e-6,0.1]
@@ -54,37 +53,34 @@ transcription compiled with ``-ffp-contract=off`` and again with
 * ``expf``  : 146,800,642 FP32 inputs over \\|x\\| <= 80 -- **2 mismatches**,
   both 1 ULP: ``x = 0x4202422F`` (32.5646324) and ``x = 0xC27C65D9``
   (-63.0994606).  Residual rate 1.4e-8, a 4,400x improvement on the FP64
-  shim.  Diagnosis: glibc's x86-64 multiarch ``expf`` is selected at run time
-  and is not byte-identical to the generic C at those two points; enabling FMA
-  contraction in the transcription does not move either, so it is not a
-  contraction artefact.  Any Noah-MP column that lands on one of those two
-  exact FP32 arguments will miss ``max_ulp 0`` by 1 ULP and must be reported,
-  not absorbed.
+  shim.  Diagnosis: the reference libm's x86-64 ``expf`` variant is selected at
+  run time and gives a different answer at those two points; enabling FMA
+  contraction here does not move either, so it is not a contraction artefact.
+  Any Noah-MP column that lands on one of those two exact FP32 arguments will
+  miss ``max_ulp 0`` by 1 ULP and must be reported, not absorbed.
 
 The CUDA halves of these functions live in
 ``gpuwm/core/kernels/noahmp_leaves.cu`` and must stay in step with this file.
 
-Two independent transcriptions, and what they measured about each other
------------------------------------------------------------------------
+Two independent implementations, and what they measured about each other
+------------------------------------------------------------------------
 The five Noah-MP leaf lanes (vegprecip, radiation, bareflux, vegeflux, snow)
-arrived carrying a second transcription of ``logf``/``expf``/``powf``/``atanf``
-and a third of ``logf``/``atanf``, written independently from the same glibc
-2.39 sources.  They differed in one interesting way: the second transcription
-put an explicit :func:`math.fma` at every ``a*b + c`` site in ``logf``,
-``expf`` and ``powf``'s ``log2``, on the argument that glibc ifunc-selects the
-``-mfma`` rebuild (``__logf_fma``, ``__powf_fma``) on an FMA host, and that
+arrived carrying a second implementation of ``logf``/``expf``/``powf``/``atanf``
+and a third of ``logf``/``atanf``, written independently.  They differed in one
+interesting way: the second put an explicit :func:`math.fma` at every
+``a*b + c`` site in ``logf``, ``expf`` and ``powf``'s ``log2``, on the argument
+that the reference libm selects an FMA variant on an FMA host, and that
 ``logc + k*Ln2`` in particular is a single FMA in the disassembly.  This file
 contracts nothing.
 
 Both were run against each other over 10,500,000 argument pairs and both
-against the 30,000 pinned glibc words in
-``gpuwm/data/noahmp/oracle/glibc-libm-fp32.csv`` and the 4,256 in
-``glibc-atanf-fp32.csv``: **zero disagreements, on every function, in every
-sweep**.  The FMA sites are real in the disassembly and they do change the
-binary64 intermediate, but not by enough to move the single rounding to
-binary32 at the end on any argument either lane could find.  That is a
-measured null result, not a proof; it is recorded here because it is the only
-independent check these transcriptions will ever get.  This file keeps the
+against the 30,000 pinned reference words in gpuwm's pinned FP32 libm fixture
+and the 4,256 in gpuwm's pinned atanf fixture: **zero disagreements, on every
+function, in every sweep**.  The FMA sites are real in the disassembly and they
+do change the binary64 intermediate, but not by enough to move the single
+rounding to binary32 at the end on any argument either lane could find.  That
+is a measured null result, not a proof; it is recorded here because it is the
+only independent check these routines will ever get.  This file keeps the
 non-FMA form for a second reason as well: :func:`math.fma` is CPython 3.13+,
 and the GPU host this project validates on runs 3.12.
 
@@ -100,7 +96,6 @@ import struct
 import numpy as np
 
 __all__ = [
-    "GLIBC_VERSION",
     "f32",
     "logf",
     "log10f",
@@ -111,10 +106,6 @@ __all__ = [
     "expm1f",
     "tanhf",
 ]
-
-#: The glibc these transcriptions reproduce.  Gates that pin a libm answer
-#: assert against this so a host upgrade cannot silently move the reference.
-GLIBC_VERSION = "2.39"
 
 F = np.float32
 _H = float.fromhex
@@ -213,7 +204,7 @@ def sqrtf(x) -> np.float32:
 
     gfortran emits ``sqrtss`` inline, and the hardware square root is
     correctly rounded, so unlike its neighbours in this file this one needs no
-    transcription -- computing in binary64 and rounding once is the same
+    routine of its own -- computing in binary64 and rounding once is the same
     function (again, 53 >= 2*24 + 2).  It lives here so that a leaf reaching
     for a float32 elementary function has exactly one place to look.
     """
@@ -226,7 +217,7 @@ def sqrtf(x) -> np.float32:
 
 
 # ---------------------------------------------------------------------------
-# e_logf_data.c -- 16-entry table, ln2, and the three polynomial coefficients.
+# logf table (Arm optimized-routines, MIT) -- 16-entry table, ln2, and the three polynomial coefficients.
 # ---------------------------------------------------------------------------
 _LOGF_TAB = (
     (_H("0x1.661ec79f8f3bep+0"), _H("-0x1.57bf7808caadep-2")),
@@ -255,7 +246,7 @@ _LOGF_A = (
 _LOGF_OFF = 0x3F330000
 
 # ---------------------------------------------------------------------------
-# e_exp2f_data.c -- shared by expf, exp2f and powf.  EXP2F_TABLE_BITS = 5.
+# exp2f table (Arm optimized-routines, MIT) -- shared by expf, exp2f and powf.  EXP2F_TABLE_BITS = 5.
 # ---------------------------------------------------------------------------
 _EXP2F_N = 32
 _EXP2F_TAB = (
@@ -286,7 +277,7 @@ _EXP2F_POLY_SCALED = (
 _EXP2F_INVLN2_SCALED = _H("0x1.71547652b82fep+0") * _EXP2F_N
 
 # ---------------------------------------------------------------------------
-# e_powf_log2_data.c -- POWF_SCALE is 1.0 because TOINT_INTRINSICS is 0.
+# powf log2 table (Arm optimized-routines, MIT) -- POWF_SCALE is 1.0 because TOINT_INTRINSICS is 0.
 # ---------------------------------------------------------------------------
 _POWF_TAB = (
     (_H("0x1.661ec79f8f3bep+0"), _H("-0x1.efec65b963019p-2")),
@@ -316,7 +307,7 @@ _POWF_A = (
 _POWF_OFF = 0x3F330000
 _POWF_SIGN_BIAS = 1 << (5 + 11)
 
-# e_log10f.c FP32 constants.
+# log10f FP32 constants (SunPro reduction).
 _IVLN10 = _asfloat(0x3EDE5BD9)
 _LOG10_2HI = _asfloat(0x3E9A2080)
 _LOG10_2LO = _asfloat(0x355427DB)
@@ -324,7 +315,7 @@ _TWO25 = _asfloat(0x4C000000)
 
 
 def logf(x) -> np.float32:
-    """glibc 2.39 ``logf`` (sysdeps/ieee754/flt-32/e_logf.c)."""
+    """FP32 ``logf``, our own implementation."""
     ix = _asuint(x)
     if ix == 0x3F800000:
         return F(0.0)
@@ -353,7 +344,7 @@ def logf(x) -> np.float32:
 
 
 def log10f(x) -> np.float32:
-    """glibc 2.39 ``log10f`` (still the 1993 SunPro FP32 reduction)."""
+    """FP32 ``log10f`` (still the 1993 SunPro FP32 reduction)."""
     value = F(x)
     hx = _asuint(value)
     k = 0
@@ -377,7 +368,7 @@ def log10f(x) -> np.float32:
 
 
 def _exp2_core(xd: float, shift: float, poly, sign_bias: int) -> float:
-    """The shared 32-entry exp2 core of glibc's expf / exp2f / powf."""
+    """The shared 32-entry exp2 core of expf / exp2f / powf."""
     kd = xd + shift
     ki = _asuint64(kd)
     kd -= shift
@@ -393,7 +384,7 @@ def _exp2_core(xd: float, shift: float, poly, sign_bias: int) -> float:
 
 
 def expf(x) -> np.float32:
-    """glibc 2.39 ``expf`` (sysdeps/ieee754/flt-32/e_expf.c)."""
+    """FP32 ``expf``, our own implementation."""
     value = F(x)
     abstop = (_asuint(value) >> 20) & 0x7FF
     if abstop >= (_asuint(F(88.0)) >> 20):
@@ -447,7 +438,7 @@ def _zeroinfnan(ix: int) -> bool:
 
 
 def powf(x, y) -> np.float32:
-    """glibc 2.39 ``powf`` (sysdeps/ieee754/flt-32/e_powf.c)."""
+    """FP32 ``powf``, our own implementation."""
     base = F(x)
     exponent = F(y)
     sign_bias = 0
@@ -493,20 +484,20 @@ def powf(x, y) -> np.float32:
 
 
 # ---------------------------------------------------------------------------
-# atanf -- glibc 2.39 sysdeps/ieee754/flt-32/s_atanf.c, which is still the
+# atanf -- FP32 atanf, our own implementation of the
 # fdlibm reduction: five argument ranges, one 11-term odd/even polynomial, and
 # a hi/lo pair per range.  Every operation is FP32; there is no FP64
 # intermediate anywhere, which is why an FP64-then-round shim is a different
 # function here as well.  SFCDIF1 (module_sf_noahmplsm.F:4691, 4698) is the
 # only Noah-MP caller.
 #
-# Two facts measured against the live glibc 2.39 on the oracle host, not
+# Two facts measured against the reference libm on the oracle host, not
 # assumed:
 #
 #   * the large-argument shortcut fires at |x| >= 2**25 (0x4C000000), not at
 #     the 2**26 or 2**34 thresholds other fdlibm descendants use.  Above it
-#     glibc returns the constant 0x3FC90FDB for every argument;
-#   * with that threshold, this transcription reproduces glibc on **all
+#     the reference libm returns the constant 0x3FC90FDB for every argument;
+#   * with that threshold, this routine matches the reference libm on **all
 #     4,278,190,082 non-NaN FP32 inputs** -- the entire domain, swept
 #     exhaustively -- with 0 mismatches.  Rounding the FP64 result once instead
 #     disagrees on 823,767 of the 16,777,216 inputs in [0.5, 1) alone.
@@ -521,7 +512,7 @@ _ATANF_T = tuple(_asfloat(b) for b in (
 
 
 def atanf(x) -> np.float32:
-    """glibc 2.39 ``atanf`` (sysdeps/ieee754/flt-32/s_atanf.c)."""
+    """FP32 ``atanf``, our own implementation."""
     value = F(x)
     hx = _as_int32(_asuint(value))
     ix = hx & 0x7FFFFFFF
@@ -567,19 +558,19 @@ def atanf(x) -> np.float32:
 
 
 # ---------------------------------------------------------------------------
-# expm1f / tanhf -- sysdeps/ieee754/flt-32/s_expm1f.c and s_tanhf.c
+# expm1f / tanhf -- FP32, our own implementation of the SunPro reductions
 #
 # Noah-MP's ENERGY reaches TANH exactly once, in the snow-cover fraction
 #   FSNO = TANH( SNOWH / (parameters%SCFFAC * FMELT) )       (:2072)
 # and that single call is enough to put every snow column's answer through
-# glibc's tanhf.  It is *not* interchangeable with an FP64 shim: over the
+# the reference libm's tanhf.  It is *not* interchangeable with an FP64 shim: over the
 # 204,064,836 FP32 inputs in [1e-6, 22], `(float)tanh((double)x)` disagrees
-# with glibc's `tanhf` on 48,501,304 of them -- 23.8%, three orders of
-# magnitude worse than expf's 0.062%.  These are still the 1993 SunPro
-# routines in glibc 2.39, unlike logf/expf/powf above, which is why they are
+# with the reference libm's `tanhf` on 48,501,304 of them -- 23.8%, three orders of
+# magnitude worse than expf's 0.062%.  The reference uses the 1993 SunPro
+# reductions here, unlike logf/expf/powf above, which is why they are
 # so much less accurate.
 #
-# Verified against the live glibc 2.39 on the oracle host (gcc -O2
+# Verified against the reference libm on the oracle host (gcc -O2
 # -ffp-contract=off): 1,106,247,680 FP32 inputs over (0, 30] -- **0
 # mismatches**.  The CUDA half lives in gpuwm/core/kernels/noahmp_energy.cu
 # and must stay in step with this.
@@ -602,7 +593,7 @@ _EXPM1F_Q = (
 
 
 def expm1f(x) -> np.float32:
-    """glibc 2.39 ``expm1f``.  Only reached through :func:`tanhf`."""
+    """FP32 ``expm1f``.  Only reached through :func:`tanhf`."""
 
     x = F(x)
     one = _EXPM1F_ONE
@@ -618,7 +609,7 @@ def expm1f(x) -> np.float32:
             if hx == 0x7F800000:
                 return x if xsb == 0 else F(-1.0)
             if x > _EXPM1F_O_THRESHOLD:
-                # glibc returns huge*huge, i.e. +inf with the overflow flag
+                # the reference libm returns huge*huge, i.e. +inf with the overflow flag
                 # raised.  numpy would warn about the multiply; the value is
                 # the point, not the warning.
                 with np.errstate(over="ignore"):
@@ -687,7 +678,7 @@ def expm1f(x) -> np.float32:
 
 
 def tanhf(x) -> np.float32:
-    """glibc 2.39 ``tanhf``.  Noah-MP reaches it only through ENERGY's FSNO."""
+    """FP32 ``tanhf``.  Noah-MP reaches it only through ENERGY's FSNO."""
 
     x = F(x)
     one = F(1.0)

@@ -47,7 +47,12 @@ SFC = srec.GFS["sfc"]
 SOILW_NO_LAND = 0.25   # m3/m3, soil moisture where the source window has no land at all (declared fill)
 SOIL_KEYS = ("TSOIL1", "TSOIL2", "TSOIL3", "TSOIL4", "SOILW1", "SOILW2", "SOILW3", "SOILW4", "CNWAT")
 STATIC_KEYS = ("HGT_SFC", "LAND", "VGTYP", "SOTYP", "SFCR", "VEG", "ALBDO")
-STATIC_EXTRA = ("ALBASE", "MXSNAL")   # init-static-build files only (fractions); NAM's bgrd3d00 has neither
+STATIC_EXTRA = ("ALBASE", "MXSNAL")   # fractions. init-static-build files carry both from data. NAM's bgrd3d00 has
+#                                       neither record: ALBASE is taken from its albedo where it has no snow
+#                                       (sources.albase_from_analysis), and both come from NCEP's native surface
+#                                       file of the same cycle when it is there (sources.NATIVE_LAND: SNFALB,
+#                                       MXSALB); without it MXSNAL stays the table fill
+STATIC_SNOW = ("SNOWC", "WEASD")      # the analysis' snow, read only to find its snow-free cells
 # Source window kept around the domain (decode_source). 5 deg of latitude (~550 km) on every side, and the
 # same distance in longitude (5 deg / cos(lat) at the domain's most poleward row), so the soil ring fill
 # (_ring_fill) reaches the nearest source land for island and coastal domains inside the window. A domain
@@ -841,13 +846,34 @@ def load_static(ctx):
     path = Path(ctx.case_dir) / srcmod.SOURCES["native"]["file"]
     if path.is_file():
         tmpdir = str(Path(ctx.case_dir).resolve().parents[1] / "scratch")
-        got, _ = srcmod.decode_native(ctx, path, [], list(STATIC_KEYS), int(ctx.grid.lm), tmpdir,
-                                      lambda n, a: None, top_first=True)
+        got, _ = srcmod.decode_native(ctx, path, [], list(STATIC_KEYS) + list(STATIC_SNOW), int(ctx.grid.lm),
+                                      tmpdir, lambda n, a: None, top_first=True)
+        # the snow-free base albedo from that analysis (sources.albase_from_analysis), as the native start takes it,
+        # and the base albedo under snow and the maximum snow albedo from the case's native surface file (NATIVE_LAND)
+        if getattr(ctx, "tables", None) is not None:
+            albase = srcmod.albase_from_analysis(got["ALBDO"], got["SNOWC"], got["WEASD"], got["LAND"])
+            lpath = srcmod.native_land_file(ctx.case_dir)
+            rec = srcmod.decode_native_land(ctx, lpath, tmpdir) if lpath is not None else {}
+            rec = {k: v for k, v in rec.items() if k in ("SNFALB", "MXSALB")}   # the soil is the source's own
+            extra, _, lacking = srcmod.land_from_surface_file(rec, albase, got["LAND"])
+            ctx.tables["static_extra"] = extra
+            print(case_land_line(lpath, lacking), flush=True)
         return {k: got[k] for k in STATIC_KEYS}, str(path)
     if not STATIC_NPZ.is_file():
         raise FileNotFoundError(f"{UNIT}: no NAM static surface: neither {path} nor {STATIC_NPZ}. Build it once "
                                 "with: python -m namgpu.init.gfs_start --build-static <any archived bgrd3d00>")
     z = np.load(STATIC_NPZ)
+    # a static file written by this version carries ALBASE (build_static); an older one does not, and the base
+    # albedo is then the vegetation-table fill, as before
+    if getattr(ctx, "tables", None) is not None:
+        ctx.tables["static_extra"] = {k: cp.asarray(z[k]) for k in STATIC_EXTRA if k in z.files}
+        if "ALBASE" not in z.files:
+            print(f"{UNIT}: {STATIC_NPZ} has no ALBASE (written by an older woof-nam): the snow-free albedo is the "
+                  "vegetation-table fill; rebuild it with `woof-nam static <bgrd3d00>` for the NAM's own", flush=True)
+        elif "MXSNAL" not in z.files:
+            print(f"{UNIT}: {STATIC_NPZ} has no MXSNAL (written by an older woof-nam): the maximum snow albedo is the "
+                  "vegetation-table fill; rebuild it with `woof-nam static <bgrd3d00>` (with the bgrdsf00 the "
+                  "fetch puts beside it) for the NAM's own", flush=True)
     return {k: cp.asarray(z[k]) for k in STATIC_KEYS}, str(STATIC_NPZ)
 
 
@@ -1081,8 +1107,52 @@ def _stage_one(ctx, name, row):
     return ctx.tables["grid_source"]
 
 
-def build_static(bgrd, out=STATIC_NPZ):
-    """Write the NAM-grid static surface (STATIC_KEYS) from an archived bgrd3d00 file."""
+def land_file_beside(bgrd):
+    """The NCEP native surface file of the same cycle next to an archived bgrd3d00 (the fetch's
+    bgrdsf00.land.grib2 or bgrdsf00.grib2 in a case's raw/nam, or <stem>.bgrdsf00.land.grib2 beside a
+    nam.<cycle>.bgrd3d00.grib2), or None."""
+    b = Path(bgrd)
+    names = ["bgrdsf00.land.grib2", "bgrdsf00.grib2"]
+    if "bgrd3d00" in b.name:
+        names = [b.name.replace("bgrd3d00", "bgrdsf00.land"),
+                 b.name.replace("bgrd3d00", "bgrdsf00")] + names
+    for n in names:
+        p = b.with_name(n)
+        if p != b and p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def case_land_line(lpath, lacking):
+    """The one line a GFS start prints about the case's NCEP native surface file (lpath, or None). lacking:
+    land_from_surface_file's list. A GFS start's soil is the GFS's own, so liquid soil water is not a lack here.
+    Breakage it prevents: with the file in the case and both albedos taken from it, the line read "no NCEP native
+    surface file in the case: liquid soil water from the vegetation table ... `woof-nam fetch` on the case brings
+    it" (0.2.1 candidate a3f8346, warm case 2024-05-06 12Z from the GFS)."""
+    lacking = [x for x in lacking if x != "liquid soil water"]
+    if lpath is None:
+        return (f"{UNIT}: no NCEP native surface file in the case: {', '.join(lacking)} from the vegetation "
+                "table, not the NAM's own; `woof-nam fetch` on the case brings it")
+    if lacking:
+        return f"{UNIT}: {lpath.name} has no {', '.join(lacking)} record: from the vegetation table"
+    return f"{UNIT}: albedos from the case's {lpath.name}"
+
+
+def static_line(out, lpath, lacking):
+    """The one line build_static prints. lacking: land_from_surface_file's list. The static file never holds liquid
+    soil water, so that name is not a lack here. Breakage it prevents: the line read "no NCEP bgrdsf00 file given or
+    beside it" for a build that took both albedos from that file (the 0.2.1 candidate's front-door run)."""
+    lacking = [x for x in lacking if x != "liquid soil water"]
+    if lpath is not None and not lacking:
+        return f"wrote {out} (albedos from {lpath.name})"
+    why = "no NCEP bgrdsf00 file given or beside it" if lpath is None else f"{lpath.name} has no such record"
+    return f"wrote {out}; {', '.join(lacking)}: the vegetation table ({why})"
+
+
+def build_static(bgrd, out=STATIC_NPZ, land=None):
+    """Write the NAM-grid static surface (STATIC_KEYS) from an archived bgrd3d00 file, with ALBASE and, when NCEP's
+    native surface file of the same cycle is given or lies beside it (land_file_beside), the NAM's own base albedo
+    under snow and maximum snow albedo (sources.NATIVE_LAND SNFALB, MXSALB)."""
     import cupy as cp
     from types import SimpleNamespace
     from namgpu import config, grid as gridmod
@@ -1091,11 +1161,17 @@ def build_static(bgrd, out=STATIC_NPZ):
     cfg = config.load()
     g = gridmod.build(cfg)
     ctx = SimpleNamespace(grid=g, stream=None)
-    got, _ = srcmod.decode_native(ctx, Path(bgrd), [], list(STATIC_KEYS), int(g.lm), str(ROOT / "scratch"),
-                                  lambda n, a: None, top_first=True)
+    got, _ = srcmod.decode_native(ctx, Path(bgrd), [], list(STATIC_KEYS) + list(STATIC_SNOW), int(g.lm),
+                                  str(ROOT / "scratch"), lambda n, a: None, top_first=True)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out, **{k: cp.asnumpy(got[k]) for k in STATIC_KEYS})
-    print(f"wrote {out}")
+    albase = srcmod.albase_from_analysis(got["ALBDO"], got["SNOWC"], got["WEASD"], got["LAND"])
+    lpath = Path(land) if land else land_file_beside(bgrd)
+    rec = srcmod.decode_native_land(ctx, lpath, str(ROOT / "scratch")) if lpath is not None else {}
+    rec = {k: v for k, v in rec.items() if k in ("SNFALB", "MXSALB")}
+    extra, _, lacking = srcmod.land_from_surface_file(rec, albase, got["LAND"])
+    np.savez_compressed(out, **{k: cp.asnumpy(v) for k, v in extra.items()},
+                        **{k: cp.asnumpy(got[k]) for k in STATIC_KEYS})
+    print(static_line(out, lpath, lacking))
 
 
 def main(argv=None) -> int:
@@ -1114,13 +1190,16 @@ def main(argv=None) -> int:
                     help="an archived NAM native analysis, <case-dir>/raw/nam/bgrd3d00.grib2")
     ap.add_argument("--build-static", dest="bgrd_opt", metavar="BGRD3D00",
                     help="same as BGRD3D00 (older form)")
+    ap.add_argument("--land", type=Path, default=None, metavar="BGRDSF00",
+                    help="NCEP's native surface file of the same cycle, for the NAM's own base albedo under snow and "
+                         "maximum snow albedo (default: bgrdsf00.land.grib2 or bgrdsf00.grib2 beside BGRD3D00)")
     ap.add_argument("--out", type=Path, default=STATIC_NPZ,
                     help=f"where to write it (default static/nam12_static.npz in the work root: {STATIC_NPZ})")
     a = ap.parse_args(argv)
     bgrd = a.bgrd or a.bgrd_opt
     if not bgrd:
         ap.error("give the archived NAM analysis file (BGRD3D00)")
-    build_static(bgrd, a.out)
+    build_static(bgrd, a.out, a.land)
     return 0
 
 

@@ -1,7 +1,7 @@
 # Evidence: 2025-03-14 12Z, MRMS | WOOF-NAM | archived NAM
 
 One forecast from a fresh clone and wheel install: `woof-nam run --case 2025-03-14_12z --source native
---hours 24` (the NAM 12Z analysis start, the digital filter, every physics scheme on) on one RTX PRO 6000.
+--hours 24` (the NAM 12Z analysis start, the digital filter, every physics scheme on) on one 96 GB card.
 The sheets are `woof-nam side-by-side` output (MRMS observed, WOOF-NAM, the archived operational NAM 12 km
 forecast of the same cycle) on one map frame and colour scale per product; the single maps are `woof-nam maps`.
 

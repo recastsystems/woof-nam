@@ -393,11 +393,13 @@ class _Seam:
                           ("RUC_SOILT1", "soilt1"), ("RUC_TSNAV", "tsnav"), ("RUC_RHOSNF", "rhosnf"),
                           ("RUC_PRECIPFR", "precipfr"), ("RUC_SNOWFALLAC", "snowfallac"), ("QSH", "qvg")):
             self._scatter(st[dst], A(name))
-        # ACSNOW (NMMB: run snow water, m, emptied by drv-bucket-reset) as Noah accumulates it on its points: the
-        # step frozen precipitation RAINBL*SR (mm -> m). The ArWen RUC column does not accumulate it, so writing its
-        # acsnow back left ACSNOW 0 on every RUC land point (nam-modern 2022-12-22 12Z history, winter-scoring lane
-        # 2026-11-09), and the hiresf WEASD accumulation product read 0 over land.
-        self._scatter(st["ACSNOW"], (v["acsnow"] + rain * sr * f32(1.0e-3)).astype(f32))
+        # ACSNOW (NMMB: snowfall water, kg m-2, emptied by drv-bucket-reset) as Noah accumulates it on its points
+        # (phys_noah_driver.cu: ACSNOW += FFROZP PRCP DT): the step frozen precipitation RAINBL*SR (mm = kg m-2).
+        # The ArWen RUC column does not accumulate it, so writing its acsnow back left ACSNOW 0 on every RUC land
+        # point (nam-modern 2022-12-22 12Z history, winter-scoring lane 2026-11-09), and the hiresf WEASD
+        # accumulation product read 0 over land. It was added in m before 2026-11-11, 1000 times smaller than
+        # Noah's.
+        self._scatter(st["ACSNOW"], (v["acsnow"] + rain * sr).astype(f32))
         for dst, name in (("RUC_SMOIS", "soilmois"), ("RUC_SH2O", "sh2o"), ("RUC_TSLB", "tso"),
                           ("RUC_SMFR3D", "smfr3d"), ("RUC_KEEPFR", "keepfr3dflag")):
             self._scatter3(st[dst], A(name))

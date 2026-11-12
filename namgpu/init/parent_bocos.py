@@ -40,7 +40,18 @@ def parent_files(run: Path, start, hours: int, step_h: int):
 
 def build(ctx, hours: int, out_dir: Path, log=print, from_hour: int = 0, generation: int | None = None):
     """Write the boco files from the parent history. from_hour / generation: a storm-following window landing
-    at that hour (gfs_bocos.build): the intervals from from_hour on, named in hours from the run start."""
+    at that hour (gfs_bocos.build): the intervals from from_hour on, named in hours from the run start.
+    Runs with ctx.stream as the current stream, whoever calls it (gfs_bocos.build says what breaks otherwise: the
+    uploads and the strip copies here are plain array operations, the interpolation kernels are on ctx.stream)."""
+    from namgpu.init import gfs_bocos
+    with gfs_bocos.on_stream(ctx):
+        out = _build(ctx, hours, out_dir, log, from_hour, generation)
+    if getattr(ctx, "stream", None) is not None:
+        ctx.stream.synchronize()
+    return out
+
+
+def _build(ctx, hours, out_dir, log, from_hour, generation):
     import cupy as cp
     from types import SimpleNamespace
     from namgpu import state as statemod

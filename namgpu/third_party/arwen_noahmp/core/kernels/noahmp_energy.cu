@@ -17,7 +17,7 @@
 // stating rather than working around:
 //
 //   * noahmp_radiation.cu, noahmp_vegeflux.cu and noahmp_bareflux.cu each
-//     define their own glibc_logf / glibc_expf / glibc_powf / powf_log2_inline
+//     define their own f32_logf / f32_expf / f32_powf / powf_log2_inline
 //     / powf_exp2_inline / f_min / f_max, so any two of them in one
 //     translation unit are duplicate definitions;
 //   * noahmp_thermal.cu exposes TSNOSOI and PHASECHANGE only as
@@ -44,8 +44,8 @@
 // folder.  tests/test_fp32_tie_folding_gpu.py guards that.
 //
 // COMPOSITION: compiled after noahmp_leaves.cu (see noahmp_energy_gpu.py).
-// ENERGY needs glibc 2.39's powf and expf on the device and there must be
-// exactly one transcription of those in the tree; r_pow and r_exp come from
+// ENERGY needs the reference libm's powf and expf on the device and there must be
+// exactly one implementation of those in the tree; r_pow and r_exp come from
 // there.  expm1f and tanhf are new -- ENERGY's FSNO is the only TANH in
 // Noah-MP -- and they are transcribed here, matching
 // gpuwm/core/noahmp_libm.py statement for statement.  Keep the two in step.
@@ -74,11 +74,11 @@
 #define NMPE_NSOIL 4
 
 // ---------------------------------------------------------------------------
-// glibc 2.39 expm1f / tanhf -- sysdeps/ieee754/flt-32/{s_expm1f,s_tanhf}.c
+// FP32 expm1f / tanhf, our own implementation
 //
 // FSNO = TANH(SNOWH / (SCFFAC*FMELT)) at :2072 is the only TANH in Noah-MP,
 // and it is not interchangeable with an FP64 shim: over the 204,064,836 FP32
-// inputs in [1e-6, 22], (float)tanh((double)x) disagrees with glibc's tanhf on
+// inputs in [1e-6, 22], (float)tanh((double)x) disagrees with the reference libm's tanhf on
 // 23.8% of them.  These are still the 1993 SunPro routines, which is why.
 // ---------------------------------------------------------------------------
 __constant__ float NMPE_EXPM1F_Q[5] = {
@@ -313,7 +313,7 @@ void noahmp_energy_assembly(const float *in, const int *ii, float *out, int n)
 
     // :2057  UR = MAX(SQRT(UU**2.0 + VV**2.0), 1.0).  The exponent is a REAL
     // literal, so gfortran emits powf; r_pow reproduces it.  (Measured: over
-    // the 167,177,618 FP32 values in [1e-3,1e3] glibc's powf(x,2) is
+    // the 167,177,618 FP32 values in [1e-3,1e3] the reference libm's powf(x,2) is
     // bit-identical to x*x, so this one is faithful rather than load-bearing.)
     float ur = __fsqrt_rn(AD(r_pow(x[E_UU], 2.0f), r_pow(x[E_VV], 2.0f)));
     ur = (ur > 1.0f) ? ur : 1.0f;
@@ -462,8 +462,8 @@ void noahmp_energy_assembly(const float *in, const int *ii, float *out, int n)
 }
 
 // ---------------------------------------------------------------------------
-// Device-libm parity probe.  The CPU and CUDA transcriptions of tanhf/expm1f
-// are two separate pieces of code; without this, "they match glibc" is a claim
+// Device-libm parity probe.  The CPU and CUDA implementations of tanhf/expm1f
+// are two separate pieces of code; without this, "they match the reference libm" is a claim
 // about one of them.
 // ---------------------------------------------------------------------------
 extern "C" __global__

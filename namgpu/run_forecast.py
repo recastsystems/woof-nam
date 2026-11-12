@@ -76,6 +76,11 @@ def _domain_names():
     return domains.names()
 
 
+def _suite_names():
+    from namgpu.physics import suites
+    return suites.names()
+
+
 def _stage(rec, name, seconds, parallelism):
     """One row of the receipt's stage table: wall seconds and how the stage runs (GPU, N cards, threads)."""
     rows = [r for r in rec.get("stages", []) if r["stage"] != name]      # a rerun tail replaces its own row
@@ -244,10 +249,9 @@ def main(argv=None):
                          "WPS_GEOG (permissive soil set) on the first run of each month" % ", ".join(_domain_names()))
     ap.add_argument("--hours", type=float, default=None, help="forecast length in hours (default 1)")
     ap.add_argument("--physics-suite", default=None, metavar="NAME",
-                    help="physics suite (parm/physics_suites.json): nam (default, NAM v4.2.11 physics), hrrrv5 or rapv5 "
-                         "(TEMPO, MYNN-EDMF, MYNN surface layer, RUC, RRTMG, GSL drag on the NMMB dycore), or the "
-                         "presets woof-nam-next-12km and woof-nam-next-7p6km. Every suite but nam uses TEMPO, which "
-                         "needs gpuwm-hex 0.5.0 or newer (pip install \"recast-woof-nam[modern]\")")
+                    help="physics suite, a row of parm/physics_suites.json: %s. nam (default) is NAM v4.2.11 physics "
+                         "as NCEP ran it; hrrrv5, rapv5 and the woof-nam-next presets need gpuwm-hex 0.5.0 or newer, and each preset "
+                         "runs on its own grid" % ", ".join(_suite_names()))
     ap.add_argument("--out", type=Path, default=None, help="output folder (relative paths are under the work root)")
     ap.add_argument("--skip-init", default="init-fetch-case",
                     help="comma list of init units to skip (default: the fetch, already done by woof-nam fetch)")
@@ -267,7 +271,17 @@ def main(argv=None):
                          "files on grid 218 for the 12 km parent, a nest's hiresf files on its NOAA grid (SET: "
                          "conusnest, alaskanest, hawaiinest, priconest, firewxnest, hiresf; default auto). A "
                          "`woof-nam products --follow` process writes each hour as its history file lands "
-                         "(log <out>/products.log, <out>/products/DONE at the end)")
+                         "(log <out>/products.log, <out>/products/DONE at the end). The run returns once DONE is "
+                         "written; non-zero, with one line naming the hour, when the follower failed")
+    ap.add_argument("--no-products-wait", action="store_true",
+                    help="with --products: return when the forecast (and maps) end, while the GRIB2 follower may "
+                         "still be writing (<out>/products/DONE appears when it is done), for a caller that waits "
+                         "itself")
+    ap.add_argument("--products-stall-s", type=float, default=900.0,
+                    help="with --products: stop waiting, stop the follower and exit non-zero when it has written "
+                         "nothing new (no file in <out>/products, no line in its log, no heartbeat in "
+                         "<out>/products.state.json, which it writes every few seconds while it waits for card "
+                         "memory) for this long (default 900)")
     ap.add_argument("--no-columns", action="store_true",
                     help="no sounding column store after the run (<out>/columns/d01/*.wcol; woof-nam columns)")
     ap.add_argument("--maps-only", action="store_true", help=argparse.SUPPRESS)   # internal: the post-run maps tail (no CUDA)
@@ -431,7 +445,8 @@ def main(argv=None):
                          "which is not written yet")
     if a.maps_only:
         return maps_only(a.case, a.out if a.out.is_absolute() else paths.work_root() / a.out, a.case_dir,
-                         not a.no_columns)
+                         not a.no_columns, wait=not a.no_products_wait, stall_s=a.products_stall_s,
+                         maps=not a.no_maps)
     if a.products and "NAMGPU_RANK" not in os.environ:
         from namgpu import exporter
         try:
@@ -440,7 +455,6 @@ def main(argv=None):
                 exporter.require(("pair_next", "mask_carrier"), f"the {a.products} nest files")
         except exporter.ExporterMissing as e:
             raise SystemExit(f"woof-nam run --products: {e}") from None
-        _start_products(a.out if a.out.is_absolute() else paths.work_root() / a.out, a.products)
     from namgpu import domains
     domains.select(a.domain, a.source)
     if "NAMGPU_RANK" not in os.environ:
@@ -451,6 +465,10 @@ def main(argv=None):
             return rc
     static_rec = None
     if "NAMGPU_RANK" not in os.environ:
+        # the /dev/shm leftovers of runs that ended (killed column workers, a dead forecast's history blocks):
+        # they are host RAM, and the next run's history block met the full tmpfs as a bus error (namgpu/io/scratch.py)
+        from namgpu.io import scratch as _scr
+        _scr.sweep()
         # once per run, before the init (and before any rank): in a child pinned to the first card
         cards0 = [c.strip() for c in a.card_list.split(",") if c.strip()]
         first = cards0[0] if cards0 else (None if a.cards == 1 else "0")
@@ -458,13 +476,23 @@ def main(argv=None):
         static_rec = domains.ensure_static(cdir0, domains.start_of(Path(a.case) if a.case_dir is not None else cdir0),
                                            a.source, card=first)
         print(f"static: {static_rec['action']} {static_rec['file']} ({static_rec['seconds']} s)", flush=True)
+        if a.products:
+            # The GRIB2 follower starts after the door's case and memory checks and the static fields: a run that
+            # stops in them starts no follower (it used to start one first and then stop it). One card: the card
+            # gate goes with it; the several-card door has no gate (its ranks never claim the card).
+            _start_products(a.out if a.out.is_absolute() else paths.work_root() / a.out, a.products,
+                            gate=a.cards == 1)
     if a.cards > 1 and "NAMGPU_RANK" not in os.environ:
         if domains.current().get("managed_init") and not a.managed_init and a.init_from is None:
             a.managed_init = True       # the domain row: its initial state is bigger than one card
         return launch(a, list(argv) if argv is not None else sys.argv[1:], static_rec)
+    import faulthandler
+    if not faulthandler.is_enabled():
+        # a fatal signal (SIGBUS from a full /dev/shm, SIGSEGV) prints "Fatal Python error" and the stacks to the
+        # run log; the arctic-front rerun ended at +3 h with rc 135 and not one line saying why
+        faulthandler.enable(all_threads=True)
     if "NAMGPU_RANK" in os.environ:
         # kill -USR1 <rank pid> prints every thread stack to the rank log (no debugger needed)
-        import faulthandler
         import signal
         faulthandler.register(signal.SIGUSR1, all_threads=True)
 
@@ -562,6 +590,13 @@ def main(argv=None):
         ctx.case_dir = paths.case_dir(a.case)              # this machine's case folder, not the writer's
         ctx.out_dir = out
         rstmod.resume_boco(ctx, a.resume)
+        # boundary files to the new end: built from the case's raw inputs, or one line naming the fetch (gfs_bocos)
+        from namgpu.init import gfs_bocos
+        tb = time.perf_counter()
+        built = gfs_bocos.resume_check(ctx, float(resume_meta["fhr"]), float(a.hours),
+                                       log=lambda m: print(m, flush=True))
+        if built:
+            rec["resume_bocos"] = {"built": built, "seconds": round(time.perf_counter() - tb, 2)}
         from namgpu.steps import drv_loop_limits
         with ctx.stream:
             drv_loop_limits.run(ctx)
@@ -759,9 +794,12 @@ def main(argv=None):
                 n = drv.run(a.hours, log=log)
             else:
                 if int(cfg.filter_method) == 0:
-                    # no filter: the 0 h reflectivity from the start state (CALMICT), as the filter's end writes it
+                    # no filter: the 0 h reflectivity from the start state, as the filter's end writes it
                     from namgpu.steps import drv_dfi_refl_restore
                     drv_dfi_refl_restore.run(ctx)
+                    # a start from the NAM's own analysis: its 0 h diagnostics (cloud, fluxes, PBL, soil totals)
+                    from namgpu.steps import drv_native_diag_restore
+                    drv_native_diag_restore.run(ctx)
                 n = drv_time_loop._run(ctx, a.hours, SimpleNamespace(run=_tdfi), log=log)
         rec["error"] = None
     except Exception as e:  # noqa: BLE001
@@ -829,23 +867,78 @@ def main(argv=None):
     rec["stats_end"] = sx
     rec["pool_end_gib"] = round(devmem.pool().total_bytes() / 2**30, 2)
     rec["pool"] = devmem.stats()            # allocator, live/reserved bytes and their high-water marks
+    devmem.card_end()                       # the step loop is over: the GRIB2 follower no longer waits for it
     rec["card_used_gib"] = round((lambda m: (m[1] - m[0]) / 2**30)(cp.cuda.Device().mem_info), 1)
     print("end stats", json.dumps(sx), "nonfinite", bad, flush=True)
     rd.__exit__(None, None, None)
-    if not a.no_maps and rec["error"] is None and multi is None:
+    if multi is None:
+        return exit_one_card(a, ctx, out, rec, bad)
+    rp = out / f"forecast-receipt.r{ctx.slab.rank}.json"
+    rec["rank"] = {"rank": ctx.slab.rank, "nranks": ctx.slab.nranks, "jts": ctx.slab.jts, "jte": ctx.slab.jte,
+                   "jms": ctx.slab.jms, "jme": ctx.slab.jme, "card": os.environ.get("CUDA_VISIBLE_DEVICES")}
+    from namgpu.io.io_history import drain as _drain
+    _drain(ctx)
+    rp.write_text(json.dumps(rec, indent=1, default=str))
+    print(f"receipt {rp}", flush=True)
+    return 1 if (rec["error"] or bad) else 0
+
+
+def hand_back_card(ctx, rec) -> dict:
+    """The one-card run, before its maps or its wait for the GRIB2 follower: the last history frame on disk, the
+    history writer processes stopped, every byte of the card this process holds given back (and, on our box lanes,
+    the card lock: release_card), and that recorded in rec["card_released"] with the time. A step that fails is
+    recorded and the rest still runs: a history write error becomes the run's error. Breakage it prevents: the exits
+    without maps (--no-maps, and a forecast that failed) went to the follower's wait holding the finished forecast's
+    card memory and card lock, 175 s in a real 3 h run and up to --products-stall-s, while the follower's writer
+    needed that card (checker of door-products-3, 2026-11-11)."""
+    from namgpu.io.io_history import drain, shutdown as history_shutdown
+    try:
+        drain(ctx)                                   # the last history frame is on disk (before the receipt)
+    except Exception as e:  # noqa: BLE001
+        rec["error"] = rec.get("error") or f"history write: {type(e).__name__}: {e}"
+        print("RUN ERROR", rec["error"], flush=True)
+    # Without this the history writer processes, their forkserver and its resource tracker stayed behind after every
+    # run with maps (1.3-1.8 GB of host memory each, still there an hour after the run; release pass 2026-11-09).
+    history_shutdown()
+    try:
+        rel = release_card(ctx)
+    except Exception as e:  # noqa: BLE001 - a broken CUDA context after a failed forecast: the exit still goes on
+        rel = {"error": f"{type(e).__name__}: {e}"}
+        print(f"card release failed: {rel['error']}", flush=True)
+    rel["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    rec["card_released"] = rel
+    return rel
+
+
+def _waits_for_follower(a) -> bool:
+    """This process started a GRIB2 follower and will wait for it (products_finish)."""
+    return _FOLLOWER_PROC is not None and not a.no_products_wait
+
+
+def exit_one_card(a, ctx, out: Path, rec: dict, bad) -> int:
+    """The one-card run's exit after its step loop: maps (a re-exec as the maps-only tail) when asked and the forecast
+    ran; else, with a GRIB2 follower to wait for, a re-exec as the wait-only tail (the same tail with --no-maps: no
+    maps, no columns, only the wait); else the receipt and the one-line note. Each exit that renders maps or waits for
+    its follower gives the card back first (hand_back_card), and the re-exec leaves no CUDA context in the process:
+    freeing the pool alone still left 4,082 MiB of this process on the card for the whole wait (the context, its
+    modules and the step loop's local-memory reservation; follow-4's 24 h warm run, fol4/evidence/Wfix-wait-smi.txt)."""
+    maps = not a.no_maps and rec["error"] is None
+    waits = _waits_for_follower(a)
+    if maps or waits:
+        hand_back_card(ctx, rec)
+        maps = not a.no_maps and rec["error"] is None
+    rc = 1 if (rec["error"] or bad) else 0
+    if maps or waits:
         # Maps are host work. Before them: drop the card lock and give back ALL of the card, so the next
         # run starts while the frames render (run lead 11:05Z: the old post-run maps held CARD3.lock and
         # 62 GB for ~50 min on one core). Freeing the pool still left 10.7 GB in unit caches, so this process
-        # re-executes itself as the maps-only tail (same PID for the runner, no CUDA context left).
-        from namgpu.io.io_history import drain, shutdown as history_shutdown
-        drain(ctx)                                   # the last history frame is on disk
-        # The exec below replaces this process; without this the history writer processes, their forkserver and its
-        # resource tracker stayed behind after every run with maps (1.3-1.8 GB of host memory each, still there an
-        # hour after the run; release pass 2026-11-09).
-        history_shutdown()
-        rec["card_released"] = release_card(ctx)
-        rec["exit_code"] = 1 if (rec["error"] or bad) else 0
-        (out / "forecast-receipt.json").write_text(json.dumps(rec, indent=1, default=str))
+        # re-executes itself as the maps-only tail (same PID for the runner and for the follower it started, which
+        # stays its child; no CUDA context left). The wait for the follower goes the same way.
+        rec["exit_code"] = rc
+        rp = out / "forecast-receipt.json"
+        rp.write_text(json.dumps(rec, indent=1, default=str))
+        if not maps:
+            print(f"receipt {rp}", flush=True)
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, [sys.executable, "-c",
@@ -854,28 +947,225 @@ def main(argv=None):
                                   "--maps-only", "--case", a.case if a.case_dir is not None else str(ctx.case_dir),
                                   "--out", str(out)]
                  + (["--case-dir", str(ctx.case_dir)] if a.case_dir is not None else [])
-                 + (["--no-columns"] if a.no_columns else []))
-    rp = out / "forecast-receipt.json" if multi is None else out / f"forecast-receipt.r{ctx.slab.rank}.json"
-    if multi is not None:
-        rec["rank"] = {"rank": ctx.slab.rank, "nranks": ctx.slab.nranks, "jts": ctx.slab.jts, "jte": ctx.slab.jte,
-                       "jms": ctx.slab.jms, "jme": ctx.slab.jme, "card": os.environ.get("CUDA_VISIBLE_DEVICES")}
-        from namgpu.io.io_history import drain as _drain
-        _drain(ctx)
+                 + (["--no-columns"] if a.no_columns else [])
+                 + ([] if maps else ["--no-maps"])
+                 + (["--no-products-wait"] if a.no_products_wait else [])
+                 + ["--products-stall-s", str(a.products_stall_s)])
+    rp = out / "forecast-receipt.json"
     rp.write_text(json.dumps(rec, indent=1, default=str))
     print(f"receipt {rp}", flush=True)
-    return 1 if (rec["error"] or bad) else 0
+    return products_finish(out, rc, wait=not a.no_products_wait, stall_s=a.products_stall_s)
 
 
-def _start_products(out: Path, set_name: str = "auto") -> None:
+FOLLOWER = "products.follower.json"     # <out>/: the follower's PID and the PID of the run that started it
+STATE_FILE = "products.state.json"      # <out>/: the follower's heartbeat (namgpu.io.products.STATE_FILE)
+_FOLLOWER_PROC = None                   # the Popen of the follower this process started (kept: never reaped elsewhere)
+_FOLLOWER_OUT = None                    # its run folder
+
+
+def stop_orphan_follower() -> bool:
+    """At this process's exit (atexit, and the os._exit of `python -m namgpu.run_forecast`; never at the maps-only
+    exec): the follower it started is stopped (SIGTERM, so it cleans up) with one line when the run never wrote its
+    receipt. Breakage it prevents: a run that stopped early (the case's NAM analysis file missing, 2026-11-11) exited
+    with a traceback and left its follower waiting 30 min for history that would never come. With a receipt the
+    follower is left to finish (the run waited for it, or the caller asked --no-products-wait)."""
+    p, out = _FOLLOWER_PROC, _FOLLOWER_OUT
+    if p is None or out is None or p.poll() is not None or (Path(out) / "forecast-receipt.json").is_file():
+        return False
+    p.terminate()
+    try:
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+    print(f"products: the run stopped before its receipt; its GRIB2 follower (PID {p.pid}) is stopped", flush=True)
+    return True
+
+
+def _follower_exit(pid: int):
+    """The follower's exit code, or None while it runs. It is this process's child (the maps-only tail is the same
+    process after exec); a follower started by another process (the nest door's run child) is watched in /proc."""
+    if _FOLLOWER_PROC is not None and _FOLLOWER_PROC.pid == pid:
+        return _FOLLOWER_PROC.poll()
+    try:
+        got, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        try:
+            alive = b"namgpu.io.products" in Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            alive = False
+        return None if alive else "ended"
+    return None if got == 0 else os.waitstatus_to_exitcode(status)
+
+
+def _products_progress(out: Path) -> tuple:
+    """What changes while the follower works: its log's size, and the newest change in <out>/products (finished
+    files, and each hour's work folder with its frame and its writer's output)."""
+    sig = []
+    try:
+        sig.append((out / "products.log").stat().st_size)
+    except OSError:
+        sig.append(-1)
+    newest = 0
+    for d in (out / "products",):
+        try:
+            for e in os.scandir(d):
+                st = e.stat(follow_symlinks=False)
+                newest = max(newest, st.st_mtime_ns)
+                if e.is_dir(follow_symlinks=False) and e.name.startswith(".products-"):
+                    for sub in (e.path, os.path.join(e.path, "grib2")):
+                        try:
+                            for x in os.scandir(sub):
+                                newest = max(newest, x.stat(follow_symlinks=False).st_mtime_ns)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+    sig.append(newest)
+    return tuple(sig)
+
+
+def _products_failure(out: Path, code) -> str:
+    """One line naming what failed: the first failed hour from the follower's index, else its log's last line."""
+    try:
+        errs = json.loads((out / "products" / "index.json").read_text()).get("errors") or []
+    except (OSError, ValueError):
+        errs = []
+    if errs:
+        more = f" (and {len(errs) - 1} more in {out / 'products' / 'index.json'})" if len(errs) > 1 else ""
+        return f"{errs[0][:400]}{more}"
+    try:
+        last = [ln for ln in (out / "products.log").read_text(errors="replace").splitlines() if ln.strip()][-1:]
+    except OSError:
+        last = []
+    return f"exit {code}, no {out / 'products' / 'DONE'}" + (f"; last line of products.log: {last[0][:300]}"
+                                                               if last else "")
+
+
+def _follower_beat(out: Path, pid: int) -> dict | None:
+    """The follower's heartbeat (STATE_FILE) when it is this follower's: {"state", "since", "beat"}, else None."""
+    try:
+        d = json.loads((out / STATE_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) and d.get("pid") == pid else None
+
+
+def products_wait(out: Path, pid: int, stall_s: float = 900.0, poll_s: float = 1.0) -> tuple[int, str]:
+    """Wait for the GRIB2 follower `pid` of run folder `out` to end. (0, line) when it wrote <out>/products/DONE with
+    no failed hour; (1, line naming the hour) when it failed; (1, line) after `stall_s` with nothing new from it (it is
+    then stopped, SIGTERM, so it cleans up). Breakage it prevents: `woof-nam run --products` returned while the
+    follower was still writing, so a batch system that ends the process tree with the command lost the last hours of
+    GRIB2 (the 0.2.1 candidate's proof scripts looped on products/DONE after the door had returned).
+    Something new is a file in products/, a line in products.log, or a beat of the follower's heartbeat (STATE_FILE:
+    it beats about every 5 s while it waits for card memory). Breakage that prevents: a follower alive and waiting
+    for a full card writes no file and no line, and was stopped after stall_s as if it hung."""
+    import signal
+    done = out / "products" / "DONE"
+    t0 = last = time.monotonic()
+    seen = _products_progress(out) + ((_follower_beat(out, pid) or {}).get("beat"),)
+    said = None
+    while True:
+        code = _follower_exit(pid)
+        if code is not None:
+            break
+        now = time.monotonic()
+        hb = _follower_beat(out, pid) or {}
+        sig = _products_progress(out) + (hb.get("beat"),)
+        st = str(hb.get("state") or "")
+        if st.startswith("waiting for card memory") and hb.get("since") and time.time() - hb["since"] > 60 \
+                and said != hb["since"]:
+            said = hb["since"]
+            print(f"products: the GRIB2 follower is alive and {st}, for {time.time() - hb['since']:.0f} s so far",
+                  flush=True)
+        if sig != seen:
+            seen, last = sig, now
+        elif now - last > stall_s:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(60):
+                    if _follower_exit(pid) is not None:
+                        break
+                    time.sleep(0.5)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            return 1, (f"products: FAILED: the GRIB2 follower (PID {pid}) wrote nothing new for {stall_s:.0f} s "
+                       f"(no file, no log line, no heartbeat; its last state: {st or 'none'}); stopped it; no {done}")
+        time.sleep(poll_s)
+    try:
+        d = json.loads(done.read_text())
+    except (OSError, ValueError):
+        d = None
+    if d is not None and not d.get("errors") and code in (0, "ended"):
+        return 0, (f"products: {d.get('files')} GRIB2 files written, {done} (the run waited "
+                   f"{time.monotonic() - t0:.0f} s for them)")
+    return 1, f"products: FAILED: the GRIB2 follower: {_products_failure(out, code)}"
+
+
+def products_finish(out: Path, rc: int, wait: bool = True, stall_s: float = 900.0) -> int:
+    """The run's exit with --products: wait for the follower this process started (products_wait), unless --no-
+    products-wait; then the run's own exit code, or 1 when the follower failed. A follower started by another process
+    (none, or a nest door's) only gets the one-line note."""
+    try:
+        fr = json.loads((out / FOLLOWER).read_text())
+    except (OSError, ValueError):
+        fr = None
+    if not wait or fr is None or int(fr.get("parent", -1)) != os.getpid():
+        _products_pending_note(out)
+        return rc
+    print(f"products: waiting for the GRIB2 follower (PID {fr['pid']}) to write {out / 'products' / 'DONE'} "
+          f"(--no-products-wait returns at once)", flush=True)
+    bad, line = products_wait(out, int(fr["pid"]), stall_s)
+    print(line, flush=True)
+    return rc or bad
+
+
+def _products_pending_note(out: Path) -> bool:
+    """The door returns while its GRIB2 follower may still be writing the last hours (the follower starts on the
+    receipt this process has just written). Say so in one line, so a script does not read or delete the run folder
+    before the files are complete (release check 2026-11-09: a leg script deleted a nest run 5 s too early)."""
+    if (out / "products.log").exists() and not (out / "products" / "DONE").exists():
+        print(f"products: the GRIB2 follower is still writing; {out / 'products' / 'DONE'} appears when every hour "
+              "is out", flush=True)
+        return True
+    return False
+
+
+def _start_products(out: Path, set_name: str = "auto", gate: bool = True) -> None:
     """The GRIB2 follower (awphys, or a nest's hiresf set): its own process (no CUDA context of this run; the
     writer's GPU post is a small separate context), started once by the top process, alive across the maps-only
     re-exec, done when it has written every hour after the run's receipt appears."""
     out.mkdir(parents=True, exist_ok=True)
+    (out / STATE_FILE).unlink(missing_ok=True)     # an earlier follower's heartbeat is not this one's
+    # The follower stops once forecast-receipt.json is there and every hour it sees is written. A folder that already
+    # holds a receipt (woof-nam run --resume, or a rerun into the same --out) would stop it after the hours already on
+    # disk, and the new hours got no GRIB2 (--resume from +56 h wrote none of +57..84, 2026-11-11). The earlier
+    # receipt is kept beside it, renamed, and the old DONE marker goes with it.
+    old = out / "forecast-receipt.json"
+    if old.is_file():
+        old.replace(out / f"forecast-receipt.before-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json")
+    (out / "products" / "DONE").unlink(missing_ok=True)
+    # The card gate (namgpu.cardgate), made before the follower exists: when the driver refuses this forecast, the
+    # follower's work in flight ends first and the forecast asks again, instead of stopping with OutOfMemoryError.
+    from namgpu import cardgate, devmem
+    if gate and cardgate.create(out) is not None:
+        devmem.card_gate(cardgate.Forecast(out))
     log = open(out / "products.log", "ab")
-    subprocess.Popen([sys.executable, "-c",
+    global _FOLLOWER_PROC
+    _FOLLOWER_PROC = subprocess.Popen(
+                     [sys.executable, "-c",
                       "import sys; sys.path.insert(0, %r); from namgpu.io.products import main; "
                       "sys.exit(main(sys.argv[1:]))" % PKG_PARENT, "--run", str(out), "--follow", "--set", set_name],
                      stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    if getattr(_FOLLOWER_PROC, "pid", None):
+        (out / FOLLOWER).write_text(json.dumps({"pid": _FOLLOWER_PROC.pid, "parent": os.getpid(), "set": set_name})
+                                    + "\n")
+        import atexit
+        global _FOLLOWER_OUT
+        _FOLLOWER_OUT = out
+        atexit.register(stop_orphan_follower)
     print(f"products: GRIB2 follower ({set_name}) started -> {out / 'products'} (log {out / 'products.log'})",
           flush=True)
 
@@ -978,6 +1268,8 @@ def launch(a, argv, static_rec=None) -> int:
     idfile = out / "nccl.id"
     idfile.unlink(missing_ok=True)
     shm = Path("/dev/shm") / f"namgpu-hist-{os.getpid()}"
+    from namgpu.io import scratch as _scr
+    _scr.own(shm.parent)               # this process is alive for a sweep in any PID namespace (scratch.own)
     shutil.rmtree(shm, ignore_errors=True)
     shm.mkdir(parents=True)
     writer = subprocess.Popen(_py_module("namgpu.io.history_merge") + [
@@ -1031,8 +1323,9 @@ def launch(a, argv, static_rec=None) -> int:
     print(f"ranks exit {codes}, history pool {wcode}, wall {rec['wall_s']} s -> {out / 'forecast-receipt.json'}",
           flush=True)
     if ok and not a.no_maps:
-        return maps_only(str(a.case), out, a.case_dir, not a.no_columns)
-    return 0 if ok else 1
+        return maps_only(str(a.case), out, a.case_dir, not a.no_columns, wait=not a.no_products_wait,
+                         stall_s=a.products_stall_s)
+    return products_finish(out, 0 if ok else 1, wait=not a.no_products_wait, stall_s=a.products_stall_s)
 
 
 def missing_case_folder(a, start) -> None:
@@ -1050,14 +1343,19 @@ def missing_case_folder(a, start) -> None:
                      f"{start:%Y%m%d%H} --hours {hours} --case-dir {cdir}{src}")
 
 
-def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool = True) -> int:
+def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool = True, wait: bool = True,
+              stall_s: float = 900.0, maps: bool = True) -> int:
     """Post-run maps in a process with no CUDA context: render every history frame of <out> not yet drawn
-    (frames an hourly watcher rendered are skipped) across all cores, then finish the receipt."""
+    (frames an hourly watcher rendered are skipped) across all cores, then finish the receipt. maps=False (the
+    wait-only tail of a run without maps, or of a forecast that failed): no maps, no columns, the receipt as the
+    forecast wrote it, only the wait for the GRIB2 follower."""
     from types import SimpleNamespace
 
-    from namgpu.io import io_maps
     rp = out / "forecast-receipt.json"
     rec = json.loads(rp.read_text())
+    if not maps:
+        return products_finish(out, int(rec.get("exit_code") or 0), wait=wait, stall_s=stall_s)
+    from namgpu.io import io_maps
     cdir = Path(case_dir).resolve() if case_dir else paths.case_dir(case)
     ctx = SimpleNamespace(out_dir=out, case_dir=cdir,
                           start=datetime.strptime((Path(case).name if case_dir else cdir.name)[:14], "%Y-%m-%d_%Hz"))
@@ -1086,12 +1384,14 @@ def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool 
     print(f"maps {rec.get('maps', '')} in {rec['maps_s']} s", flush=True)
     rp.write_text(json.dumps(rec, indent=1, default=str))
     print(f"receipt {rp}", flush=True)
-    return int(rec.get("exit_code", 0)) or (1 if ("maps_error" in rec or "columns_error" in rec
-                                                  or (rec.get("columns") or {}).get("failed")) else 0)
+    rc = int(rec.get("exit_code", 0)) or (1 if ("maps_error" in rec or "columns_error" in rec
+                                                or (rec.get("columns") or {}).get("failed")) else 0)
+    return products_finish(out, rc, wait=wait, stall_s=stall_s)
 
 
 if __name__ == "__main__":
     _rc = main()
+    stop_orphan_follower()      # os._exit below skips atexit
     from namgpu.io import io_history as _ioh
     _ioh.shutdown()             # writer processes hold stdout; os._exit skips their exit hooks
     sys.stdout.flush()

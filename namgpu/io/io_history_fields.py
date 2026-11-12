@@ -1,13 +1,15 @@
 """io-history-fields: wrfout-shaped history fields on device, from the NMMB state.
 
 Unit io-history-fields (mode "new"); kernel namgpu/kernels/io_history_fields.cu:
-  hist_moist_theta (grid_2d, LM levels), hist_ph (grid_cols, LM+1 interfaces), hist_surface (2-D).
+  hist_moist_theta (grid_2d, LM levels), hist_ph (grid_cols, LM+1 interfaces), hist_surface (2-D),
+  hist_refl_conv (grid_cols: REFL_10CM with the convective rain, and COMPOSITE).
 Reads  : T, Q, CW, F_ICE, F_RAIN, PD [JM,IM] (or [LM,JM,IM]); FIS, PINT (LM+1), ACPREC_TOT, CUPREC_TOT [m];
          UE10, VE10 = earth-relative 10 m winds on H points, written by io-wind-rotate (dep, must run
          before this unit; it raises if they are absent); Z (state, midlayer). Grid: psgml1, sgml2 (ctx.tables).
          UEARTH, VEARTH = earth-relative winds on H points, LM levels (io-wind-rotate). W, TSHLTR, QSHLTR
          (state). REFL_10CM (LM levels) only when the Ferrier microphysics (phys-fer-calmict) has
-         written it; history REFL_10CM and COMPOSITE add the BMJ convective term as NAM's post does (_refl_post).
+         written it; history REFL_10CM and COMPOSITE add the convective-rain reflectivity (_refl_conv), from
+         CPRATE, CNVTOP and T.
 Writes (scratch via st.add, names H_*): H_P, H_T, H_QVAPOR, H_QCLOUD, H_QRAIN, H_QICE, H_QSNOW, H_PH,
          H_PSFC, H_HGT, H_RAINNC, H_RAINC, H_COMPOSITE, and H_CW_SPEC, H_FICE_SPEC, H_FRAIN_SPEC when
          spec_adv is on (see "Condensate" below).
@@ -74,8 +76,8 @@ PRODUCT_CARRIERS_2D = (
     "PSHLTR", "POTEVP", "SFCEVP",
     "T02MAX", "T02MIN", "RH02MAX", "RH02MIN", "SPD10MAX", "REFDMAX", "UPVVELMAX", "DNVVELMAX", "PRATEMAX",
     "UPHLMAX25", "UPHLMIN25", "UPHLMAX03", "UPHLMIN03",
-    # soil moisture availability and total (Noah), the radiation time factors the post applies to RSWIN/RSWOUT/
-    # RLWIN (CZEN, CZMEAN, SIGT4), and the BMJ convective cloud bottom/top between outputs (cloud base)
+    # soil moisture availability and total (Noah), the radiation time factors that go with RSWIN/RSWOUT/RLWIN
+    # (CZEN, CZMEAN, SIGT4), and the BMJ convective cloud bottom/top between outputs (cloud base)
     "SMSTAV", "SMSTOT", "CZEN", "CZMEAN", "SIGT4", "CNVBOT", "CNVTOP",
     # the NAM nest (hiresf) records: the accumulators NMMB empties every nhrs_* hours (drv_bucket_reset: NCEP's 3 h
     # bucket) with their counters, surface and 10 m humidity and theta, the step precipitation and its snow ratio,
@@ -98,30 +100,10 @@ SOIL_CARRIERS = {"TSLB": "STC", "SMOIS": "SMC", "SH2O": "SH2O"}
 
 
 def _dragco(ctx, scope):
-    """The post's surface drag coefficient on the NMMB B grid (UPP CALDRG.f, gridtype B, MODELNAME NMM): the mean
-    of the four V-point winds of the lowest layer around each H point, averaged with the z0 wind (UZ0, VZ0, H
-    points), CD = USTAR^2 / that speed squared where it is over 1e-6, 0 elsewhere and on the outermost rows and
-    columns (the post loops JSTA_M..JEND_M, ISTA_M..IEND_M). None when the state lacks an input. Several cards: the
-    same arithmetic on the rank's memory rows; an owned row reads the row below it, which is a halo row at a slab
-    edge (U and V are exchanged in the step, so it holds the neighbour's value: 1 vs 2 ranks bitwise, 2026-11-06), and
-    the zero rows land on the global outermost rows only on the edge ranks (elsewhere on halo rows, never written)."""
-    st = ctx.st
-    if any(n not in st.fields for n in ("U", "V", "UZ0", "VZ0", "USTAR")):
-        return None
-    jm, im = int(ctx.grid.jm), int(ctx.grid.im)
-    d = st.add("H_DRAGCO", (jm, im))
-    with scope:
-        u, v = st["U"][-1], st["V"][-1]                 # lowest layer (NMMB l = LM is the last index)
-        ul = cp.float32(0.25) * (u[1:-1, 1:-1] + u[1:-1, :-2] + u[:-2, 1:-1] + u[:-2, :-2])
-        vl = cp.float32(0.25) * (v[1:-1, 1:-1] + v[1:-1, :-2] + v[:-2, 1:-1] + v[:-2, :-2])
-        ub = cp.float32(0.5) * (ul + st["UZ0"][1:-1, 1:-1])
-        vb = cp.float32(0.5) * (vl + st["VZ0"][1:-1, 1:-1])
-        w2 = ub * ub + vb * vb
-        ust = st["USTAR"][1:-1, 1:-1]
-        d[...] = cp.float32(0.0)
-        d[1:-1, 1:-1] = cp.where(w2 > cp.float32(1.0e-6), ust * ust / cp.where(w2 > cp.float32(1.0e-6), w2,
-                                                                                cp.float32(1.0)), cp.float32(0.0))
-    return d
+    """History DRAGCO, the surface drag coefficient: not carried in the history, which leaves DRAGCO out. The CD
+    record is computed by the products from u* and the lowest-layer wind, u*^2 / M^2 (Stull 1988, 7.4;
+    products/land_cloud.py cd), and written."""
+    return None
 
 
 def _vec(ctx, key: str, host):
@@ -191,6 +173,18 @@ class StreamField:
 def device_array(arr):
     """The device (or host) array behind a history field: StreamField computed now, anything else as is."""
     return arr.compute() if isinstance(arr, StreamField) else arr
+
+
+def _history_t2(st, s2, scope):
+    """Return the history T2: the 2 m air temperature (K), a float32 device array of shape s2 at H points.
+
+    T2 = TSHLTR * (PSHLTR / 1e5) ** KAPPA: Poisson's equation at the 2 m pressure, TSHLTR being the 2 m potential
+    temperature and PSHLTR the 2 m pressure (namgpu/io/poisson.py gives the sources and the exponent)."""
+    from namgpu.io import poisson
+    t2 = st.add("H_T2", s2)
+    with scope:
+        t2[...] = poisson.temperature(st["TSHLTR"], st["PSHLTR"])
+    return t2
 
 
 def run(ctx):
@@ -267,12 +261,8 @@ def run(ctx):
             st.PINT, st.FIS, st.ACPREC_TOT, cup_tot, psfc, hgt, rainnc, rainc,
         ))
 
-    # T2. NMMB TSHLTR is the 2 m POTENTIAL temperature (parm/nam_phy_state.txt "Theta at 2-m", JSFC/SFCDIAGS
-    # write theta); the post turns it into temperature with T2 = TSHLTR * (PSHLTR * 1e-5) ** CAPA
-    # (nam_post0.fd SURFCE.f, CAPA = R/CP = 0.28589641). History T2 is that temperature, not theta.
-    t2 = st.add("H_T2", s2)
-    with scope:
-        t2[...] = st["TSHLTR"] * (st["PSHLTR"] * cp.float32(1.0e-5)) ** cp.float32(0.28589641)
+    # T2: the 2 m air temperature (NMMB's TSHLTR is the 2 m potential temperature, parm/nam_phy_state.txt).
+    t2 = _history_t2(st, s2, scope)
     out = {
         "PSFC": (psfc, DIMS2),
         "HGT": (hgt, DIMS2),
@@ -342,11 +332,11 @@ def run(ctx):
         out["U10MAX"] = (ue, DIMS2)
         out["V10MAX"] = (ve, DIMS2)
     # The total vertical velocity W + BARO (VSOUND), which NMMB's history writes as 'vvel' (module_WRITE_ROUTINES
-    # RUNHISTORY: W_TOT -> vvel) and NAM's post turns into DZDT and omega; the state holds LM+1 levels, VSOUND
+    # RUNHISTORY: W_TOT -> vvel), from which the products take DZDT and omega; the state holds LM+1 levels, VSOUND
     # writes the first LM (the mid layers).
     if "W_TOT" in st.fields and st["W_TOT"].shape[0] >= lm:
         out["W_TOT"] = (st["W_TOT"][:lm], DIMS3)
-    # The model's own (nonhydrostatic) interface pressures: NAM's post integrates its heights over them
+    # The model's own (nonhydrostatic) interface pressures, for the products' isobaric heights
     out["PINT"] = (st.PINT, DIMS3S)
     if "Q2" in st.fields and tuple(st["Q2"].shape) == s3:
         tke = st.add("H_TKE_PBL", s3)
@@ -354,7 +344,7 @@ def run(ctx):
             tke[...] = st["Q2"] * cp.float32(0.5)       # MYJ Q2 = 2 TKE (parm/nam_phy_state.txt)
         out["TKE_PBL"] = (tke, DIMS3)
     if "REFL_10CM" in st.fields:
-        refl3, comp = _refl_post(ctx, s2, s3, scope)
+        refl3, comp = _refl_conv(ctx, s2, s3, scope)
         out["REFL_10CM"] = (refl3, DIMS3)
         out["COMPOSITE"] = (comp, DIMS2)
     if handoff_on(ctx.cfg):
@@ -363,36 +353,33 @@ def run(ctx):
 
 
 
-def _refl_post(ctx, s2, s3, scope):
-    """History REFL_10CM and COMPOSITE as NAM's post writes them (woof-nam 0.1.3, 2026-11-05): the microphysics
-    REFL_10CM plus the BMJ convective-rain reflectivity Z = 300 R**1.4, R = CPRATE * 3.6e6 / (DT*NPHS) mm/h, from the
-    convective cloud top (CNVTOP) to the ground, tapered by 20 dBZ between the freezing level and the cloud top
-    (kernel hist_refl_post). COMPOSITE is the column maximum of that sum, so the awphys REFC (carrier COMPOSITE) and
-    the REFD records (read from history REFL_10CM) carry it too. Breakage it fixes: COMPOSITE was the column maximum
-    of the microphysics REFL_10CM alone, 3-4 dB (at 30 dBZ) colder than the NAM's own REFC from the same state (NAM
-    start study, Chicago 2023-07-29 00Z). The state REFL_10CM stays the microphysics field (the hourly maximum
-    REFDMAX adds its own convective term, io_max_fields.cu); columns without convective rain are byte-identical to
-    before. Without the BMJ carriers (no convection scheme) the fields are the plain ones."""
+def convective_rate_scale(ctx) -> np.float32:
+    """mm h-1 per unit CPRATE: CPRATE is the convection scheme's precipitation (m) over its call interval of
+    NPRECIP steps of DT seconds."""
+    return np.float32(3.6e6) / (np.float32(ctx.cfg.dt) * np.float32(int(ctx.cfg.nprecip)))
+
+
+def _refl_conv(ctx, s2, s3, scope):
+    """History REFL_10CM and COMPOSITE: the microphysics reflectivity with the convective rain added (kernel
+    hist_refl_conv, method in namgpu/kernels/io_history_fields.cu: Z = 300 R^1.4 from CPRATE, up to the convective
+    cloud top CNVTOP, falling off with height above the 0 C level). COMPOSITE is the column maximum. Columns without
+    convective rain keep the microphysics values unchanged. The state REFL_10CM is read, never written. With
+    history_stream on, REFL_10CM is computed into the shared H_STREAM buffer right before its copy."""
     st = ctx.st
     g = ctx.grid
     im, jm, lm = int(g.im), int(g.jm), int(g.lm)
     refl = st["REFL_10CM"]
     comp = st.add("H_COMPOSITE", s2)
-    have_cu = all(n in st.fields and tuple(st[n].shape) == s2 for n in ("CPRATE", "CNVTOP"))
-    if not have_cu:
-        with scope:
-            comp[...] = refl.max(axis=0)
-        return refl, comp
-    k = kernels.get(UNIT, "hist_refl_post")
+    cprate, cnvtop = st["CPRATE"], st["CNVTOP"]
+    k = kernels.get(UNIT, "hist_refl_conv")
     gcol = kernels.grid_cols(im, jm)
-    rdtphs = np.float32(3.6e6) / (np.float32(ctx.cfg.dt) * np.float32(int(ctx.cfg.nphs)))
+    rate = convective_rate_scale(ctx)
 
     def launch(write3, out3):
-        k(gcol, kernels.BLOCK_COL, (np.int32(im), np.int32(jm), np.int32(lm), refl, st.T, st.Z,
-                                    st["CPRATE"], st["CNVTOP"], np.float32(rdtphs), np.int32(write3), out3, comp))
+        k(gcol, kernels.BLOCK_COL, (np.int32(im), np.int32(jm), np.int32(lm), refl, st.T, st.Z, cprate, cnvtop,
+                                    rate, np.int32(write3), out3, comp))
 
     if getattr(ctx, "history_stream", False):
-        # COMPOSITE now (no 3-D array); REFL_10CM is computed into H_STREAM right before its copy, same arithmetic
         with scope:
             launch(0, comp)
 

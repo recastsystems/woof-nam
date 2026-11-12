@@ -1,106 +1,78 @@
-// NOAA/NCEP header of sorc/nam_post0.fd/PROF_NMMB.f (lines 1-28), kept as notice (NOTICE):
-//       SUBROUTINE PROF_NMMB(filename,ITAG,INCR)
-// C
-// C$$$  SUBPROGRAM DOCUMENTATION BLOCK
-// C                .      .    .
-// C   SUBROUTINE:  PROF        PROFILE SOUNDINGS
-// C   PRGRMMR: BLACK           ORG: W/NP22     DATE: 99-04-22
-// C
-// C ABSTRACT:  THIS ROUTINE GENERATES THE RAW PROFILE SOUNDING
-// C            OUTPUT FILES FROM THE FORECAST RESTRT FILE AND
-// C            AUXILIARY FILES
-// C
-// C PROGRAM HISTORY LOG:
-// C   99-04-22  T BLACK - ORIGINATOR
-// C   02-07-01  G MANIKIN - FIXED PROBLEM WITH DHCNVC AND DHRAIN
-// C                          COMPUTATIONS - SEE COMMENTS BELOW
-// C   03-04-01  M PYLE - BEGAN CONVERTING FOR WRF
-// C   04-05-26  M PYLE - MADE CHANGES FOR WRF-NMM
-// C   08-09-11  M PYLE - NMMB VERSION READING NEMSIO
-// C   10-04-26  ROGERS - CHANGED TIMESTAMP FROM HOURS to MINUTES
-// C
-// C USAGE:  CALL PROF FROM PROGRAM POST0
-// C
-// C   INPUT ARGUMENT LIST:
-// C     FILENAME - HISTORY FILE NAME
-// C     LRSTRT - THE UNIT NUMBER FOR READING THE RESTRT FILE
-// C     ITAG   - ELAPSED FORECAST TIME IN MINUTES OF THE HISTORY FILE WE ARE DEALING WITH
-// C     INCR   - FORECAST INTERVAL BETWEEN HISTORY FILES IN MINUTES
-// C
+// WOOF-NAM unit io-wind-rotate: grid-relative winds of the rotated latitude-longitude B grid to
+// earth-relative (east, north) winds at H points, for the history, the maps and the products.
 //
-// Ported to CUDA for WOOF-NAM from sorc/nam_post0.fd/PROF_NMMB.f:2115-2150 and 2232-2237 (nam.v4.2.11, 83df4e13c1).
+// Mode "new". The angle between grid i and geographic east comes from the rotated-pole map
+// (namgpu/grid.py rotated_to_geographic; WMO-No. 306 GRIB2 grid definition template 3.1); the
+// wrapper io_wind_rotate.py builds the four unit-vector components per H point once and the
+// derivation is in its docstring. The component convention is WMO-No. 306 GRIB2 code table 3.3,
+// bit 5. The notice is in NOTICE.
 //
-// WOOF-NAM unit io-wind-rotate: grid-relative winds at V points to earth-relative (east, north) winds
-// at H points.
+// Math per H point (i0, j0), level-independent vectors:
+//   ie = unit vector of increasing grid i, (ie_e, ie_n) in (east, north)
+//   je = unit vector of increasing grid j, (je_e, je_n)
+//   u_east  = u * ie_e + v * je_e
+//   v_north = u * ie_n + v * je_n
+// 3-D winds are V-point fields (V(i,j) north-east of H(i,j), CONTRACT.md section 1). H(i0, j0)
+// takes the grid-relative mean of V(i0-1, j0-1), V(i0, j0-1), V(i0-1, j0), V(i0, j0) before the turn.
+// The last V row and column are not part of the grid, so only V points with i0 <= IM-2 and
+// j0 <= JM-2 enter; an edge H point averages the two neighbours it has, a corner H point one.
+// 10 m winds are H-point fields and are turned in place.
 //
-// The post (PROF_NMMB.f 2115-2150, 2232-2237) rotates with UE = U*COSALP + V*SINALP and
-// VN = V*COSALP - U*SINALP, one ALPHA per station. This kernel does not take the post's order (see 2):
-//
-// 1. Each in-domain V neighbour of H(i0,j0) is rotated with its own exact 2x2 inverse of the forward map of
-//    init-gfs-wind-rotate, u = UE*ce_e + VE*ce_n, v = UE*cn_e + VE*cn_n:
-//      UE = (cn_n*u - ce_n*v) / det,   VE = (-cn_e*u + ce_e*v) / det,   det = ce_e*cn_n - ce_n*cn_e.
-//    V(i,j) sits NE of H(i,j) (CONTRACT.md section 1), so H(i0,j0) has V(i0,j0), V(i0-1,j0), V(i0,j0-1),
-//    V(i0-1,j0-1). The last V row and column (vi > IM-2, vj > JM-2) are unused and excluded.
-// 2. Decision, labelled (not a NAM term): the earth-relative vectors of the valid neighbours are averaged
-//    (rotate-then-average), not the grid-relative winds (average-then-rotate, the post's order). The reason is
-//    measured: the geographic pole lies inside this domain (max lat 89.98 N; 77 V cells with a > 0.2 rad jump
-//    of the grid-i direction at lat 89.5-89.98; tools/check-io-wind-rotate.py). Averaging grid-relative winds
-//    across that jump mixes opposite directions (round-trip error 5.75 m/s on a 10 m/s uniform wind). Away from
-//    the pole the two orders differ by the angle change across one cell (~1e-3 rad).
-//
-// Edge H points average the neighbours that exist. The same kernel rotates the 10 m winds (LM = 1).
-// One thread per (i, j) with the level in blockIdx.z (grid_2d). The full [JM, IM] H domain is written;
-// no halo and no host sync.
+// Grid: kernels.grid_2d(IM, JM, LM) for io_wind_rotate_3d (blockIdx.z = level), grid_2d(IM, JM, 1)
+// for io_wind_rotate_10m. Every H point is written. The neighbour tests are plain local row tests
+// (j0 - 1 >= 0, j0 <= JM - 2), which give the one-card answer on every owned row of a row slab.
 
 #include "nmmb_common.cuh"
 
-extern "C" __global__ void io_wind_rotate(
-    const int IM, const int JM, const int LM,
-    const float* __restrict__ ce_e,     // [JM,IM] east component of grid-i unit vector (V points)
-    const float* __restrict__ ce_n,     // [JM,IM] north component of grid-i unit vector
-    const float* __restrict__ cn_e,     // [JM,IM] east component of grid-j unit vector
-    const float* __restrict__ cn_n,     // [JM,IM] north component of grid-j unit vector
-    const float* __restrict__ U,        // [LM,JM,IM] grid-relative wind, grid-i (V points)
-    const float* __restrict__ V,        // [LM,JM,IM] grid-relative wind, grid-j (V points)
-    float* __restrict__ UE,             // [LM,JM,IM] out: earth-relative eastward wind (H points)
-    float* __restrict__ VE)             // [LM,JM,IM] out: earth-relative northward wind (H points)
+extern "C" __global__ void io_wind_rotate_3d(
+    const int LM, const int IM, const int JM,
+    const float* __restrict__ ie_e, const float* __restrict__ ie_n,   // [JM,IM] H-point grid-i vector
+    const float* __restrict__ je_e, const float* __restrict__ je_n,   // [JM,IM] H-point grid-j vector
+    const float* __restrict__ u, const float* __restrict__ v,         // [LM,JM,IM] V points, grid-relative
+    float* __restrict__ ue, float* __restrict__ ve)                   // [LM,JM,IM] H points, earth-relative
 {
     POINT_IJL
-    if (i0 >= IM || j0 >= JM) return;
+    if (i0 >= IM || j0 >= JM || l0 >= LM) return;
 
-    float sue = 0.0f;
-    float sve = 0.0f;
+    float su = 0.0f, sv = 0.0f;
     int n = 0;
-
-    for (int dj = 0; dj < 2; ++dj) {
-        for (int di = 0; di < 2; ++di) {
-            const int vi = i0 - di;
-            const int vj = j0 - dj;
-            if (vi < 0 || vj < 0 || vi > IM - 2 || vj > JM - 2) continue;
-
-            const size_t c2 = IDX2(vi, vj, IM);
-            const size_t c3 = IDX3(vi, vj, l0, IM, JM);
-            const float uu = U[c3];
-            const float vv = V[c3];
-            const float a = ce_e[c2];
-            const float b = ce_n[c2];
-            const float c = cn_e[c2];
-            const float d = cn_n[c2];
-            const float det = a * d - b * c;
-
-            sue += (d * uu - b * vv) / det;
-            sve += (-c * uu + a * vv) / det;
+    for (int dj = -1; dj <= 0; ++dj) {
+        const int jv = j0 + dj;
+        if (jv < 0 || jv > JM - 2) continue;
+        for (int di = -1; di <= 0; ++di) {
+            const int iv = i0 + di;
+            if (iv < 0 || iv > IM - 2) continue;
+            const size_t k = IDX3(iv, jv, l0, IM, JM);
+            su += u[k];
+            sv += v[k];
             ++n;
         }
     }
-
-    const size_t c3h = IDX3(i0, j0, l0, IM, JM);
-    if (n > 0) {
-        const float inv = 1.0f / (float)n;
-        UE[c3h] = sue * inv;
-        VE[c3h] = sve * inv;
-    } else {
-        UE[c3h] = 0.0f;
-        VE[c3h] = 0.0f;
+    const size_t c3 = IDX3(i0, j0, l0, IM, JM);
+    if (n == 0) {              // a grid of one row or one column has no V point
+        ue[c3] = 0.0f;
+        ve[c3] = 0.0f;
+        return;
     }
+    const float r = 1.0f / (float)n;
+    const float ug = su * r, vg = sv * r;
+    const size_t c2 = IDX2(i0, j0, IM);
+    ue[c3] = ug * ie_e[c2] + vg * je_e[c2];
+    ve[c3] = ug * ie_n[c2] + vg * je_n[c2];
+}
+
+extern "C" __global__ void io_wind_rotate_10m(
+    const int IM, const int JM,
+    const float* __restrict__ ie_e, const float* __restrict__ ie_n,
+    const float* __restrict__ je_e, const float* __restrict__ je_n,
+    const float* __restrict__ u10, const float* __restrict__ v10,     // [JM,IM] H points, grid-relative
+    float* __restrict__ ue10, float* __restrict__ ve10)               // [JM,IM] H points, earth-relative
+{
+    POINT_IJL
+    (void)l0;
+    if (i0 >= IM || j0 >= JM) return;
+    const size_t c2 = IDX2(i0, j0, IM);
+    const float ug = u10[c2], vg = v10[c2];
+    ue10[c2] = ug * ie_e[c2] + vg * je_e[c2];
+    ve10[c2] = ug * ie_n[c2] + vg * je_n[c2];
 }

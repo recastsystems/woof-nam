@@ -13,8 +13,8 @@ This is marshalling, not physics: unit conversions, a snow-layer topology
 ladder, soil-layer bookkeeping and the option-identity plumbing that decides
 which of them run.  The one transcendental is the supercooled-liquid initial
 guess at 2095-2096, whose ``x**y`` gfortran lowers to a scalar ``powf`` call;
-it goes through :func:`namgpu.third_party.arwen_noahmp.core.noahmp_libm.powf`, the verified glibc 2.39
-transcription, never through ``numpy.float32`` or ``**``.
+it goes through :func:`namgpu.third_party.arwen_noahmp.core.noahmp_libm.powf`, the verified FP32
+routine, never through ``numpy.float32`` or ``**``.
 
 Pinned option identity
 ----------------------
@@ -516,7 +516,7 @@ def _supercooled_guess(tslb, bexp, smcmax, psisat, smois) -> np.float32:
     ``(-1/BEXP)`` is REAL division -- ``-1`` is a default INTEGER that Fortran
     converts to REAL before dividing -- so the exponent is ``-1.0/BEXP`` and
     the whole power is a scalar ``powf`` call, which is what ``nm -u`` shows on
-    the pinned object.  glibc's ``powf`` is not correctly rounded, so
+    the pinned object.  The reference libm's ``powf`` is not correctly rounded, so
     evaluating this in binary64 and rounding once would be a *different*
     function, not a more accurate one; :mod:`namgpu.third_party.arwen_noahmp.core.noahmp_libm` is the
     only admissible source.

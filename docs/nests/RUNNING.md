@@ -103,9 +103,11 @@ A domain that fails never stops the others: its `cycle.json` and the receipt say
 | 2 | 0 | 1 | 0 | 1 | 1 | 0 |
 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-On 4 cards the CONUS nest takes all four: 63-68 s per forecast hour on 4 x RTX PRO 6000 (2026-01-23 12Z, 12 h), with
+On 4 cards the CONUS nest takes all four: 63-68 s per forecast hour on 4 cards of 96 GB (2026-01-23 12Z, 12 h), with
 18.3-18.6 GiB per card in the step loop. The other nests stay off card 0, which holds the parent and the CONUS GRIB2
 writer; every CONUS rank waits on the slowest one.
+With GRIB2 products following (6 h, 2026-01-23 12Z), each CONUS file was public 65-80 s after its history
+hour, and products cost the CONUS ranks about 14 % (9.4-9.7 s per forecast hour) from hour 3 on.
 
 Domains that share a card each check its free memory before they start and wait for room. The parent is the critical
 path: every nest waits for its hours.

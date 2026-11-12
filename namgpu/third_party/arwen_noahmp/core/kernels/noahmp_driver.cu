@@ -21,15 +21,15 @@
 //    folds FP32 literals, so a table of literals can be mis-folded at compile
 //    time; __fsub_rn pins the hardware, not the folder.
 //    tests/test_fp32_tie_folding_gpu.py guards that.
-// 3. `x**y` in NOAHMP_INIT's supercooled-liquid guess (2095-2096) is a glibc
+// 3. `x**y` in NOAHMP_INIT's supercooled-liquid guess (2095-2096) is a reference libm
 //    powf call in the oracle.  CUDA's powf, __powf and exp2f are all different
 //    functions and none can hold a max_ulp-0 gate, so this file uses r_pow --
-//    the single glibc 2.39 transcription that lives in noahmp_leaves.cu.
+//    the single FP32 implementation that lives in noahmp_leaves.cu.
 //
 // COMPOSITION: compiled after noahmp_leaves.cu (see noahmp_driver_gpu.py).
-// There must be exactly one transcription of glibc's powf in the tree; two
+// There must be exactly one FP32 implementation of powf in the tree; two
 // copies could drift and only one of them would be audited against
-// glibc-libm-fp32.csv.
+// gpuwm's pinned FP32 libm fixture.
 //
 // Pinned option identity: iopt_run=3, iopt_crop=0, iopt_irr=0, iopt_irrm=0,
 // sf_urban_physics=0, restart=.false.  Everything they kill is absent, not
@@ -363,8 +363,8 @@ __device__ void noahmp_snow_init_core(
 // `-1/BEXP` is REAL division -- `-1` is a default INTEGER that Fortran
 // converts to REAL before dividing -- so the exponent is -1.0/BEXP and the
 // power is a scalar powf call, which is what `nm -u` shows on the pinned
-// object.  glibc's powf is not correctly rounded, so r_pow (the single glibc
-// 2.39 transcription, in noahmp_leaves.cu) is the only admissible source.
+// object.  The reference libm's powf is not correctly rounded, so r_pow (the single FP32
+// implementation, in noahmp_leaves.cu) is the only admissible source.
 // --------------------------------------------------------------------------
 __device__ float noahmp_supercooled_guess(float tslb, float bexp,
                                           float smcmax, float psisat,

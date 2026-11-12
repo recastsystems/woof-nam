@@ -5,7 +5,7 @@ WOOF-NAM is a GPU port of NOAA/NCEP's North American Mesoscale model (NAM, nam.v
 on one NVIDIA card or on several cards of one machine. NCEP retired the NAM on 2026-11-03 12Z; this
 package keeps the model running.
 
-Distribution name `recast-woof-nam` (on PyPI: `pip install recast-woof-nam`), import name `namgpu`, command `woof-nam`, version 0.2.0.
+Distribution name `recast-woof-nam` (on PyPI: `pip install recast-woof-nam`), import name `namgpu`, command `woof-nam`, version 0.2.1.
 
 ## What it looks like
 
@@ -44,7 +44,7 @@ The +12 h sheets and the other maps are in [docs/evidence/](docs/evidence/).
 
 - **Linux** (x86_64) with Python 3.12 or newer.
 - **An NVIDIA card with 24 GB or more for the 12 km grid; up to 85 GB on a 96 GB card without the fit.** The
-  12 km forecast peaks at 22.5 GB on an RTX 5090; a 3 km nest of 333 x 333 points at 5.8 GB (see "Speed and
+  12 km forecast peaks at 22.5 GB on a 32 GB card; a 3 km nest of 333 x 333 points at 5.8 GB (see "Speed and
   memory"). On a card with less than 64 GB the run takes the 32 GB fit by itself: arrays that live inside one step are handed
   back after their last user, the radiation working set is dropped between calls and the radiation runs in
   8-row chunks. Every physics scheme stays on. The run log and `forecast-receipt.json` name the memory path
@@ -52,7 +52,7 @@ The +12 h sheets and the other maps are in [docs/evidence/](docs/evidence/).
   Fetching data, the static fields, maps and the side-by-side panels need no big card (the static-field
   build uses an NVIDIA card for a few seconds).
 - **Or two or more 32 GB cards of one machine** (`woof-nam run --cards N`, see "Running on more than one
-  card"): the 12 km grid ran on 2, 4 and 8 RTX 5090 cards with the same bits on any number of cards; on 2
+  card"): the 12 km grid ran on 2, 4 and 8 cards of 32 GB with the same bits on any number of cards; on 2
   cards each one peaks at about 13 GB.
 - **An NVIDIA driver for CUDA 13.** No system CUDA toolkit is needed: pip installs the CUDA runtime
   and the compiler headers (`cupy-cuda13x[ctk]`). The kernels are compiled on the card at first use
@@ -230,11 +230,11 @@ woof-nam run --resume runs/x/restart        # case, source, end hour and output 
   - The files are written by a background thread while the forecast steps on: 34-130 s per set on a busy disk.
   - The first set of a run also allocates the 15 GiB pinned buffer: 6-10 s, once.
   - Host memory: one pinned buffer the size of the state.
-- **Proof.** 2025-03-14 12Z native start, 6 h, one RTX 5090, both runs from one saved initial state:
+- **Proof.** 2025-03-14 12Z native start, 6 h, one 32 GB card, both runs from one saved initial state:
   - a straight run, and a run killed with SIGKILL right after its 3 h set, then resumed from that set;
   - all 7 hourly history files (0-6 h) of the two runs are byte-identical (`cmp`, and `woof-nam compare`: 0 values differ);
   - the resumed process loaded the set in 5.8 s.
-  - The same on the full memory path (an RTX PRO 6000 96 GB, 2023-03-31 12Z GFS start, both runs from one saved
+  - The same on the full memory path (a 96 GB card, 2023-03-31 12Z GFS start, both runs from one saved
     initial state): a 2 h run with `--restart-every 1h`, resumed to 3 h, wrote f00-f03 byte-identical to a straight
     3 h run (85 variables, 0 values differ). Each set was 16.2 GiB, written in 2-4 s; the resume loaded it in 8-9 s.
 - **Scope.** One card. With `--cards N` the restart options stop with a message: each card would have to write its
@@ -270,7 +270,7 @@ woof-nam run --case 2024-08-25_18z --source gfs --hours 84 --out runs/x --start 
   4. Forecasts from the cycle. Hour 0 is the cycle; accumulators start at zero.
 - **Inputs.** It needs three more GFS files: the analysis 6 h earlier and the 0 and 3 h leads of that cycle.
   `woof-nam fetch --spinup-hours 6` fetches them, and `run` fetches them itself when they are missing.
-- **Cost** (12 km CONUS, one RTX PRO 6000, 2024-08-25 18Z):
+- **Cost** (12 km CONUS, one 96 GB card, 2024-08-25 18Z):
   - `iau` adds about 5.4 min to a cycle, `nudge` about 3.0 min.
   - Hour 0 held cloud water up to 2.4 g/kg, snow up to 9.7 g/kg and composite reflectivity to 51 dBZ, with 4.6 % of
     the grid over 20 dBZ. A cold start has none of these.
@@ -326,21 +326,32 @@ woof-nam products --compare cases/2025-03-14_12z/raw/nam/awphys06.grib2 \
   Values carry NOAA's precision.
 - **How.** The history fields are regridded from the NMMB rotated lat-lon grid to grid 218 (bilinear; soil and
   vegetation classes and masks nearest), winds turned grid-relative as NCEP writes them, and handed to gpuwm's Rust
-  GRIB2 exporter `rw_rrfs_upp`, which computes the post fields and encodes on every core. The post's column work
+  GRIB2 exporter `rw_rrfs_upp`, which computes the derived fields and encodes on every core. Its column work
   runs on the GPU (`--post-device gpu`, the default). If a shared card runs out of memory, the hour waits for room
-  and is rerun on the GPU instead of lost, and `index.json` lists the rerun.
+  and is rerun on the GPU instead of lost, and `index.json` lists the rerun. Every `--post-device` choice needs a
+  CUDA device, `cpu` included: the writer computes the derived records of NOAA's files on a card only. With no
+  device visible, `woof-nam products` stops before the first hour and says so in one line.
+- **With the run.** `woof-nam run --products` returns once `<out>/products/DONE` is written, so a batch job that
+  ends with the command keeps every hour. If the follower fails, the run exits non-zero with one line naming the
+  hour; if it writes nothing new for `--products-stall-s` (900 s), the run stops it and exits non-zero.
+  `--no-products-wait` returns at once, for a caller that waits on `DONE` itself. `woof-nam nest --products` waits
+  the same way.
 - **The exporter.** The GRIB2 writer is `rw_rrfs_upp` (gpuwm's Rust field-set writer with the NAM awphys profile),
-  a 13 MB Linux x86-64 binary attached to the woof-nam GitHub release (glibc 2.28 or later). The first
+  a 17 MB Linux x86-64 binary attached to the woof-nam GitHub release (manylinux_2_28: RHEL 8, Debian 10,
+  Ubuntu 20.04 and later). The first
   `woof-nam products` (or `woof-nam run --products`) downloads it into `~/.woof-nam/bridges/` and checks its size
   and SHA-256 against the pins in the package before installing it. `woof-nam fetch-bridges` does the same ahead of
   time, and `woof-nam fetch-bridges --from FILE` installs a copy you already have (same pins). Set
   `WOOF_NAM_BRIDGE_URL` to fetch from a mirror, or `WOOF_NAM_RW_RRFS_UPP` to run your own build.
-- **Speed.** About 25 s of products per forecast hour (2 hours in flight) against about 56 s of model per forecast
-  hour on one RTX 5090, so `--products` keeps up with the forecast. f00-f06 took 2 min 35 s on 24 cores.
+- **Speed.** Measured with 0.2.1 on one 32 GB card and 12 cores of a 24-core host that was busy with other work
+  (2024-11-05 12Z from the NAM's analysis, maps and columns on): about 28 s of model per forecast hour; each
+  GRIB2 hour took 27-66 s to frame and 12-26 s to write, two hours in flight. In a 12 h run f06 was in place
+  6 min 15 s after the start and f12 after 10 min 40 s, 3 min 40 s after the forecast's last step.
 
-**How many records.** A 0.2.0 file holds 450 records at f06 (442 at f00, 448 at f03), of NOAA's 454; the 4 left out
-are named under "Not in the files" below. The four precipitation types are new in 0.2.0, so files from earlier versions
-hold at most 446 at f06. The first check below was made with an earlier version and counts fewer.
+**How many records.** A 0.2.1 file holds 451 records at f06 (443 at f00, 449 at f03), of NOAA's 454; the 3 left out
+are named under "Not in the files" below. The four precipitation types are new in 0.2.0 and the accumulated snowfall
+(WEASD) in 0.2.1, so a 0.2.0 file holds 450 at f06 and files from earlier versions at most 446. The first check
+below was made with an earlier version and counts fewer.
 
 **First check against NOAA (an earlier version).** 2025-03-14 12Z, a 6 h native start, f00-f06, each file against
 NOAA's archived `nam.t12z.awphysFF.tm00.grib2` of the same hour:
@@ -362,20 +373,21 @@ NOAA's archived `nam.t12z.awphysFF.tm00.grib2` of the same hour:
 - Values, our forecast against NAM's on grid 218 at f06 (correlation): surface temperature 0.997, 2 m maximum and
   minimum temperature 0.999, 2 m maximum and minimum RH 0.986 and 0.987, gust 0.925, PBL height 0.952, Haines index
   0.951. `tools/grib2_value_check.py` prints correlation and bias for every record.
-- In that history the vertical velocity is the bare W. NAM's post reads W_TOT, which also carries the terrain-forced
-  term, so VVEL and DZDT have NAM's structures at about 0.7 of its amplitude. A run of this version writes W_TOT, and
+- In that history the vertical velocity is the bare W, without the terrain-forced term that W_TOT also carries, so
+  VVEL and DZDT have NAM's structures at about 0.7 of its amplitude. A run of this version writes W_TOT, and
   the products use it.
 
 **Checked again for 0.2.0.** 2026-01-23 12Z, GFS start, each file against NOAA's archived file of the same hour: f00
 442 of 442, f03 448 of 448 and f06 450 of 450 records present at that hour match NOAA's inventory line and order
 (MAXUW and MAXVW are written). `woof-nam inventory` against NOAA's 2026-11-03 06Z f01: 448 of NOAA's 452 records
-written, the 4 below named, none unexplained. At f06, 408 of the 450 records also carry NOAA's decimal and binary scale
-factors exactly and 42 differ in one or both (16 TKE, 13 HGT, 4 VVEL, 3 UGRD/VGRD pairs, DPT at 2 m, SNOD, LHTFL;
-`docs/COMPATIBILITY-TABLE.md` gives each).
+written, the 3 below and WEASD (written from 0.2.1) not written, none unexplained. At f06, 408 of the 450 records
+also carry NOAA's decimal and binary scale factors exactly and 42 differ in one or both (16 TKE, 13 HGT, 4 VVEL, 3
+UGRD/VGRD pairs, DPT at 2 m, SNOD, LHTFL; `docs/COMPATIBILITY-TABLE.md` gives each).
 
-**Not in the files.** 4 of NOAA's 454 records: visibility at cloud top, the Blackadar mixing length (NOAA's file holds
-zero there), the accumulated snowfall (WEASD) and lightning (LTNG). The four dominant precipitation types (CSNOW, CICEP,
-CFRZR, CRAIN) are written from 0.2.0. A record that is missing is left out of the file, never written as zeros or under another record's
+**Not in the files.** 3 of NOAA's 454 records: visibility at cloud top, the Blackadar mixing length (NOAA's file holds
+zero there) and lightning (LTNG). The four dominant precipitation types (CSNOW, CICEP, CFRZR, CRAIN) are written from
+0.2.0, and the accumulated snowfall water (WEASD, NOAA's 12 h window) from 0.2.1, so a 0.2.1 file holds 451 records at
+f06 (443 at f00, 449 at f03). A record that is missing is left out of the file, never written as zeros or under another record's
 name. `docs/COMPATIBILITY.md` lists what a site changes, and `docs/COMPATIBILITY-TABLE.md` gives every record.
 
 ## Nest GRIB2 products (hiresf)
@@ -411,7 +423,7 @@ woof-nam products --compare nam.t06z.conusnest.hiresf01.tm00.grib2 \
   NMMB's own 3 h accumulators; hourly maxima and minima over the last hour. The fire-weather nest empties its
   accumulators every hour, as NCEP's did, so its files carry 0-1, 1-2, 2-3, ... (`hiresf-firewxnest.tsv`).
 - **How.** As NCEP did for its nests (nearest-neighbour regrid of the nest's own columns; budget for APCP, WEASD and
-  SNOD; winds grid-relative), but before the post, so each record is made from the nest column at that point. Points
+  SNOD; winds grid-relative), but before the products are computed, so each record is made from the nest column at that point. Points
   of the grid outside the nest are missing (bitmap). The writer computes only the window of the grid the nest covers,
   so a nest smaller than NOAA's grid costs its own size.
 - **Packing.** Complex packing (DRT 5.3) for every nest, at NOAA's per-record scale. NOAA's Hawaii, Puerto Rico and
@@ -547,7 +559,7 @@ score that needs one downloads it, checked against the pins in the package. Shee
 
 ## Speed and memory
 
-One RTX PRO 6000, 96 GB (full memory path), fresh clone and wheel install, 2025-03-14 12Z native start:
+One 96 GB card (full memory path), fresh clone and wheel install, 2025-03-14 12Z native start:
 - **Digital filter (TDFI):** 70.7 s (150 backward and 150 forward steps of 8 s), before the forecast, as the
   NAM runs it.
 - **24 h forecast:** 3,456 steps in 615 s, 178 ms per step (all physics, hourly history); 731 s for the whole
@@ -561,23 +573,23 @@ peaked where the last column says.
 
 | Grid (points) | Card | Run | Peak on the card | 0.1.1.dev6 | Forecast step |
 |---|---|---|---|---|---|
-| 12 km CONUS (954 x 835 x 60) | RTX 5090, 32 GB | 1 h, native 2025-03-14 12Z | 22,548 MiB | 28,638 MiB | 358.6 ms (362.7) |
-| 12 km CONUS (954 x 835 x 60) | RTX 5090 held to 23,963 MiB free (a 24 GB card) | 1 h, same start | 22,468 MiB | - | 343.2 ms |
-| 12 km CONUS (954 x 835 x 60) | 2 x RTX 5090, `--cards 2` | 1 h, same start | 13,094 + 12,996 MiB | - | same bits as 1 card |
-| 3 km nest (333 x 333 x 60) | RTX 5090 (shared) | 3 h, GFS 2025-03-14 12Z | 5,778 MiB | 8,654 MiB | - |
-| 3 km nest (100 x 100 x 60) | RTX 5090 (shared) | 1 h, GFS 2025-03-14 12Z | 3,322 MiB | 4,306 MiB | - |
+| 12 km CONUS (954 x 835 x 60) | 32 GB card | 1 h, native 2025-03-14 12Z | 22,548 MiB | 28,638 MiB | 358.6 ms (362.7) |
+| 12 km CONUS (954 x 835 x 60) | 32 GB card held to 23,963 MiB free (a 24 GB card) | 1 h, same start | 22,468 MiB | - | 343.2 ms |
+| 12 km CONUS (954 x 835 x 60) | 2 cards of 32 GB, `--cards 2` | 1 h, same start | 13,094 + 12,996 MiB | - | same bits as 1 card |
+| 3 km nest (333 x 333 x 60) | 32 GB card (shared) | 3 h, GFS 2025-03-14 12Z | 5,778 MiB | 8,654 MiB | - |
+| 3 km nest (100 x 100 x 60) | 32 GB card (shared) | 1 h, GFS 2025-03-14 12Z | 3,322 MiB | 4,306 MiB | - |
 
 - **Smallest card each grid fits:** the 12 km grid a 24 GB card (the run above; on a 24 GB card the column physics
   works in row bands by itself when a whole-domain call would not fit, with the same output); the 333 x 333 nest (and up to
   about 415 x 414, measured) an 8 GB card (below) and the 100 x 100 nest a 4 GB card, from its peak.
-- **What the peak holds:** 2.44 GiB of it, on an RTX 5090, is the local memory the GPU reserves for the step
+- **What the peak holds:** 2.44 GiB of it, on a 32 GB card, is the local memory the GPU reserves for the step
   kernels (10,016 bytes per resident thread; a card with fewer multiprocessors reserves less), and about 0.3 GiB is the
   CUDA context and modules. The rest is the run's memory pool, which grows only when a request needs it and hands
   unused blocks back after each init stage, radiation call and history write.
 - The forecast-step column is the 1 h forecast loop after the filter, on a card running nothing else; the nest rows ran on
   a shared card, so they give no step time.
 
-**An 8 GB card.** One RTX 3060 Ti (8 GB, driver for CUDA 13.0), `pip install recast-woof-nam==0.1.2` into a fresh
+**An 8 GB card.** One 8 GB card (driver for CUDA 13.0), `pip install recast-woof-nam==0.1.2` into a fresh
 venv (111 s), 3 km nests from GFS 2025-03-14 12Z through the door, every physics scheme on, the card running nothing
 else, e.g. `woof-nam nest --center 38.5N,91W --size-km 1148 --size-y-km 989 --res-km 3 --source gfs --start 2025031412
 --hours 3 --out runs/nest`. The peak is the whole card (nvidia-smi every 0.5 s); the step is the forecast loop after the
@@ -586,12 +598,12 @@ them from the cache in about 1 s.
 
 | Grid (points) | Card | Run | Peak on the card | Forecast step | Door, start to sheets |
 |---|---|---|---|---|---|
-| 3 km nest (99 x 100 x 60) | RTX 3060 Ti, 8 GB | 1 h, GFS 2025-03-14 12Z | 2,011 MiB | 9.2 ms | 149 s (68 s of it the GFS download) |
-| 3 km nest (328 x 330 x 60) | RTX 3060 Ti, 8 GB | 3 h, same start | 4,104 MiB | 71.0 ms | 256 s (inputs already fetched) |
-| 3 km nest (360 x 359 x 60) | RTX 3060 Ti, 8 GB | 1 h, same start; radiation in 4-row chunks (0.1.2's pick) | 4,178 MiB | 142.8 ms | 238 s (inputs already fetched) |
-| 3 km nest (378 x 377 x 60) | RTX 3060 Ti, 8 GB | 1 h, same start; 0.1.3, radiation in 16-row chunks | 5,008 MiB | 94.9 ms | 156 s (inputs already fetched) |
-| 3 km nest (415 x 414 x 60) | RTX 3060 Ti, 8 GB | 1 h, same start; 0.1.3, radiation in 16-row chunks | 5,614 MiB | 112.9 ms | 189 s (inputs already fetched) |
-| 3 km nest (99 x 100 x 60) | RTX 3060 Ti, 8 GB | 1 h, ERA5 2025-03-14 12Z (`--source era5`); 0.1.3 | 1,960 MiB | 9.6 ms | 121 s (48 s of it the ERA5 download) |
+| 3 km nest (99 x 100 x 60) | 8 GB card | 1 h, GFS 2025-03-14 12Z | 2,011 MiB | 9.2 ms | 149 s (68 s of it the GFS download) |
+| 3 km nest (328 x 330 x 60) | 8 GB card | 3 h, same start | 4,104 MiB | 71.0 ms | 256 s (inputs already fetched) |
+| 3 km nest (360 x 359 x 60) | 8 GB card | 1 h, same start; radiation in 4-row chunks (0.1.2's pick) | 4,178 MiB | 142.8 ms | 238 s (inputs already fetched) |
+| 3 km nest (378 x 377 x 60) | 8 GB card | 1 h, same start; 0.1.3, radiation in 16-row chunks | 5,008 MiB | 94.9 ms | 156 s (inputs already fetched) |
+| 3 km nest (415 x 414 x 60) | 8 GB card | 1 h, same start; 0.1.3, radiation in 16-row chunks | 5,614 MiB | 112.9 ms | 189 s (inputs already fetched) |
+| 3 km nest (99 x 100 x 60) | 8 GB card | 1 h, ERA5 2025-03-14 12Z (`--source era5`); 0.1.3 | 1,960 MiB | 9.6 ms | 121 s (48 s of it the ERA5 download) |
 
 From 0.1.3 the door's estimate is 1-4 % above these peaks at 4- and 8-row chunks and 15-17 % above at 16, so on an 8 GB card it
 admits nests up to about 490 x 490 points and gives them the largest radiation chunks that fit; `woof-nam doctor`
@@ -643,13 +655,13 @@ pair below:
 
 Check your own pair with `woof-nam compare <run a> <run b>` (exit 0 when every value is identical).
 
-**Speed and memory, 12 km CONUS (954 x 835 x 60), 6 h, every physics scheme on.** Several cards: RTX 5090
-32 GB, no peer-to-peer link, NCCL 2.28 over host shared memory. ms/step is the whole-run average per card from the
+**Speed and memory, 12 km CONUS (954 x 835 x 60), 6 h, every physics scheme on.** Several cards: 32 GB
+cards, no peer-to-peer link, NCCL 2.28 over host shared memory. ms/step is the whole-run average per card from the
 receipt; the wall includes loading the saved init.
 
 | Cards | Rows per card (owned + halo) | ms/step | Wall for 6 h (864 steps) | Memory per card |
 |---|---|---|---|---|
-| 1 (RTX PRO 6000 96 GB) | 835 | 186-193 | about 165 s (24 h: 643 s) | 58-76 GB (pool about 58 GB) |
+| 1 (96 GB card) | 835 | 186-193 | about 165 s (24 h: 643 s) | 58-76 GB (pool about 58 GB) |
 | 2 | 418 + 3, 417 + 3 | 174, 175 | 469 s (258 s of it loading the init on a busy host) | 26.9, 31.1 GiB |
 | 4 | 209 + 3 to 6 | 89-102 | 123-151 s | 24.1-29.9 GiB |
 | 8 | 105 + 3 to 6 | 53-55 | 92 s | 19.2-20.2 GiB |
@@ -661,7 +673,7 @@ or faster on several cards.
 --domain NAME` (also `init`) selects it. `conus12` is the NAM 12 km parent (the default). `conus4` is 1371 x 1101 x 60
 over NAM's CONUS-nest footprint, GFS start only: its static surface is built on the GPU from the WPS_GEOG land sets
 (`NAMGPU_GEOG`, else `~/WPS_GEOG`) on the first run and again when the start month changes, and with `--cards N` its
-initial state is built in CUDA managed memory. The 4 km grid ran 24 h on 8 RTX 5090 cards (42.9 ms per step, 522 s
+initial state is built in CUDA managed memory. The 4 km grid ran 24 h on 8 cards of 32 GB (42.9 ms per step, 522 s
 wall, 25-26 GB per card; from a checkout through `tools/run_nam_domain.sh`, which takes the same configfile).
 
 Needs: one machine with N NVIDIA cards and the NCCL 2 library (`libnccl.so.2`) where CuPy can load it; about
@@ -679,6 +691,9 @@ woof-nam suite --cycle 2026110306 --out runs/suite-2026110306                   
 ```
 
 Each nest writes NOAA's nest files (`woof-nam.tHHz.<nest>.hiresfFF.tm00.grib2`) on NOAA's grid for it.
+On the 4-card CONUS check (woof-nam 0.2.0, 4 cards of 96 GB, `woof-nam suite --cycle 2026012312 --domains
+12km,conusnest --hours-cap 6`) each CONUS GRIB2 file was public 65-80 s after its history hour was written, and
+writing products beside the run cost the four CONUS ranks about 14 % (9.4-9.7 s per forecast hour) from hour 3 on.
 [docs/nests/RUNNING.md](docs/nests/RUNNING.md) covers every nest, the fire-weather point, card layouts and the output
 folders; [docs/nests/COMPATIBILITY.md](docs/nests/COMPATIBILITY.md) compares the files with NOAA's record by record.
 
@@ -701,7 +716,7 @@ woof-nam nest --center 35.7N,139.7E --size-km 1000 --res-km 3 --source gfs \
   also refuses if no renderer is found. It writes `nest-receipt.json` with every stage's wall time, cores and
   VRAM. From a checkout, `tools/woof-nam nest ...` runs the same command.
 
-Three whole 48 h runs, each 286 x 334 x 60 points at 3 km (1,000 km square), on one RTX 5090 (32 GB):
+Three whole 48 h runs, each 286 x 334 x 60 points at 3 km (1,000 km square), on one 32 GB card:
 
 | case | start and boundaries | ms/step | forecast 48 h | VRAM (pool) | door, start to sheets |
 |---|---|---|---|---|---|
@@ -752,7 +767,7 @@ woof-nam nest --two-way --center 24N,83W --size-km 1900 --size-y-km 1400 --res-k
 The one-way hand-off is still there: `--source parent --parent-run DIR` runs a nest from a finished WOOF-NAM 12 km
 run's hand-off history, and `woof-nam nest` with no parent options runs the nest alone from the source's boundaries.
 
-On Hurricane Ian (GFS 2022-09-26 12Z, 84 h, RTX PRO 6000), the feedback brought the 12 km parent down to 919.6 hPa
+On Hurricane Ian (GFS 2022-09-26 12Z, 84 h, one 96 GB card), the feedback brought the 12 km parent down to 919.6 hPa
 at +48 h, within 1-9 hPa of the nest at every hour; without it the parent stayed at 974.0. The two-way nest was
 910.5 hPa at +48 h against 931.6 with the feedback off and 937 in the best track, with a wider core and a track
 further west; its deepest, 908.8 hPa, was 27 hPa below the observed 937 (one-way: 923.7). No seam shows at the
@@ -791,9 +806,9 @@ woof-nam nest --follow tc --storm-id 2024225N22135 --size-km 1000 --res-km 3 --s
 - A live parent (`--two-way`, `--concurrent`, `--parent-*`) does not move its nest, and `--follow` is
   refused there.
 - Memory: the forecast and a background worker share the card, so a 1000 km moving nest at 3 km peaked at
-  45-57 GiB on an RTX PRO 6000 (96 GB).
+  45-57 GiB on a 96 GB card.
 
-48 h runs from GFS 0.25, 1000 km at 3 km on one RTX PRO 6000, scored every 6 h (f06-f48) against IBTrACS
+48 h runs from GFS 0.25, 1000 km at 3 km on one 96 GB card, scored every 6 h (f06-f48) against IBTrACS
 best track. "Static" is the same nest without `--follow`:
 
 | storm, start | run | mean track error | mean central-pressure error | track error f24 / f36 / f48 | leads with the storm at the edge |
@@ -854,7 +869,7 @@ Each row's licence is also written next to its table in the code (`static_build.
 namgpu/            the package: config, grid, state, kernels/ (one .cu per unit), dynamics/,
                    boundary/, physics/, init/, io/, steps/, driver.py, cli.py (the woof-nam command)
 namgpu/parm/       NAM parm files (NOAA, unmodified)
-namgpu/data/       tables; fix/ NOAA radiation, CO2 and ozone fix files; fix/noah/ Noah stand-in tables
+namgpu/data/       tables; fix/ NOAA radiation, CO2 and ozone fix files; fix/noah/ NCEP's NMMB Noah tables
 namgpu/third_party/arwen/  ArWen (gpuwm) files reused, Apache-2.0
 namgpu/UNITS.json  every port unit and its status
 tools/             extract and check tools (development); fetch_fix.sh refreshes namgpu/data/fix
@@ -878,11 +893,9 @@ CONTRACT.md        array layout, step order, kernel convention, done rule
 - **Memory fit on several cards:** measured on the 954 x 279 band (2 cards, same bits as 1 card). The full
   12 km grid on several cards is measured on the full memory path only.
 - **Restarts:** one card ("Restarts" above); the NAM's own restart files are not read.
-- **GRIB2 products:** 4 of NOAA's 454 awphys records and 71 of NOAA's 876 conusnest (871 other nests) records are
+- **GRIB2 products:** 3 of NOAA's 454 awphys records and 71 of NOAA's 876 conusnest (871 other nests) records are
   not produced ("GRIB2 products" and "Nest GRIB2 products" above). The prebuilt
   writer is for Linux x86-64; elsewhere, build `rw_rrfs_upp` from gpuwm and set `WOOF_NAM_RW_RRFS_UPP`.
-- **Noah vegetation table:** the NAM's own VEGPARM.TBL was never published. A stand-in built from
-  WRF's public-domain table is used (namgpu/data/fix/noah/PROVENANCE.txt).
 
 ## Licence
 

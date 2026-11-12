@@ -46,15 +46,12 @@
  * DIVISION: gfortran's `/` and CUDA's default -prec-div=true are both
  * correctly rounded, and __fdiv_rn is that operation named.  sqrtf likewise
  * (-prec-sqrt=true), which is why scale_fac2 = scale_fac**0.5 needs no
- * glibc mirror even though it is a real exponent -- gfortran folds the 0.5
+ * the reference libm mirror even though it is a real exponent -- gfortran folds the 0.5
  * case to sqrt and both sides are correctly rounded.
  *
- * LOGARITHM: scale_fac reads log(dxref/dx), and glibc's logf is NOT CUDA's.
- * gfk_log (glibc_flt32.cuh, transcribed from glibc 2.39
- * sysdeps/ieee754/flt-32/e_logf.c) is the reference's own function.  Checked
- * 2026-08-28: e_logf.c and e_logf_data.c are identical between glibc 2.35
- * and 2.39 apart from their copyright line, so the oracle built on this
- * box's 2.35 and this kernel's 2.39 transcription agree by construction.
+ * LOGARITHM: scale_fac reads log(dxref/dx), and the reference libm's logf is NOT CUDA's.
+ * gfk_log (the FP32 maths header, our own FP32 logf) matches the reference's
+ * logf bit for bit.
  *
  * ==========================================================================
  * LAYOUT
@@ -336,10 +333,10 @@ extern "C" __global__ void ntiedtke_prep(
  * the plain 108-column fixture with no trigger visibility.  cuadjtqn's
  * kcall = 0 arm does not even read ldflag.
  *
- * exp() here is gfk_exp (glibc_flt32.cuh), NOT CUDA's expf.  The reference
- * calls glibc's expf and the two disagree at the ULP level; the NumPy
- * mirror has to MODEL glibc by evaluating in double and rounding once,
- * while this kernel runs glibc's own algorithm and needs no model.
+ * exp() here is gfk_exp (the FP32 maths header), NOT CUDA's expf.  The reference
+ * calls the reference libm's expf and the two disagree at the ULP level; the NumPy
+ * mirror has to MODEL the reference libm by evaluating in double and rounding once,
+ * while this kernel's own FP32 routine matches it and needs no model.
  *
  * All three of cuinin's working arrays (ptenh, pqenh, pqsenh) are also its
  * OUTPUTS, so they are written straight into the caller's global arrays and
@@ -922,7 +919,7 @@ extern "C" __global__ void ntiedtke_cutypen(
             const float root = __fadd_rn(0.001f, -__fmul_rn(part1, part2));
             if (part2 < 0.0f) {
                 /* conw = 1.2*root**t13 -- a genuine cube root through powf,
-                 * so gfk_pow (glibc's) and not CUDA's. */
+                 * so gfk_pow (the reference libm's) and not CUDA's. */
                 const float conw = __fmul_rn(1.2f, gfk_pow(root, NT_T13));
                 const float deltt = fmaxf(__fdiv_rn(
                     __fmul_rn(1.5f, hfx[i]),

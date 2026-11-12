@@ -81,6 +81,11 @@ def test_masks():
     with pytest.raises(ValueError):
         P.mask(f, "rate")
     assert P.mask(f, "prec4e-6").tolist() == [False, False, True]
+    # the default rate is NCEP's 0.01 mm/h: 0.02 mm/h of light snow is typed, 0.005 mm/h is not. At the 0.05 mm/h used
+    # before, a run from the NAM's own analysis typed 15.6 % of grid 218 where NCEP's file types 21.3 %.
+    assert P.MASK_RATE_MM_H == 0.01
+    light = {"PREC": np.array([0.005, 0.02]) * 1.0e-3 / 3600.0 * 50.0}
+    assert P.mask(light, "rate", dtq2=50.0).tolist() == [False, True]
     with pytest.raises(ValueError):
         P.mask(f, "nope")
 

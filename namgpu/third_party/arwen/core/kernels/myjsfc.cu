@@ -15,7 +15,7 @@
 // tests/test_myj_port.py within a documented tolerance; NO oracle
 // comparison against the WRF Fortran has been run yet (that campaign is
 // the declared next stage, as it was for Shin-Hong and Grell-Freitas).
-// libm identity (logf/expf/powf vs glibc) is deliberately unpinned until
+// libm identity (logf/expf/powf vs the reference libm) is deliberately unpinned until
 // that campaign.
 //
 // Faithful quirks: CT is identically zero (:206-211, :816-825); the

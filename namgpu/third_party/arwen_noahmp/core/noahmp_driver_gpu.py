@@ -17,9 +17,9 @@ and launched by nothing but ``tests/test_noahmp_driver_cuda.py``, while the
 cold start took the CPython transcription column by column.
 
 ``noahmp_driver.cu`` is compiled **after** ``noahmp_leaves.cu``.  The
-supercooled-liquid guess at 2095-2096 needs glibc 2.39's ``powf`` on the
-device, and there must be exactly one transcription of it: two copies could
-drift and only one of them would be audited against ``glibc-libm-fp32.csv``.
+supercooled-liquid guess at 2095-2096 needs the reference libm's ``powf`` on the
+device, and there must be exactly one implementation of it: two copies could
+drift and only one of them would be audited against gpuwm's pinned FP32 libm fixture.
 Composing the two sources rather than duplicating the tables keeps that single
 copy.
 """
@@ -36,7 +36,7 @@ from namgpu.third_party.arwen_noahmp.core.kernels import _preamble
 
 _KDIR = Path(__file__).resolve().parent / "kernels"
 
-# The glibc transcendental block this group borrows lives in noahmp_leaves.cu.
+# The reference libm transcendental block this group borrows lives in noahmp_leaves.cu.
 _LIBM_SOURCE = _KDIR / "noahmp_leaves.cu"
 _DRIVER_SOURCE = _KDIR / "noahmp_driver.cu"
 

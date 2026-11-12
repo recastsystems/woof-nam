@@ -27,15 +27,15 @@ which scalar one **bitwise**, and refuses to guess:
     bugs to.  :func:`fmn` and :func:`fmx` are the ``where`` forms that match.
 
 ``powf`` / ``expf`` / ``logf`` / ``tanhf``
-    Neither numpy's float32 versions nor CUDA's device libm are glibc's, and
-    gfortran on x86-64 calls glibc's.  These go through
+    Neither numpy's float32 versions nor CUDA's device libm are the reference libm's, and
+    gfortran on x86-64 calls the reference libm's.  These go through
     ``gpuwm/core/kernels/noahmp_libm_slab.cu``, which is a bare elementwise
-    wrapper around the single audited device transcription already in this
+    wrapper around the single audited device implementation already in this
     tree (``r_pow``/``r_exp``/``r_log`` in ``noahmp_leaves.cu`` and
     ``nmpe_tanhf`` in ``noahmp_energy.cu``).  No second copy is created here,
     which is also why the entry points are spelled ``slab_powf`` and not
     ``powf``: ``tests/test_noahmp_radiation.py`` treats a module under
-    ``gpuwm/`` that *defines* ``powf`` as a fork of the transcription, and it
+    ``gpuwm/`` that *defines* ``powf`` as a fork of the FP32 routines, and it
     is right to.
 
 ``tests/test_noahmp_slab_libm.py`` holds every claim above against
@@ -122,7 +122,7 @@ def _unary(name, x):
 
 
 def slab_powf(x, y):
-    """glibc 2.39 ``powf`` over arrays, elementwise.
+    """FP32 ``powf`` over arrays, elementwise.
 
     ``y`` may be a scalar; it is broadcast to ``x``'s shape *before* the
     launch, because the kernel reads one exponent per element.
@@ -140,22 +140,22 @@ def slab_powf(x, y):
 
 
 def slab_expf(x):
-    """glibc 2.39 ``expf`` over arrays, elementwise."""
+    """FP32 ``expf`` over arrays, elementwise."""
     return _unary("nmp_slab_expf", x)
 
 
 def slab_logf(x):
-    """glibc 2.39 ``logf`` over arrays, elementwise."""
+    """FP32 ``logf`` over arrays, elementwise."""
     return _unary("nmp_slab_logf", x)
 
 
 def slab_tanhf(x):
-    """glibc 2.39 ``tanhf`` over arrays, elementwise."""
+    """FP32 ``tanhf`` over arrays, elementwise."""
     return _unary("nmp_slab_tanhf", x)
 
 
 def slab_sqrtf(x):
-    """IEEE-754 square root: correctly rounded, so CuPy's is glibc's."""
+    """IEEE-754 square root: correctly rounded, so CuPy's is the reference libm's."""
     import cupy as cp
 
     return cp.sqrt(cp.asarray(x, dtype=cp.float32))

@@ -449,7 +449,7 @@ class SuiteColumn:
         st["ACPREC"][...] += m
         st["ACPREC_TOT"][...] += m
         st["SR"][...] = sr.reshape(self.jm, self.im)
-        st["ACSNOW"][...] += (snow_mm * np.float32(1.0e-3)).reshape(self.jm, self.im)
+        st["ACSNOW"][...] += snow_mm.reshape(self.jm, self.im)     # kg m-2, as Noah's ACSNOW
 
 
 def _hrrr_sample(path, lat_deg, lon_deg):
