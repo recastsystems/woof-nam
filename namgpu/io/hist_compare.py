@@ -51,7 +51,10 @@ def compare_hour(args) -> dict:
     return h
 
 
-def compare(a: Path, b: Path, workers: int = 8) -> dict:
+def compare(a: Path, b: Path, workers: int = 8, shared: bool = False) -> dict:
+    """shared: the verdict is over the times both runs wrote and the variables both files hold (two runs of one case
+    with different output times, woof-nam run --write: a time or a variable only one of them wrote is listed, not
+    counted). A carrier frame of either run (namgpu/outputs.py) holds only its rain fields, so those are compared."""
     fa = sorted(p.name for p in a.glob("wrfout_d01_*"))
     fb = sorted(p.name for p in b.glob("wrfout_d01_*"))
     rec = {"a": str(a), "b": str(b), "hours_a": len(fa), "hours_b": len(fb), "only_a": sorted(set(fa) - set(fb)),
@@ -61,16 +64,21 @@ def compare(a: Path, b: Path, workers: int = 8) -> dict:
         hours = list(ex.map(compare_hour, [(str(a), str(b), n) for n in names]))
     nbad = 0
     for h in hours:
-        nbad += len(h["diff"]) + len(h["only_a"]) + len(h["only_b"])
+        nbad += len(h["diff"]) + (0 if shared else len(h["only_a"]) + len(h["only_b"]))
         first = h["diff"][0] if h["diff"] else None
         print(f"{h['file']}: {h['vars']} vars, {len(h['diff'])} differ, {h['words_diff']:,} of {h['words']:,} words"
               + (f"; first {first}" if first else "") + _only_note(h), flush=True)
     rec["hours"] = hours
-    rec["bitwise"] = nbad == 0 and not rec["only_a"] and not rec["only_b"] and len(fa) > 0
+    rec["shared_only"] = bool(shared)
+    rec["bitwise"] = nbad == 0 and len(names) > 0 and (shared or (not rec["only_a"] and not rec["only_b"]))
     rec["words"] = sum(h["words"] for h in hours)
     rec["words_diff"] = sum(h["words_diff"] for h in hours)
+    extra = ""
+    if shared and rec["bitwise"]:
+        extra = (f"; shared times and variables only ({len(rec['only_a'])} times only in A, "
+                 f"{len(rec['only_b'])} only in B)")
     print(f"{len(hours)} hours compared: {'BITWISE IDENTICAL' if rec['bitwise'] else 'DIFFERENT'} "
-          f"({rec['words_diff']:,} of {rec['words']:,} words differ){_why(rec, hours)}", flush=True)
+          f"({rec['words_diff']:,} of {rec['words']:,} words differ){_why(rec, hours)}{extra}", flush=True)
     return rec
 
 
@@ -108,8 +116,11 @@ def main(argv=None) -> int:
     ap.add_argument("run_b", type=Path, help="second run's output folder")
     ap.add_argument("--json", type=Path, default=None, help="also write the full comparison here")
     ap.add_argument("--workers", type=int, default=8, help="hours compared at once (default 8)")
+    ap.add_argument("--shared", action="store_true",
+                    help="judge only the times both runs wrote and the variables both files hold: for two runs of one "
+                         "case written at different times (woof-nam run --write)")
     a = ap.parse_args(argv)
-    r = compare(a.run_a, a.run_b, a.workers)
+    r = compare(a.run_a, a.run_b, a.workers, shared=a.shared)
     if a.json:
         a.json.write_text(json.dumps(r, indent=1))
     return 0 if r["bitwise"] else 1

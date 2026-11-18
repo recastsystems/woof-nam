@@ -87,9 +87,18 @@ PLAN_KEY = "rrtm_call:plan"            # parent table: the last batch choice (pr
 # the one that fits a 32 GB card, and a 3-way shared 96 GB card gives each process the same ~30 GB. 24 GiB of
 # pool + the local-memory reservation (2.7 GiB at 12 km) + context stays under 28 GiB per process.
 FIT_POOL_GIB = 24.0
-# RRTM chain bytes per row-column for the first batch choice (nest/domain.VRAM_PATH rrtm_mb_per_row_col, measured
-# through the door): fit 0.26 MB, full 0.59 MB. Later calls use the larger of this and what the last call held.
-ROW_COL_BYTES = {"fit": 0.26e6, "full": 0.59e6}
+# RRTM chain bytes per row-column for the first batch choice (nest/domain.VRAM_PATH rrtm_mb_per_row_col, the same
+# number; tests/test_fit_rrtm_batch.py keeps the two equal): fit 0.34 MB, full 0.59 MB. Later calls use the larger
+# of this and what the last call held.
+# 2026-11-13: the fit figure was 0.26 MB, measured on 2026-11-05 before the 11-09 batched windows (83993f3), which
+# made each row chunk ONE SW chunk (sw_nc: 126 KB of SW scratch per column of the chunk, where the old fixed SW
+# chunk was 4,096 columns). On the current code a radiation call holds 0.325-0.332 MB per row-column at 1 and at 2
+# windows per batch (South Africa 4 km box, 215 x 251, IFS 0.1 2026-11-12 12Z, eight calls each, `rrtm_call:row_bytes`
+# over im). With 0.26 the first call of that box on a 32 GB card chose 2 windows per batch (62 rows: 3.47 GB by the
+# model, 4.37 GB in fact) under the door's 4.68 GiB pool cap and stopped with OutOfMemoryError at 4.66 GiB. 0.34
+# covers the measured figure; the box now takes 1 window per batch, 3.0 GiB of pool, at the same step time
+# (20.6 vs 20.5 ms on a 4090).
+ROW_COL_BYTES = {"fit": 0.34e6, "full": 0.59e6}
 # driver-call 2-D outputs that are GRRAD actual arguments (module_RA_RRTM.F90 CALL GRRAD_NMMB).
 GRRAD_SFC_ARGS = ("XLON", "XLAT", "SINLAT", "COSLAT", "SLMSK", "TSEA", "TISFC", "FICE", "ZORL",
                   "SNWDPH", "SNCOVR", "SNOALB", "HPRIME_V", "SFCALBEDO", "SMX", "CV", "CVB", "CVT",
@@ -166,14 +175,22 @@ def batch_windows(ctx, jm: int, im: int, rows: int, fit: bool) -> int:
         free = int(cp.cuda.runtime.memGetInfo()[0])
     except Exception:  # noqa: BLE001  (async pool without the counters)
         return 1
+    return batch_count(jm, im, rows, nw, fit, used=used, held=held, free=free,
+                       ceiling=int(devmem._STATE.get("ceiling") or 0),
+                       measured_row_bytes=float(ctx.tables.get("rrtm_call:row_bytes", 0.0)))
+
+
+def batch_count(jm: int, im: int, rows: int, nw: int, fit: bool, *, used: int, held: int, free: int, ceiling: int,
+                measured_row_bytes: float = 0.0) -> int:
+    """The arithmetic of batch_windows on plain numbers (no card): pool bytes in use and held, the driver's free
+    bytes, the pool ceiling (0 = none) and what the last call held per chunk row (0 before the first call)."""
     g = 2 ** 30
     cap = held + free - (1 if fit else 2) * g
-    ceiling = int(devmem._STATE.get("ceiling") or 0)
     if ceiling:
         cap = min(cap, ceiling - g // 4)
     if fit:
         cap = min(cap, int(float(os.environ.get("NAMGPU_RRTM_POOL_GIB", FIT_POOL_GIB)) * g))
-    per_row = max(ROW_COL_BYTES["fit" if fit else "full"] * im, float(ctx.tables.get("rrtm_call:row_bytes", 0.0)))
+    per_row = max(ROW_COL_BYTES["fit" if fit else "full"] * im, float(measured_row_bytes))
     # phys-rrtm-lw-lwrad takes at most JC_DEFAULT rows per chunk (its scratch is sized per chunk; larger domains go
     # through rrtm_call), so a batch is never taller than that
     from namgpu.physics.rrtm import phys_rrtm_lw_lwrad as _lwr

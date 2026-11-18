@@ -7,9 +7,10 @@ NAMGPU_CONFIGFILE (namgpu/config.py), which moves every default config.load() of
 
 Static surface (ensure_static), by the row's "static" kind:
   nam-analysis  the NAM 12 km grid: the case's own archived analysis (raw/nam/bgrd3d00.grib2) when it has one,
-                else static/nam12_static.npz under the work root, else that file is built once from the archived
-                NAM analysis of the same month and day in the latest archived year (one file from NOAA's open
-                data; the NAM's last cycle is 2026-11-03 06Z).
+                else static/nam12_static.mMM.npz under the work root for the start's month, else that file is
+                built from the archived NAM analysis of the same month and day in the latest archived year (one
+                file from NOAA's open data; the NAM's last cycle is 2026-11-03 06Z); the run reads it
+                (NAMGPU_NAM_STATIC_NPZ).
   geog          any other grid: built on the GPU from WPS_GEOG by init-static-build into the configfile's
                 static_npz, and rebuilt when the start month differs from the one it was built for (greenness
                 and albedo are monthly).
@@ -132,9 +133,11 @@ def ensure_static(case_dir: Path, start: datetime, source: str, card: str | None
         from namgpu.init import gfs_start
         if source == "native" or own.is_file():
             rec.update(action="case analysis", file=str(own))
-        elif gfs_start.STATIC_NPZ.is_file():
-            rec.update(action="cached", file=str(gfs_start.STATIC_NPZ))
+        elif (npz := gfs_start.nam_static_npz(start.month)).is_file():
+            rec.update(action="cached", file=str(npz))
+            os.environ[gfs_start.NAM_STATIC_ENV] = str(npz)
         else:
+            npz = gfs_start.nam_static_npz(start.month)
             from namgpu.init.fetch_case import NAM, _download
             import urllib.error
             # the archive has holes (no bgrd3d00 for 2021-02-14 00Z, 2026-11-06): the same day a year earlier, then
@@ -158,7 +161,7 @@ def ensure_static(case_dir: Path, start: datetime, source: str, card: str | None
             if got is None:
                 raise SystemExit(f"woof-nam: no archived NAM analysis for the static near {first:%Y-%m-%d} "
                                  f"(404: {', '.join(tried)})")
-            log(f"static: {gfs_start.STATIC_NPZ.name} from the archived NAM analysis {cyc:%Y-%m-%d %HZ} ({got})")
+            log(f"static: {npz.name} from the archived NAM analysis {cyc:%Y-%m-%d %HZ} ({got})")
             # the NAM's own base albedo under snow and maximum snow albedo: NCEP's native surface file of the same
             # cycle, its two albedo records only (sources.NATIVE_LAND); without it the build says what it lacks
             from namgpu.init.fetch_case import PATTERNS, _subset
@@ -168,12 +171,15 @@ def ensure_static(case_dir: Path, start: datetime, source: str, card: str | None
             except (OSError, ValueError, urllib.error.HTTPError) as e:
                 log(f"static: no NCEP native surface file for {cyc:%Y-%m-%d %HZ} ({e}); the snow albedos stay the "
                     "vegetation table")
-            rc = _child("namgpu.init.gfs_start", [str(src), "--out", str(gfs_start.STATIC_NPZ)], card)
-            if rc != 0 or not gfs_start.STATIC_NPZ.is_file():
+            part = npz.with_name(f"{npz.stem}.part{os.getpid()}.npz")      # two runs of one month never share a part
+            rc = _child("namgpu.init.gfs_start", [str(src), "--out", str(part)], card)
+            if rc != 0 or not part.is_file():
                 raise SystemExit(f"woof-nam: static build failed (exit {rc})")
+            os.replace(part, npz)
             src.unlink(missing_ok=True)
             land.unlink(missing_ok=True)
-            rec.update(action="built", file=str(gfs_start.STATIC_NPZ), from_cycle=f"{cyc:%Y%m%d%H}")
+            rec.update(action="built", file=str(npz), from_cycle=f"{cyc:%Y%m%d%H}")
+            os.environ[gfs_start.NAM_STATIC_ENV] = str(npz)
     else:
         base = config.static_npz(config.load(), base=True)
         if base is None:

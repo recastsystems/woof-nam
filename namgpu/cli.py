@@ -60,6 +60,9 @@ COMMANDS = {
                 "check that two runs wrote the same history, bit for bit (e.g. 1 card against N cards)"),
     "doctor": ("namgpu.doctor",
                "check this machine (card, CuPy/NVRTC, terrain data, renderer, GRIB2 writer) and what its card can run"),
+    "sources": ("namgpu.sources_cmd",
+                "list every source a run can start from: its archive, the hours it posts, its edges (--json for the "
+                "WOOF site's table)"),
     "licence-check": ("namgpu.licence_check",
                       "check the per-file licence notices in this install"),
 }
@@ -102,6 +105,10 @@ def _usage() -> str:
               "On several cards of one machine, the same run with --cards N (same history, bit for bit):",
               "  woof-nam run --case 2025-03-14_12z --source native --hours 24 --out runs/2025-03-14_12z-2c --cards 2",
               "  woof-nam compare runs/2025-03-14_12z runs/2025-03-14_12z-2c",
+              "A start from a GFS forecast hour (hours 0-120, then every 3 h to 378), or at a chosen time:",
+              "  woof-nam fetch --cycle 2026111212 --lead 201 --hours 24 --case-dir cases/2026-11-20_21z --gfs-only",
+              "  woof-nam fetch --at 2026012315 --hours 24 --gfs-only",
+              "  woof-nam run --case 2026-11-20_21z --source gfs --hours 24 --out runs/2026-11-20_21z",
               "Other grids are rows of parm/domains.json (woof-nam run --domain NAME), e.g. 4 km CONUS from GFS:",
               "  woof-nam fetch --cycle 2026110412 --hours 24 --case-dir cases/2026-11-04_12z --gfs-only --inputs-only",
               "  woof-nam run --case 2026-11-04_12z --source gfs --hours 24 --domain conus4 --cards 4 --out runs/4km"]

@@ -52,6 +52,27 @@ from pathlib import Path
 import numpy as np
 
 from namgpu import cardgate
+
+
+def _no_hugepage_madvise() -> None:
+    """Stop NumPy asking the kernel for transparent huge pages on its large arrays (NUMPY_MADVISE_HUGEPAGE=0, here
+    and in every pool worker, which inherits it or imports this module). Breakage it prevents: on a node whose memory
+    is fragmented (weeks of uptime, THP defrag "madvise", the Ubuntu default), every 60-190 MB array of the frame's
+    field pool made the kernel compact memory synchronously before its first touch, and the pool's processes queued
+    on it: the grid-218 map frame of one 12 km hour took 10.6-13.9 s on a 24-core host (12 workers) with 83-107 s
+    of system time, and 4.9 s with it off (10.6 s system), the frame byte for byte the same (2026-11-15).
+    NAMGPU_NUMPY_HUGEPAGE=1 keeps NumPy's default."""
+    if os.environ.get("NAMGPU_NUMPY_HUGEPAGE", "") == "1":
+        return
+    os.environ["NUMPY_MADVISE_HUGEPAGE"] = "0"
+    try:
+        from numpy._core.multiarray import _set_madvise_hugepage
+    except ImportError:              # NumPy 1.x
+        from numpy.core.multiarray import _set_madvise_hugepage
+    _set_madvise_hugepage(False)
+
+
+_no_hugepage_madvise()
 from namgpu.products import hiresf_carriers as HC
 from namgpu.products import land_cloud as LC
 from namgpu.products import sets as PSETS
@@ -136,24 +157,62 @@ def _history_files(run_dir: Path) -> list:
 
 
 def _is_parent12(history: Path) -> bool:
-    """True when a history is on the 12 km CONUS parent grid the grid-218 (awphys) tables are cut from."""
+    """True when a history is on the 12 km CONUS parent grid the grid-218 (awphys) tables are cut from: the size of
+    the packaged parent configfile (parm/nam_configfile), never the configfile NAMGPU_CONFIGFILE names. The nest door
+    sets NAMGPU_CONFIGFILE to the box's own configfile, so a box always matched its own size and `--products` (auto)
+    picked grid 218 for it and failed ("points outside the NMMB domain", exit 6; 12 km and 3 km boxes, 2026-11-12)."""
     from netCDF4 import Dataset
     from namgpu import config
-    cfg = config.load()
     with Dataset(history) as d:
         nx, ny = len(d.dimensions["west_east"]), len(d.dimensions["south_north"])
         title = str(getattr(d, "TITLE", ""))
-    return (nx, ny) == (int(cfg.im), int(cfg.jm)) and "nest" not in title.lower()
+    return (nx, ny) == _configfile_dims(config.DEFAULT_CONFIGFILE) and "nest" not in title.lower()
+
+
+def _configfile_dims(path) -> tuple | None:
+    """(im, jm) of a configfile, read from the file itself (config.configfile_path follows NAMGPU_CONFIGFILE)."""
+    dims = {}
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        key, _, val = raw.split("#", 1)[0].partition(":")
+        if key.strip() in ("im", "jm"):
+            try:
+                dims[key.strip()] = int(val.strip())
+            except ValueError:
+                return None
+    return (dims["im"], dims["jm"]) if len(dims) == 2 else None
+
+
+def _set_before_history(run_dir: Path) -> str | None:
+    """The set of a run whose first history file is not written yet (a follower started with its forecast): a suite
+    nest's folder names it; a grid that is not the 12 km parent's (the configfile NAMGPU_CONFIGFILE names: the nest
+    door gives every child its box's) is a nest, hiresf. None when nothing says (the 12 km run door sets no
+    configfile): the caller's default. Breakage it prevents: the follower a box's run starts before any hour picked
+    awphys (grid 218) and failed every hour ("points outside the NMMB domain", exit 6; 600 km 12 km box,
+    2026-11-13)."""
+    from namgpu import config
+    run_dir = Path(run_dir)
+    if run_dir.name in PSETS.NEST_SETS and run_dir.name not in ("awphys", "hiresf"):
+        return run_dir.name
+    env = os.environ.get(config.CONFIG_ENV, "").strip()
+    if env:
+        dims = _configfile_dims(env)
+        if dims is not None and dims != _configfile_dims(config.DEFAULT_CONFIGFILE):
+            return "hiresf"
+    return None
 
 
 def detect_set(run_dir: Path) -> str | None:
     """The product set a run's history writes: awphys for the 12 km CONUS parent; for a nest, the NCEP nest its run
-    names (nest-receipt.json `ncep_nest`, or the NCEP name in its domain), else the generic hiresf set. None when no
-    history file is there yet (--follow)."""
+    names (nest-receipt.json `ncep_nest`, or the NCEP name in its domain), else the generic hiresf set. Before the
+    first history file (a follower started with its forecast): _set_before_history, None when nothing says."""
     run_dir = Path(run_dir)
     hist = _history_files(run_dir)
     if not hist:
-        return None
+        return _set_before_history(run_dir)
     try:
         if _is_parent12(hist[0]):
             return "awphys"
@@ -581,7 +640,11 @@ def _mslet_carrier(history: Path, t, ps):
         with cardgate.hold(Path(history).parent):
             try:
                 with netCDF4.Dataset(history) as s:
-                    a = memslp.from_history(s)
+                    if "MSLET" in s.variables:
+                        # the forecast wrote this time's MSLET on the card (io_history_fields.map_2d): the same call
+                        a = np.asarray(np.ma.getdata(s.variables["MSLET"][0]), dtype=np.float32)
+                    else:
+                        a = memslp.from_history(s)
             except Exception as e:  # noqa: BLE001 - CuPy's OutOfMemoryError or a CUDA allocation error
                 err = e
             free()
@@ -1561,12 +1624,23 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
             errors.append(f"{h.history.name}: {type(e).__name__}: {e}")
             print("FAILED", errors[-1], flush=True)
 
+    def listed():
+        """The run's GRIB2 times (its output list, namgpu/outputs.py), or None for a run without a list: every
+        history file is a GRIB2 time. Read at each poll: the run writes the list before it starts this follower, and
+        a resumed run writes it again."""
+        from namgpu import outputs  # noqa: PLC0415
+        return outputs.files(run_dir, "grib")
+
     def ready_files() -> tuple[list[Path], bool]:
         receipt = (run_dir / "forecast-receipt.json").is_file() or (until is not None and Path(until).exists())
         files = sorted(run_dir.glob("wrfout_d01_*"))
         ready = []
+        grib = listed()
         for f in files:
             if f.name in handled:
+                continue
+            if grib is not None and f.name not in grib:
+                handled.add(f.name)          # a carrier, or a time off the hour: history only, no GRIB2 file
                 continue
             size = f.stat().st_size
             stable = sizes.get(f.name) == size and size > 0
@@ -1626,6 +1700,9 @@ def run(run_dir: Path, out: Path | None = None, hours=None, workers: int = 2, th
                 break
             if receipt and not ready_files()[0]:
                 break
+            grib = listed()
+            if grib and grib <= handled and not pending:
+                break                        # every GRIB2 time of the run's list is written: done, receipt or not
             if time.monotonic() - last_new > idle_timeout_s and not receipt:
                 errors.append(f"no new history file in {idle_timeout_s:.0f} s and no forecast-receipt.json: "
                               f"the run stopped")

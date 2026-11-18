@@ -226,6 +226,7 @@ class Ctx:
     wrote_first_hist: bool = False         # Fortran domain_int_state%WROTE_1ST_HIST
     history_fields: object = None          # set by io-history-fields before each history write
     start_time: object = None              # datetime of the initial time (io-history labels files with it)
+    outputs: object = None                 # namgpu.outputs.Schedule: which steps write history (None: every hour)
     ntimestep_rad: int = 0                 # Fortran NTIMESTEP_RAD (SOLVER_RUN 4938-4942): 0 at step 0, else n+1
     hdiff_on: bool = True                  # Fortran HDIFF_ON: 1 for forward integration (3807, 4516, 5163)
     physics_on: bool = True                # Fortran IF(INTEGER_DT>0): forward legs only
@@ -421,6 +422,11 @@ class Driver:
             # CLTEND mode 1 (SOLVER_RUN 6005): every step, NPRECIP>1 only.
             return c.nprecip > 1
         if key == "history":
+            # the output schedule (namgpu/outputs.py: woof-nam run --write) when the run has one. minutes_history is
+            # not it: the convection driver reads that key too, so it stays 60 whatever is written
+            sch = getattr(self.ctx, "outputs", None)
+            if sch is not None:
+                return sch.due(n)
             mins = c.raw.get("minutes_history", 60)
             steps = max(1, round(mins * 60.0 / c.dt))
             return n % steps == 0
@@ -567,6 +573,8 @@ class Driver:
         if getattr(ctx, "history_off", False):
             return                                   # spin-up window (namgpu/spinup.py): no history before T0
         ctx.wrote_first_hist = True
+        if not self._due("history"):
+            return                                   # the output schedule starts later (namgpu/outputs.py)
         self.write_history()
 
     def run(self, hours: float, log=print):

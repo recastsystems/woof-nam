@@ -7,8 +7,8 @@ kernels/init_gfs_wind_rotate.cu). Kernel: init_gfs_wind_rotate_strips, one threa
 Geometry: the map is namgpu.grid.rotated_to_geographic (the same function that builds GLON/GLAT and
 VLON/VLAT). At each V point the unit vectors of increasing rotated longitude (grid i) and rotated
 latitude (grid j) in the local (east, north) basis are derived by central differences of that map and
-normalised (the rotation is conformal, so the two vectors are orthogonal). Built once per grid, cached
-on ctx.grid.
+normalised (the rotation is conformal, so the two vectors are orthogonal). Built once per grid on the
+host (ctx.grid._wind_rotate_coef_host), uploaded on each call.
 
 In:      ctx.gfs.u, ctx.gfs.v   GFS earth-relative eastward / northward winds, float32 [NL,NJS,NIS] on the
                                  GFS grid (ctx.gfs.grid), staged by the GFS path. NL must equal LM (the
@@ -17,7 +17,7 @@ In:      ctx.gfs.u, ctx.gfs.v   GFS earth-relative eastward / northward winds, f
                                  refusal, never a zero fill.
 Out:     ctx.st.U, ctx.st.V     grid-relative winds, written on the V boundary strips only (LNSV rows and
                                  columns, last row and column excluded). Interior U/V are left untouched.
-Scratch: four [JM,IM] float32 coefficient arrays (ctx.grid._wind_rotate_coef) and the strip buffers of
+Scratch: four [JM,IM] float32 coefficient arrays (uploaded per call from ctx.grid._wind_rotate_coef_host) and the strip buffers of
          init-gfs-hinterp (slots VU and VV).
 Launch:  one kernel on ctx.stream, no host sync.
 """
@@ -68,13 +68,20 @@ def _unit_tangents(g):
 
 
 def _coefficients(ctx):
+    """(ce_e, ce_n, cn_e, cn_n) on the device, uploaded on each call from the host arrays cached on the grid.
+
+    Was one device copy cached on the grid for the whole process. Breakage this prevents: in the HRRR 15Z start of
+    2026-11-12 on the 12 km Kansas box, the V boundary strips of all three GFS boundary times came out as exactly
+    u_e cn_e + v_e x 20000 at every strip point (U right, V to -1.07e6 m/s): the cached cn_n array held 20000.0, the
+    200 hPa value of an isobaric pressure column, for the rest of that process. A copy that lives only for the call
+    cannot carry such a value from one stage into the next; the upload is 4 x JM x IM floats."""
+    import cupy as cp
     g = ctx.grid
-    cache = getattr(g, "_wind_rotate_coef", None)
-    if cache is None:
-        import cupy as cp
-        cache = tuple(cp.asarray(a) for a in _unit_tangents(g))
-        g._wind_rotate_coef = cache
-    return cache
+    host = getattr(g, "_wind_rotate_coef_host", None)
+    if host is None:
+        host = tuple(_unit_tangents(g))
+        g._wind_rotate_coef_host = host
+    return tuple(cp.array(a, copy=True) for a in host)     # a copy: the host arrays stay as built
 
 
 def _staged_winds(ctx):

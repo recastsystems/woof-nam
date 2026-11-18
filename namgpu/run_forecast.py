@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from namgpu import paths
@@ -183,6 +183,28 @@ def memory_check(a) -> int:
     return 0
 
 
+def output_schedule(a):
+    """The run's output schedule (namgpu/outputs.py) from --write / --maps-at / --grib-at / --carry, the run's length
+    and the hours its fetch started it before the asked start (a.output_offset_h). GRIB2 times only with --products;
+    their rain-bucket carriers follow the product set (the parent's 12 h and 3 h buckets, a nest set's own)."""
+    from namgpu import config, domains, outputs
+    from namgpu.products import sets as psets
+    # The GRIB2 times are listed whoever writes them: this run (--products) or a follower beside it (woof-nam products
+    # --follow, as the suite runs it). Listed only for --products, the suite's parent and nest wrote no GRIB2 file at
+    # all and called the domain complete (suite D, 2026-11-12). Their rain carriers follow the product set.
+    if a.products and a.products in psets.SETS:
+        buckets = psets.SETS[a.products].buckets_h
+    elif domains.current().get("static") == "nam-analysis":
+        buckets = psets.AWPHYS.buckets_h               # the 12 km parent grid: the awphys files
+    else:
+        buckets = tuple(sorted({h for s in psets.SETS.values() if s.name != "awphys" for h in s.buckets_h}))
+    return outputs.Schedule(float(config.load().dt), float(a.hours), float(getattr(a, "output_offset_h", 0.0) or 0.0),
+                            write=a.write, maps=a.maps_at, grib=a.grib_at, carry=a.carry, buckets_h=buckets,
+                            products=True,
+                            light_fields=None if getattr(a, "history_fields_named", False) else outputs.MAP_FIELDS,
+                            catalog_h=None if getattr(a, "history_fields_named", False) else outputs.catalog_every_h())
+
+
 def write_step_file(out: Path, cfg) -> Path:
     """<out>/nam_configfile_step: the run's physics step (dt and nphs as config.load() resolved them, overrides
     included) in configfile form, so `woof-nam products` (namgpu.io.products._run_ctx) can form step rates from PREC:
@@ -216,7 +238,10 @@ def main(argv=None):
                "  woof-nam run --case 2025-03-14_12z --source native --hours 24 --out runs/2025-03-14_12z\n"
                "On 2 cards (the same history, bit for bit; check with woof-nam compare):\n"
                "  woof-nam run --case 2025-03-14_12z --source native --hours 24 --out runs/2025-03-14_12z-2c --cards 2\n"
-               "A GFS start (--source gfs) also needs the static fields once: woof-nam static --help.",
+               "A GFS start (--source gfs) also needs the static fields once: woof-nam static --help.\n"
+               "A start from a GFS forecast hour (after woof-nam fetch --cycle 2026111212 --lead 201 --hours 24 "
+               "--case-dir cases/2026-11-20_21z --gfs-only):\n"
+               "  woof-nam run --case 2026-11-20_21z --source gfs --hours 24 --out runs/2026-11-20_21z",
         formatter_class=HelpFormatter)
     ap.add_argument("--case", default=None,
                     help="the case folder woof-nam fetch wrote (cases/2025-03-14_12z), or its bare name, looked up "
@@ -238,6 +263,12 @@ def main(argv=None):
     ap.add_argument("--member", default=None,
                     help="the source member, for a source with members (gefs: c00 control, p01-p30); default the "
                          "configfile key source_member, else the control. Sets NAMGPU_SOURCE_MEMBER for the run")
+    ap.add_argument("--lead", type=int, default=None, metavar="H",
+                    help="--source gfs: the start is forecast hour H of the GFS run H hours before the case's start "
+                         "time, not an analysis (woof-nam fetch --lead H or --at TIME fetched it and wrote "
+                         "<case>/raw/START.json, which this command reads, so --lead is only needed to say it again; "
+                         "the two must agree). The boundaries are the same GFS run's later hours. Sets "
+                         "NAMGPU_START_LEAD_H for the run")
     ap.add_argument("--case-dir", type=Path, default=None,
                     help="the case folder (raw/, boco-<domain>/) when --case is only its name; the nest door passes a "
                          "cache on a data disk shared by every domain of that cycle")
@@ -323,6 +354,22 @@ def main(argv=None):
                     help="--move-from: read every carried array back from the card and compare its overlap with the "
                          "set bit for bit, and the two windows' static files on their shared cells (receipt "
                          "move.check)")
+    ap.add_argument("--write", default=None, metavar="SPEC",
+                    help="which times are written: an interval (1h, 30m, 15m, 3h), hours after the start (0,6,12,18.5) "
+                         "or pieces (0-24/1h,24-186/6h); default 1h. A time is the model step nearest it (any "
+                         "multiple of 5 minutes is exact). When the case's fetch started the run earlier than asked "
+                         "(woof-nam fetch --at: the source did not post that hour), the times count from the start "
+                         "that was asked for. The forecast is the same whatever is written. <out>/OUTPUTS.json lists "
+                         "every file and what it is for")
+    ap.add_argument("--maps-at", default=None, metavar="SPEC",
+                    help="the times maps are drawn for, when they differ from --write (same form)")
+    ap.add_argument("--grib-at", default=None, metavar="SPEC",
+                    help="with --products: the times GRIB2 files are written for, when they differ from --write "
+                         "(same form). GRIB2 is written on whole forecast hours; a time off the hour is history and "
+                         "maps only, and the run says so")
+    ap.add_argument("--carry", default=None, metavar="SPEC",
+                    help="also write history at these times (same form, counted from the model start), for a nest "
+                         "that reads this run for its edges; woof-nam suite sets it")
     ap.add_argument("--history-fields", default=None,
                     help="fields in each hourly history file: products (default: what the maps, side-by-side, the "
                          "column store and woof-nam products read), full (every field), state (3-D model state), "
@@ -405,6 +452,12 @@ def main(argv=None):
             a.restart_every = resume_meta["restart_every"]
         if a.restart_dir is None and resume_meta.get("restart_dir"):
             a.restart_dir = Path(resume_meta["restart_dir"])
+        outm = resume_meta.get("outputs") or {}      # the first leg's output schedule (namgpu/outputs.py)
+        a.write = a.write if a.write is not None else outm.get("write")
+        a.maps_at = a.maps_at if a.maps_at is not None else outm.get("maps")
+        a.grib_at = a.grib_at if a.grib_at is not None else outm.get("grib")
+        a.carry = a.carry if a.carry is not None else outm.get("carry")
+        a.output_offset_h = float(outm.get("offset_h") or 0.0)
         if a.init_from is not None:
             raise SystemExit("--resume and --init-from: a restart set already holds the whole state; give one")
     if a.move_from is not None and (a.init_from is None or a.resume is not None):
@@ -412,6 +465,60 @@ def main(argv=None):
     if a.case is None or a.out is None:
         ap.error("--case and --out are required (or --resume <restart>)")
     a.hours = 1.0 if a.hours is None else a.hours
+    if not a.maps_only:
+        # a start from a GFS forecast hour: --lead, or what the case's fetch recorded (raw/START.json). One rule
+        # (sources.door_lead, check_lead) for which hours exist; the card processes read NAMGPU_START_LEAD_H.
+        from namgpu.init import sources as _srcmod
+        _cdir = a.case_dir.resolve() if a.case_dir is not None else paths.case_dir(a.case)
+        _start = None
+        try:
+            _start = datetime.strptime((Path(a.case).name if a.case_dir is not None else _cdir.name)[:14],
+                                       "%Y-%m-%d_%Hz")
+        except ValueError:
+            pass                                   # domains.start_of below names the folder in one line
+        # the case's window (raw/START.json, namgpu/init/window.py): a fetch that started the model before the time
+        # asked (the source did not post that hour) runs that much longer, and the outputs count from the time asked
+        from namgpu.init import window as _win
+        _plan = _srcmod.read_start(_cdir) if a.source != "parent" else None
+        if resume_meta is None:
+            _w = _win.for_run(_cdir if a.source != "parent" else None, a.hours)
+            a.output_offset_h = _w["offset_h"]
+            if _w["offset_h"] or _w["cut_h"]:
+                if "NAMGPU_RANK" not in os.environ:
+                    print(f"woof-nam run: window: {(_plan or {}).get('line', '')}; the model runs "
+                          f"{_w['model_hours']:g} h for the {a.hours:g} h asked"
+                          + (f" (cut {_w['cut_h']:g} h short: the source posts nothing later)" if _w["cut_h"] else ""),
+                          flush=True)
+                a.hours = _w["model_hours"]
+        if (_plan or {}).get("source") == "gefs" and a.source == "gefs":
+            os.environ.setdefault("NAMGPU_START_SOURCE", "gefs")     # the map titles name the GEFS hour
+        for _k, _v in _win.env_for(_plan if (_plan or {}).get("source") == a.source else None).items():
+            if _k != _srcmod.LEAD_ENV:
+                os.environ.setdefault(_k, _v)          # a gefs window's run age and spacing (its card processes too)
+        try:
+            a.lead = _srcmod.door_lead(_cdir if a.source != "parent" else None, a.source, a.lead, _start)
+            if a.lead and _start is not None:
+                _srcmod.check_lead(_srcmod.SOURCES["gfs"], a.lead, a.hours, _start - timedelta(hours=a.lead))
+        except ValueError as e:
+            raise SystemExit(f"woof-nam run: refused: {e}") from None
+        if a.lead and a.start == "spinup":
+            raise SystemExit("woof-nam run: refused: --start spinup with a start from a GFS forecast hour: the "
+                             "spin-up reads an analysis six hours before the start, and a forecast hour has none")
+        if a.lead and "NAMGPU_RANK" not in os.environ and a.source != "gfs":
+            what = (f"the {a.source} analysis of {_start:%Y-%m-%d %H}Z with {_srcmod.lead_credit(a.lead, _start)} "
+                    f"outside its grid and on the edges")
+            print(f"woof-nam run: the start is {what}", flush=True)
+            if not os.environ.get("NAMGPU_DATA_CREDIT"):
+                os.environ["NAMGPU_DATA_CREDIT"] = f"start: {a.source} analysis + GFS forecast hour {a.lead}"
+            os.environ.setdefault("NAMGPU_START_SOURCE", a.source)      # the map titles name the start (maps.start_words)
+        elif a.lead and "NAMGPU_RANK" not in os.environ:
+            what = _srcmod.lead_credit(a.lead, _start)
+            print(f"woof-nam run: the start is {what}: a GFS forecast, not an analysis (soil, snow, sea ice and "
+                  "the sea surface are that forecast's own values); boundaries are the same run's later hours",
+                  flush=True)
+            # every map's subtitle and the history's credit attribute say so (namgpu/io/maps.py CREDIT_ENV)
+            if not os.environ.get("NAMGPU_DATA_CREDIT"):
+                os.environ["NAMGPU_DATA_CREDIT"] = "start: " + what
     if a.physics_suite:
         from namgpu.physics import suites as _suites
         os.environ[_suites.ENV] = a.physics_suite      # config.load, the ranks and the children read it
@@ -427,6 +534,7 @@ def main(argv=None):
         hexdep.require(a.physics_suite, prog="woof-nam run")
     from namgpu import restart as _rst
     from namgpu.io import history_select as _hs
+    a.history_fields_named = bool(a.history_fields)     # named: kept at every time (no light frames, outputs.py)
     a.history_fields = a.history_fields or _hs.DEFAULT_PRESET
     a.full_every = _hs.DEFAULT_FULL_EVERY if a.full_every is None else a.full_every
     try:
@@ -457,9 +565,19 @@ def main(argv=None):
             raise SystemExit(f"woof-nam run --products: {e}") from None
     from namgpu import domains
     domains.select(a.domain, a.source)
+    try:
+        sched = output_schedule(a)
+    except ValueError as e:
+        raise SystemExit(f"woof-nam run: refused: {e}") from None
     if "NAMGPU_RANK" not in os.environ:
         start0 = domains.start_of(Path(a.case) if a.case_dir is not None else paths.case_dir(a.case))   # the name, in one line
         missing_case_folder(a, start0)
+        _out0 = a.out if a.out.is_absolute() else paths.work_root() / a.out
+        _out0.mkdir(parents=True, exist_ok=True)
+        sched.write(_out0, start0)                 # before the GRIB2 follower starts: it reads its times from here
+        print(f"woof-nam run: writes {sched.line()} ({_out0 / 'OUTPUTS.json'})", flush=True)
+        for note in sched.notes:
+            print(f"woof-nam run: {note}", flush=True)
         rc = memory_check(a)
         if rc:
             return rc
@@ -540,6 +658,7 @@ def main(argv=None):
     ctx.out_dir = out if multi is None else out / f"rank{ctx.slab.rank}"   # history goes via NAMGPU_HIST_SHM
     Path(ctx.out_dir).mkdir(parents=True, exist_ok=True)
     ctx.forecast_hours = max(6, int(a.hours + 0.999))
+    ctx.outputs = sched                       # which steps write history (namgpu/outputs.py)
     drv = Driver(ctx)
     ctx.driver = drv
     ctx.dt = cfg.dt
@@ -549,6 +668,14 @@ def main(argv=None):
     rec = {"case": a.case, "source": a.source, "hours": a.hours, "dt": cfg.dt, "skipped_init": skip,
            "domain": domains.current()["name"], "grid": [int(cfg.im), int(cfg.jm), int(cfg.lm)],
            "cards": int(os.environ.get("NAMGPU_NRANKS", "1")), "woof_nam": _version()}
+    if getattr(a, "lead", 0) and a.source == "gfs":
+        rec.update(_lead_receipt(a.lead, ctx.start))
+    _wplan = __import__("namgpu.init.sources", fromlist=["read_start"]).read_start(ctx.case_dir)
+    if _wplan and (_wplan.get("offset_h") or _wplan.get("cut_h") or _wplan.get("source") != "gfs"):
+        rec["window"] = {k: _wplan.get(k) for k in ("source", "wanted", "start", "cycle", "lead_h", "gfs_cycle",
+                                                     "gfs_lead_h", "offset_h", "model_hours", "cut_h", "edges_h",
+                                                     "line")}
+    rec["outputs"] = {**sched.meta(), "counts": sched.counts(), "notes": sched.notes, "list": str(out / "OUTPUTS.json")}
     if static_rec is not None:
         rec["static"] = static_rec
         _stage(rec, "static", static_rec["seconds"], "GPU, 1 card" if static_rec["action"] == "built" else "none (cached)")
@@ -703,6 +830,7 @@ def main(argv=None):
             "dt": float(cfg.dt),
             "restart_every": a.restart_every, "restart_dir": str(rroot), "memory_path": mp["path"],
             "history": {"fields": a.history_fields, "full_every": a.full_every},
+            "outputs": sched.meta(),
             "woof_nam": __import__("namgpu").__version__,
             "window": __import__("namgpu.nest.move", fromlist=["window_meta"]).window_meta(cfg),
             "configfile": str(config.configfile_path()), "static_npz": str(config.static_npz(cfg) or "")},
@@ -846,6 +974,9 @@ def main(argv=None):
         _stage(rec, "forecast", fs, "GPU, 1 card; history on a writer thread")
         if rec["error"] is None:
             rec["spinup"]["cleaned"] = spinup.cleanup(out)
+    from namgpu.io import io_history as _ioh_w
+    rec["history"] = dict(rec.get("history") or {}, waits=_ioh_w.waits())   # FAST FRAMES: the step loop's wait on it
+    print(_ioh_w.summary_line(), flush=True)
     rec["hour_lines"] = hours_log
     bad = init_case_driver.census(ctx)
     if multi is not None:
@@ -1243,6 +1374,9 @@ def launch(a, argv, static_rec=None) -> int:
     from namgpu import domains
     rec = {"cards": cards, "ncards": len(cards), "case": a.case, "source": a.source, "hours": a.hours,
            "domain": domains.current()["name"], "woof_nam": _version()}
+    if getattr(a, "lead", 0) and a.source == "gfs":
+        rec.update(_lead_receipt(a.lead, domains.start_of(Path(a.case) if a.case_dir is not None
+                                                          else paths.case_dir(a.case))))
     if static_rec is not None:
         rec["static"] = static_rec
         _stage(rec, "static", static_rec["seconds"], "GPU, 1 card" if static_rec["action"] == "built" else "none (cached)")
@@ -1328,6 +1462,14 @@ def launch(a, argv, static_rec=None) -> int:
     return products_finish(out, 0 if ok else 1, wait=not a.no_products_wait, stall_s=a.products_stall_s)
 
 
+def _lead_receipt(lead: int, start) -> dict:
+    """The receipt's words for a start from a GFS forecast hour: the run it came from, the hour, and that it is a
+    forecast (the run page and the map credit read these, never 'analysis')."""
+    from namgpu.init import sources as srcmod
+    return {"source_cycle": f"{start - timedelta(hours=int(lead)):%Y-%m-%dT%H}", "source_lead_h": int(lead),
+            "start_is": srcmod.lead_credit(lead, start) + " (a GFS forecast, not an analysis)"}
+
+
 def missing_case_folder(a, start) -> None:
     """A case folder that does not exist stops in one line naming the fetch, before any card or init work (it
     stopped deep in the init with a traceback). The nest and suite doors make their case folder before they call run;
@@ -1339,8 +1481,10 @@ def missing_case_folder(a, start) -> None:
         return
     src = "" if a.source in ("native", None) else f" --source {a.source}"
     hours = max(1, -int(-a.hours // 1))                   # fetch takes whole hours: cover the run
+    lead = int(getattr(a, "lead", 0) or 0)
+    cyc = start - timedelta(hours=lead)
     raise SystemExit(f"woof-nam run: no case folder {cdir}; fetch it first: woof-nam fetch --cycle "
-                     f"{start:%Y%m%d%H} --hours {hours} --case-dir {cdir}{src}")
+                     f"{cyc:%Y%m%d%H}{f' --lead {lead}' if lead else ''} --hours {hours} --case-dir {cdir}{src}")
 
 
 def maps_only(case: str, out: Path, case_dir: Path | None = None, columns: bool = True, wait: bool = True,

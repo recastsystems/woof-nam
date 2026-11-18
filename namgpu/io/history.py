@@ -108,6 +108,7 @@ def prepare_history(ctx, fields: dict, start: datetime) -> dict:
         "pole_lon": float(cfg.tlm0d),
         "dx": float(np.asarray(g.dxh)[jm // 2]),
         "dy": float(g.dyh),
+        "lnsh": int(cfg.lnsh), "lnsv": int(cfg.lnsv),
         "fields": arrays,
         **({"handoff": ho} if (ho := _handoff(ctx)) is not None else {}),
         **({"follow": fo} if (fo := _follow(ctx)) is not None else {}),
@@ -176,6 +177,7 @@ def stage_history(ctx, fields: dict, start: datetime) -> dict:
         "cen_lat": cen_lat, "cen_lon": cen_lon,
         "pole_lat": float(cfg.tph0d), "pole_lon": float(cfg.tlm0d),
         "dx": float(np.asarray(g.dxh)[jm // 2]), "dy": float(g.dyh),
+        "lnsh": int(cfg.lnsh), "lnsv": int(cfg.lnsv),
         **({"handoff": ho} if (ho := _handoff(ctx)) is not None else {}),
         **({"follow": fo} if (fo := _follow(ctx)) is not None else {}),
     }
@@ -281,6 +283,10 @@ def _write_payload(path: Path, payload: dict) -> Path:
 
     valid, start = payload["valid"], payload["start"]
     d = payload["dims"]
+    # zlib level 1 with byte shuffle, except a catalog frame (namgpu/outputs.py: payload "zlib" False), written raw:
+    # the same values, so whatever is read or drawn from it is the same; 22 s of one core less a 12 km frame
+    z = bool(payload.get("zlib", True))
+    pack = {"zlib": True, "complevel": 1, "shuffle": True} if z else {"zlib": False}
     with netCDF4.Dataset(path, "w", format="NETCDF4") as nc:
         nc.createDimension("Time", None)
         nc.createDimension("DateStrLen", 19)
@@ -296,13 +302,12 @@ def _write_payload(path: Path, payload: dict) -> Path:
         xt = nc.createVariable("XTIME", "f4", ("Time",))
         xt[0] = payload["xtime_min"]
         for name, arr in (("XLAT", payload["xlat"]), ("XLONG", payload["xlon"])):
-            v = nc.createVariable(name, "f4", ("Time", "south_north", "west_east"), zlib=True, complevel=1,
-                                  shuffle=True)
+            v = nc.createVariable(name, "f4", ("Time", "south_north", "west_east"), **pack)
             v[0] = arr
         for name, arr, dims in payload["fields"]:
             # lossless: zlib level 1 with byte shuffle (2.6x on a full 12 km hour; levels 4-9 and zstd/blosc
             # measured no better than 3 % smaller, README "Output size")
-            v = nc.createVariable(name, "f4", ("Time",) + dims, zlib=True, complevel=1, shuffle=True)
+            v = nc.createVariable(name, "f4", ("Time",) + dims, **pack)
             v[0] = arr
         nc.MAP_PROJ = 203
         nc.CEN_LAT = payload["cen_lat"]
@@ -317,6 +322,9 @@ def _write_payload(path: Path, payload: dict) -> Path:
         nc.START_DATE = start.strftime("%Y-%m-%d_%H:%M:%S")
         nc.SIMULATION_START_DATE = nc.START_DATE
         nc.TITLE = history_title(_res_from_dy(payload["dy"]), bool(payload.get("handoff")))
+        if "lnsh" in payload:                      # the boundary rows on each side (maps.edge_rows leaves them off)
+            nc.LNSH = payload["lnsh"]
+            nc.LNSV = payload["lnsv"]
         for k, v in (payload.get("handoff") or {}).items():
             setattr(nc, k, v)                      # parent grid keys (io_history_fields.handoff_attrs)
         for k, v in (payload.get("follow") or {}).items():

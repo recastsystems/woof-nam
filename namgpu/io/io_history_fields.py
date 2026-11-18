@@ -349,7 +349,46 @@ def run(ctx):
         out["COMPOSITE"] = (comp, DIMS2)
     if handoff_on(ctx.cfg):
         out.update(handoff_fields(ctx, scope))
+    with scope:                                # on the history's stream, after the fills it reads
+        out.update(map_2d(out))                # MSLET: a light frame's map drawer runs no relaxation
     return out
+
+
+def map_2d(out) -> dict:
+    """MSLET, the membrane sea-level pressure (namgpu.products.memslp.membrane_slp, Pa), computed here on the card from
+    this history time's own arrays: T, QVAPOR and PRES on the levels memslp.from_history reads, PINT at the ground and
+    HGT, as float32 and bottom-up as the file holds them (the state is top-down: history.py flips on the host), the
+    same inputs and the same call the map drawer and the GRIB2 carrier make. Not U850/V850: a float32 plane of the 850 hPa
+    wind changes the 850 hPa map (5 of 6 PNGs differ against the map drawer's float64 interpolation).
+    Breakage it prevents: a run with output every 5 or 15 minutes spent about 26 s of CPU per light frame relaxing
+    sea-level pressure on the map drawer (50.6 s a frame against 9.7 s with MSLET written), so such runs could not end inside their told time. A history without an input leaves the field out."""
+    from namgpu.products import memslp
+    f = {}
+    if not all(n in out for n in memslp.NEEDS):
+        return f
+
+    def dev(name, top=None):
+        a = device_array(out[name][0])
+        if a.ndim == 3:
+            a = a[::-1]                                            # NMMB l=1 top -> the file's bottom-up
+        a = a[:top] if top is not None else a
+        return cp.array(a, dtype=cp.float32, copy=True)        # the history's StreamFields share one buffer
+
+    hgt = dev("HGT")
+    ps = dev("PINT", 1)[0]
+    p = dev("PRES")
+    lm = p.shape[0]
+    top = memslp.levels_for(ps)
+    nk = lm
+    if top:
+        for k in range(lm):
+            if float(cp.max(p[k])) < top[0]:
+                nk = min(k + 1, lm)
+                break
+    nk = max(nk, 3)
+    th, qv = dev("T", nk), dev("QVAPOR", nk)
+    f["MSLET"] = (cp.asarray(memslp.membrane_slp(cp, th, qv, p[:nk], ps, hgt)), DIMS2)
+    return f
 
 
 

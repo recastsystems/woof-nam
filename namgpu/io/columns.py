@@ -135,7 +135,11 @@ def frames_of(paths: list[Path]) -> list[Path]:
     out = []
     for p in paths:
         if p.is_dir():
-            out += sorted(f for f in p.glob("wrfout_d*") if FRAME.match(f.name))
+            # a run's carrier frames (namgpu/outputs.py: rain only) and its light frames (only what the maps read)
+            # hold no column to store
+            from namgpu import outputs  # noqa: PLC0415
+            keep = outputs.files(p, "columns")
+            out += sorted(f for f in p.glob("wrfout_d*") if FRAME.match(f.name) and (keep is None or f.name in keep))
         elif FRAME.match(p.name):
             out.append(p)
     return out

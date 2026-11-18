@@ -163,3 +163,42 @@ def test_free_memory_query_survives_a_slow_nvidia_smi(monkeypatch):
         domain.free_gib("3")
     msg = str(e.value)
     assert "card 3" in msg and "nvidia-smi did not answer" in msg and "out of memory" in msg
+
+
+def test_lead_start_on_the_nest_door(monkeypatch):
+    """--lead H: the start is forecast hour H of the GFS run H hours before --start; the boundaries are that run's
+    later hours; every map credit and file list says so; what cannot be done is refused in plain words."""
+    import os
+    from argparse import Namespace
+    from datetime import datetime
+
+    from namgpu.init import sources
+    monkeypatch.setenv(sources.LEAD_ENV, "")           # restored by monkeypatch whatever the door sets below
+
+    def args(**kw):
+        return Namespace(**(dict(lead=201, source="auto", boco_age_h=None, start="2026112021", hours=24.0) | kw))
+    a = args()
+    assert cli.lead_start(a) == 201 and a.source == "gfs" and os.environ[sources.LEAD_ENV] == "201"
+    age, why = cli.boco_age_for("gfs", datetime(2026, 11, 20, 21), None)
+    assert age == 201 and "forecast hour 201 of the 2026-11-12 12Z run" in why
+    credit, lines = cli.data_credits("gfs")
+    assert "start: GFS forecast hour 201" in credit and "forecast hour 201" in lines[0]
+    # an hour GFS does not post: the nearest posted hour before it, the door's start moved there (window.py)
+    a200 = args(lead=200, start="2026112020")
+    assert cli.lead_start(a200) == 198 and a200.start == "2026112018" and a200.window["offset_h"] == 2.0
+    # a window past hour 384 is cut there, not refused
+    a190 = args(hours=190.0)
+    assert cli.lead_start(a190) == 201 and a190.window["cut_h"] == 7.0
+    for kw, msg in ((dict(source="parent"), "starts when its parent does"),
+                    (dict(boco_age_h=6), "same run's later hours"),
+                    (dict(start="2026112022"), "00, 06, 12 or 18Z")):
+        with pytest.raises(ValueError, match=msg):
+            cli.lead_start(args(**kw))
+    with pytest.raises(ValueError, match="--follow"):
+        cli.lead_start(args(), following=True)
+    # no --lead: an analysis start, as before, and nothing inherited from the calling shell
+    a0 = args(lead=None)
+    assert cli.lead_start(a0) == 0 and a0.source == "auto" and sources.LEAD_ENV not in os.environ
+    assert cli.boco_age_for("gfs", datetime(2024, 11, 5, 12), None)[0] == 0
+    assert cli.boco_age_for("gfs", datetime(2024, 11, 5, 12), 6) == (6, "given (--boco-age-h)")
+    assert "forecast hour" not in cli.data_credits("gfs")[1][0]

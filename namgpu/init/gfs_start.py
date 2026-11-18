@@ -17,8 +17,11 @@ the NAM grid's own, from the case's native file when it has one, else from stati
 (build it once from any archived bgrd3d00: python -m namgpu.init.gfs_start --build-static FILE).
 Time-varying surface (skin/SST, soil temperature and moisture in the same four Noah layers, snow, sea
 ice, canopy water) comes from the source. Declared fills: soil fields where the source is water but
-the NAM grid is land are filled from the nearest source land (ring averaging until every point is filled); the
-3 m soil temperature TG is the source's 1-2 m layer (GFS has no 3 m level).
+the NAM grid is land are filled from the nearest source land (ring averaging until every point is filled, each
+ring about one source row long on the sphere in every direction: ring_reach); the 3 m soil temperature TG is the
+source's 1-2 m layer (GFS has no 3 m level). Sea-ice cells (static water, ICEC > 0.5) take Noah's own sea-ice
+column instead: the source skin temperature at the top to 271.16 K under 1.5 m of ice, and TG 271.16 K
+(sea_ice_column). Open water (static water, ICEC <= 0.5) takes TG 280 K, the NAM's own value there (open_water_tg).
 """
 from __future__ import annotations
 
@@ -38,6 +41,20 @@ from namgpu import paths  # noqa: E402
 
 ROOT = paths.work_root()          # cases/, static/, scratch/ live here (namgpu/paths.py)
 STATIC_NPZ = ROOT / "static" / "nam12_static.npz"
+#: The month file the run reads (domains.ensure_static sets it: static/nam12_static.mMM.npz, built from the archived NAM
+#: analysis of the start's month and day). STATIC NPZ BY MONTH. THE BREAKAGE THIS PREVENTS: one nam12_static.npz was
+#: built from the first start's month and reused for every later start, so a July start on a work root first used in
+#: November ran on November greenness (VEG) and albedo (ALBDO); the file records no date. STATIC_NPZ, the old single file, is read only when no month file is named.
+NAM_STATIC_ENV = "NAMGPU_NAM_STATIC_NPZ"
+
+
+def nam_static_npz(month: int | None = None) -> Path:
+    """The NAM 12 km static file for a start month (static/nam12_static.mMM.npz), or the one ensure_static named for
+    this run (NAMGPU_NAM_STATIC_NPZ), else the old single file."""
+    if month is not None:
+        return STATIC_NPZ.with_name(f"{STATIC_NPZ.stem}.m{int(month):02d}.npz")
+    named = os.environ.get(NAM_STATIC_ENV)
+    return Path(named) if named else STATIC_NPZ
 MISSING = -9999.0
 PL_ORDER = ("HGT", "TMP", "SPFH", "RH", "UGRD", "VGRD", "CLMR", "ICMR", "RWMR", "SNMR")
 # The record keys are per source row (source_records.py TABLES); these module names stay as the GFS table.
@@ -75,8 +92,9 @@ def _sel_pl(dcp, pa):
 
 
 # Surface records the vertical interpolation itself reads (columns()); the rest of SFC is the start's
-# land-surface state. Boundary times (gfs_bocos) need only these: the GFS forecast files (f006 ...)
-# carry no CNWAT, so asking for the full SFC set refused every boundary file (2026-11-04).
+# land-surface state. Boundary times (gfs_bocos) need only these: the boundary files are fetched without
+# CNWAT (fetch_case.GFS_BOCO_VARS; NCEP's forecast files do carry it), so asking for the full SFC set refused
+# every boundary file (2026-11-04).
 SFC_COLUMNS = srec.GFS["sfc_columns"]
 
 
@@ -533,7 +551,8 @@ def _shift(a, dj, di, lon_periodic, fill):
 _RING_STEP = r"""
 extern "C" __global__ void ring_step(const float* __restrict__ a, const unsigned char* __restrict__ m,
                                      float* __restrict__ ao, unsigned char* __restrict__ mo,
-                                     const long long n, const int ny, const int nx, const int periodic) {
+                                     const long long n, const int ny, const int nx, const int periodic,
+                                     const int* __restrict__ reach) {
     long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= n) return;
     const long long plane = (long long)ny * nx;
@@ -541,6 +560,40 @@ extern "C" __global__ void ring_step(const float* __restrict__ a, const unsigned
     const int j = (int)((t / nx) % ny);
     const int i = (int)(t % nx);
     if (!m[t]) { ao[t] = a[t]; mo[t] = 0; return; }
+    const int kc = reach[j];
+    const int kn = (j + 1 < ny) ? reach[j + 1] : 1;
+    const int ks = (j > 0) ? reach[j - 1] : 1;
+    if (kc > 1 || kn > 1 || ks > 1) {
+        // A row of a latitude-longitude source where a column is under half a row long (poleward of 60 degrees on a
+        // square grid): the neighbours in the next row and in this one reach max(reach) columns east and west, the
+        // reach of the more poleward row, so one ring is about one row length on the sphere in every direction. A
+        // reach of half the circle or more takes the whole row once, in column order (the pole row: every column
+        // is the same point, and each takes the same mean). Sums in double: up to a few thousand neighbours.
+        double s = 0.0, c = 0.0;
+        for (int dj = -1; dj <= 1; ++dj) {
+            const int jj = j - dj;
+            if (jj < 0 || jj >= ny) continue;
+            const int kk = max(kc, reach[jj]);
+            const long long row = k * plane + (long long)jj * nx;
+            if (periodic && 2 * kk + 1 >= nx) {
+                for (int ii = 0; ii < nx; ++ii) {
+                    if (jj == j && ii == i) continue;
+                    if (!m[row + ii]) { s += (double)a[row + ii]; c += 1.0; }
+                }
+            } else {
+                for (int di = -kk; di <= kk; ++di) {
+                    if (jj == j && di == 0) continue;
+                    int ii = i - di;
+                    if (periodic) { ii = (ii % nx + nx) % nx; }
+                    else if (ii < 0 || ii >= nx) continue;
+                    if (!m[row + ii]) { s += (double)a[row + ii]; c += 1.0; }
+                }
+            }
+        }
+        if (c > 0.0) { ao[t] = (float)(s / c); mo[t] = 0; }
+        else { ao[t] = a[t]; mo[t] = 1; }
+        return;
+    }
     float s = 0.0f, c = 0.0f;
     // the order of the old loop: dj = -1, 0, 1 then di = -1, 0, 1; neighbour (j - dj, i - di); absent or missing
     // neighbours add 0 to both sums, exactly as its shifted zero-filled arrays did
@@ -568,13 +621,33 @@ _RING_KERNEL = None
 RING_CHECK_EVERY = 16          # rings between the host checks (a ring after the fill is done changes nothing)
 
 
-def _ring_fill_many(arrs, missing, rings=2000, lon_periodic=True):
+def ring_reach(grid, ny, nx, lon_periodic=True):
+    """Columns east and west that one ring of the soil fill reaches in each source row [ny] (int32).
+
+    A latitude-longitude row's columns are cos(latitude) as long as a row is high, so a fill that steps one column
+    and one row per ring walks along the meridians near a pole: each meridian carried its own coast's soil
+    temperature to the pole, and the Arctic Ocean's sea ice started from rays (the pole starburst in TG, and in 2 m
+    temperature over the ice, on the 88.9N IFS 0.1 box of 2026-11-13). Here a row reaches floor(dlat / (dlon
+    cos(lat))) columns, at least 1: 1 equatorward of 60 degrees on a square grid, where the fill is the 8-neighbour
+    ring it was. A projected source (grid.proj) or no grid: 1 everywhere."""
+    one = np.ones(ny, np.int32)
+    if grid is None or getattr(grid, "proj", None) is not None:
+        return one
+    lat = np.clip(float(grid.lat0) + float(grid.dlat) * np.arange(ny), -90.0, 90.0)
+    span = float(grid.dlat) / (float(grid.dlon) * np.maximum(np.cos(np.radians(lat)), 1e-12))
+    kmax = nx if lon_periodic else max(1, nx - 1)
+    return np.clip(np.floor(span), 1, kmax).astype(np.int32)
+
+
+def _ring_fill_many(arrs, missing, rings=2000, lon_periodic=True, grid=None):
     """_ring_fill of several [ny, nx] fields at once, one kernel per ring for all of them, the host checking every
-    RING_CHECK_EVERY rings. Bitwise the per-field loop: the same neighbour order and float32 sums, and a ring after
-    a field is complete (or stuck) leaves it unchanged. Breakage it prevents: the per-field loop launched ~40 small
-    kernels and synced the host twice per ring; a HRRR start (1799 x 1059 Lambert grid, ocean corners ~500 rings
-    from land) spent ~20 s of init on one host thread for its 9 soil fields (single-core sentinel,
-    2026-11-09 01:07Z). Returns [(filled, still-missing mask)] in input order."""
+    RING_CHECK_EVERY rings. Bitwise the per-field loop where every row reaches one column (ring_reach; always
+    without a grid): the same neighbour order and float32 sums, and a ring after a field is complete (or stuck)
+    leaves it unchanged. With the source grid (hin.Grid) a row nearer a pole reaches further east and west, so the
+    fill spreads about as far on the sphere each ring in every direction (ring_reach). Breakage it prevents: the
+    per-field loop launched ~40 small kernels and synced the host twice per ring; a HRRR start (1799 x 1059 Lambert
+    grid, ocean corners ~500 rings from land) spent ~20 s of init on one host thread for its 9 soil fields
+    (single-core sentinel, 2026-11-09 01:07Z). Returns [(filled, still-missing mask)] in input order."""
     import cupy as cp
     global _RING_KERNEL
     if _RING_KERNEL is None:
@@ -583,17 +656,18 @@ def _ring_fill_many(arrs, missing, rings=2000, lon_periodic=True):
     m = cp.ascontiguousarray(cp.stack([cp.asarray(x) for x in missing]).astype(cp.uint8))
     nk, ny, nx = a.shape
     n = a.size
+    reach = cp.asarray(ring_reach(grid, ny, nx, lon_periodic))
     a2, m2 = cp.empty_like(a), cp.empty_like(m)
     blk = 256
-    grid = ((n + blk - 1) // blk,)
+    blocks = ((n + blk - 1) // blk,)
     done = 0
     while done < rings:
         prev = int(cp.count_nonzero(m))
         if prev == 0:
             break
         for _ in range(min(RING_CHECK_EVERY, rings - done)):
-            _RING_KERNEL(grid, (blk,), (a, m, a2, m2, cp.int64(n), cp.int32(ny), cp.int32(nx),
-                                        cp.int32(1 if lon_periodic else 0)))
+            _RING_KERNEL(blocks, (blk,), (a, m, a2, m2, cp.int64(n), cp.int32(ny), cp.int32(nx),
+                                        cp.int32(1 if lon_periodic else 0), reach))
             a, a2 = a2, a
             m, m2 = m2, m
             done += 1
@@ -602,8 +676,10 @@ def _ring_fill_many(arrs, missing, rings=2000, lon_periodic=True):
     return [(a[k], m[k].astype(cp.bool_)) for k in range(nk)]
 
 
-def _ring_fill(a, missing, rings=2000, lon_periodic=True):
+def _ring_fill(a, missing, rings=2000, lon_periodic=True, grid=None):
     """Fill missing points from the mean of present 8-neighbours, ring by ring (device), until none is left.
+    With a latitude-longitude source grid whose rows reach further than one column near a pole (ring_reach), the
+    fill is _ring_fill_many's for that grid.
     Was 12 rings (~3 deg): a NAM land cell whose nearest source land is further (Jan Mayen, 71.07N 8.15W, ~18 rings
     from Iceland/Greenland on GFS 0.25 deg) kept STC = TG = -9999, Noah drove TSKIN to -639 K and QGH went inf at
     step 10 of the GFS start (run lead 1140Z, scratch/runlead2/probe_qgh.py). The loop stops once nothing is missing
@@ -611,6 +687,8 @@ def _ring_fill(a, missing, rings=2000, lon_periodic=True):
     global source, never across the pole rows or the edges of a longitude window (2026-11-04, nests anywhere: a
     window's east edge is not next to its west edge). Returns (filled, still-missing mask)."""
     import cupy as cp
+    if bool((ring_reach(grid, a.shape[-2], a.shape[-1], lon_periodic) > 1).any()):
+        return _ring_fill_many([a], [missing], rings=rings, lon_periodic=lon_periodic, grid=grid)[0]
     a = a.copy()
     m = missing.copy()
     for _ in range(rings):
@@ -634,10 +712,90 @@ def _ring_fill(a, missing, rings=2000, lon_periodic=True):
     return a, m
 
 
-def columns(ctx, dec, sfc, grid):
+SEA_ICE_TBOT = 271.16    # K: NAM Noah's sea-ice bottom temperature (SFLX TBOT for ICE == 1; phys_noah_hrtice)
+SEA_ICE_DEPTH = 3.0      # m: its sea-ice column, four equal layers to 3 m (SFLX ZSOIL = -3*KZ/NSOIL)
+SEA_ICE_THICK = 1.5      # m: the ice the start's profile describes, IFS's (and so ERA5's) fixed sea-ice depth
+ICE_MELT = 273.15        # K: the ice surface is at or below melting
+
+
+def sea_ice_column(raw) -> int:
+    """The four soil layers and TG of the start's sea-ice cells, in place on raw (raw_sfc of an isobaric start).
+
+    A sea-ice cell is water in the static (LAND < 0.5) with ICEC > 0.5: the cells NMMB's first step turns into
+    land with sea ice (phys_turbl_driver's bandaid), and Noah then runs its sea-ice column on the four layers of STC
+    with TBOT 271.16 K at 3 m. No source gives an ice temperature, and the soil those layers held was the source's
+    land soil filled out over the sea from the nearest coast: hundreds of km away in the Arctic, along the source
+    grid's meridians near the pole. The ice started as rays from the pole (TG and STC on the 88.9N IFS 0.1 box of
+    2026-11-13, and so 2 m temperature over the ice). Here each layer takes, at its centre, the steady conduction
+    profile of SEA_ICE_THICK m of ice between the source's skin temperature (at most 273.15 K) and 271.16 K, the sea
+    water under it (271.16 K below that depth), and TG takes 271.16 K, the bottom value Noah uses for ice. Every
+    other cell is unchanged. Measured on that box against IFS's own 2 m temperature over the ice at +6 h: the
+    profile through Noah's whole 3 m column drifted 3.4 K cold, 1.5 m of ice 2.4 K (the rays had 0.3 K, from the
+    land soil's heat under the ice). Returns the number of sea-ice cells."""
+    import cupy as cp
+    ice = (raw["ICEC"] > 0.5) & (raw["LAND"] < 0.5)
+    n = int(cp.count_nonzero(ice))
+    if not n:
+        return 0
+    ts = cp.minimum(raw["TMP_SFC"], cp.float32(ICE_MELT))
+    tb = cp.float32(SEA_ICE_TBOT)
+    nl = int(raw["TSOIL"].shape[0])
+    for k in range(nl):
+        f = cp.float32(min(1.0, (k + 0.5) * SEA_ICE_DEPTH / nl / SEA_ICE_THICK))   # layer centre / ice depth
+        raw["TSOIL"][k] = cp.where(ice, ts + (tb - ts) * f, raw["TSOIL"][k])
+    raw["TSOIL_3M"] = cp.where(ice, tb, raw["TSOIL_3M"]).astype(raw["TSOIL_3M"].dtype)
+    return n
+
+
+OPEN_WATER_TG = 280.0    # K: the NAM's own TG over open water (bgrd3d00 3 m soil temperature, every open-water cell)
+
+
+def open_water_tg(raw) -> int:
+    """TG of the start's open-water cells, in place on raw (raw_sfc of an isobaric start): OPEN_WATER_TG.
+
+    An open-water cell is water in the static (LAND < 0.5) that is not sea ice (ICEC <= 0.5, sea_ice_column's test).
+    Its TG was the source's 1-2 m land soil filled out over the sea from the nearest coast (_ring_fill_many), and the
+    model never resets it: Noah does not run on open water (the sea surface takes SST), so the history's TG, and the
+    3 m soil temperature product drawn from it, kept the fill. Near a pole the fill draws each coast's soil out in
+    rays and wedges: after sea_ice_column, TG on the 88.9N and 84N 30E GFS boxes of 2026-11-13 still showed them over
+    the open Barents and Kara Seas (the 84N box's warm ray ran on from the pack ice into the open water). The NAM's
+    own analysis carries one value over all open water, 280.0 K, and 271.2 K over its sea ice: the 3 m soil
+    temperature of nam.t00z.bgrd3d00 of 2025-01-21 (the file the native start reads; 495,248 open-water and 83,692
+    sea-ice cells), and of awphys00 of the same cycle and of 2025-11-01 00Z. Here every open-water cell takes it. Land and sea-ice cells are unchanged, and so is every field the model
+    steps (Noah reads TG only where it runs: land, and sea ice with its own 271.16 K). Returns the number of cells."""
+    import cupy as cp
+    water = (raw["LAND"] < 0.5) & ~(raw["ICEC"] > 0.5)
+    raw["TSOIL_3M"] = cp.where(water, cp.float32(OPEN_WATER_TG), raw["TSOIL_3M"]).astype(raw["TSOIL_3M"].dtype)
+    return int(cp.count_nonzero(water))
+
+
+LAPSE_STD = 0.0065       # K/m, the standard atmosphere's lapse rate
+
+
+def below_ground_from_2m(pres, ght, tt):
+    """Temperature columns for the interpolation with every isobaric level under the ground (index >= 1 with a pressure
+    above level 0's, the surface) set to the 2 m temperature carried down from the source terrain at LAPSE_STD:
+    tt[0] + LAPSE_STD (ght[0] - ght[k]). Levels above the ground are unchanged (source_records BELOW_GROUND_FROM_2M
+    says why). numpy or cupy arrays [nlev, ...]; returns a new array."""
+    import numpy as _np
+    try:
+        import cupy as _cp
+        xp = _cp.get_array_module(tt)
+    except ImportError:
+        xp = _np
+    out = tt.copy()
+    under = pres[1:] > pres[0][None]
+    carried = tt[0][None] + tt.dtype.type(LAPSE_STD) * (ght[0][None] - ght[1:])
+    out[1:] = xp.where(under, carried, tt[1:]).astype(tt.dtype)
+    return out
+
+
+def columns(ctx, dec, sfc, grid, rec=None):
     """Metgrid-style model-grid columns for init-gfs-vinterp: level 0 = the source surface (PRES =
     surface pressure, GHT = source terrain, TT = 2 m T, RH = 2 m RH, UU/VV = 10 m wind), then the
-    isobaric levels ground up. H fields at H points, winds at V points (earth-relative)."""
+    isobaric levels ground up. H fields at H points, winds at V points (earth-relative). A record table with
+    below_ground BELOW_GROUND_FROM_2M also gets TT_LEV_IN, the temperature the interpolation reads (below_ground_from_2m);
+    the surface-pressure reduction keeps TT_IN."""
     import cupy as cp
     from namgpu.init import init_gfs_hinterp as hin
 
@@ -683,6 +841,8 @@ def columns(ctx, dec, sfc, grid):
         "CICE_IN": stack(zero, f3("ICMR", H)),
         "FRIMEF_IN": cp.zeros((nl + 1, jm, im), dtype=cp.float32),
     }
+    if (rec or {}).get("below_ground") == srec.BELOW_GROUND_FROM_2M:
+        gi["TT_LEV_IN"] = below_ground_from_2m(pres, gi["GHT_IN"], gi["TT_IN"])
     return gi, f2(sfc["HGT"], H)
 
 
@@ -723,7 +883,7 @@ def model_state(ctx, path, tmpdir, sfc_keys=None, rec=None, decoded=None, host=N
     ensure_vcoord(ctx)
     dec, sfc, grid = (decoded if decoded is not None
                       else decode_source(ctx, path, tmpdir, sfc_keys=sfc_keys, rec=rec, host=host))
-    gi, soilhgt = columns(ctx, dec, sfc, grid)
+    gi, soilhgt = columns(ctx, dec, sfc, grid, rec)
     del dec
     st.add("SOILHGT", soilhgt.shape)[...] = soilhgt
     ctx.tables["gfs_hinterp"] = gi
@@ -797,6 +957,20 @@ def check_valid(ctx, name, row):
     2026-10-20 06Z) exist without the soil layers the start needs."""
     if ctx.start is None:
         return
+    from namgpu.init import sources as srcmod
+    lead = srcmod.start_lead_h(row, getattr(ctx, "cfg", None))
+    if lead:
+        # a start from a forecast hour: the run it comes from must be a cycle that posts that hour (one rule)
+        from datetime import timedelta
+        cyc = ctx.start - timedelta(hours=lead)
+        if cyc.hour % int(row.get("cycle_step_h", 6)):
+            raise ValueError(f"{UNIT}: a {ctx.start:%H}Z start from forecast hour {lead} would come from a "
+                             f"{cyc:%H}Z {name} run; it runs at 00, 06, 12 and 18Z")
+        try:
+            srcmod.check_lead(row, lead, None, cyc)
+        except ValueError as e:
+            raise ValueError(f"{UNIT}: {e}") from None
+        return
     t = ctx.start.strftime("%Y-%m-%dT%H")
     if row.get("valid_from") and t < row["valid_from"]:
         alt = f"; use init_source {row['before_use']}" if row.get("before_use") else ""
@@ -859,22 +1033,23 @@ def load_static(ctx):
             ctx.tables["static_extra"] = extra
             print(case_land_line(lpath, lacking), flush=True)
         return {k: got[k] for k in STATIC_KEYS}, str(path)
-    if not STATIC_NPZ.is_file():
-        raise FileNotFoundError(f"{UNIT}: no NAM static surface: neither {path} nor {STATIC_NPZ}. Build it once "
+    static_npz = nam_static_npz()
+    if not static_npz.is_file():
+        raise FileNotFoundError(f"{UNIT}: no NAM static surface: neither {path} nor {static_npz}. Build it once "
                                 "with: python -m namgpu.init.gfs_start --build-static <any archived bgrd3d00>")
-    z = np.load(STATIC_NPZ)
+    z = np.load(static_npz)
     # a static file written by this version carries ALBASE (build_static); an older one does not, and the base
     # albedo is then the vegetation-table fill, as before
     if getattr(ctx, "tables", None) is not None:
         ctx.tables["static_extra"] = {k: cp.asarray(z[k]) for k in STATIC_EXTRA if k in z.files}
         if "ALBASE" not in z.files:
-            print(f"{UNIT}: {STATIC_NPZ} has no ALBASE (written by an older woof-nam): the snow-free albedo is the "
+            print(f"{UNIT}: {static_npz} has no ALBASE (written by an older woof-nam): the snow-free albedo is the "
                   "vegetation-table fill; rebuild it with `woof-nam static <bgrd3d00>` for the NAM's own", flush=True)
         elif "MXSNAL" not in z.files:
-            print(f"{UNIT}: {STATIC_NPZ} has no MXSNAL (written by an older woof-nam): the maximum snow albedo is the "
+            print(f"{UNIT}: {static_npz} has no MXSNAL (written by an older woof-nam): the maximum snow albedo is the "
                   "vegetation-table fill; rebuild it with `woof-nam static <bgrd3d00>` (with the bgrdsf00 the "
                   "fetch puts beside it) for the NAM's own", flush=True)
-    return {k: cp.asarray(z[k]) for k in STATIC_KEYS}, str(STATIC_NPZ)
+    return {k: cp.asarray(z[k]) for k in STATIC_KEYS}, str(static_npz)
 
 
 SOIL_FROM_ENV = "NAMGPU_SOIL_FROM"
@@ -992,7 +1167,13 @@ def _stage_one(ctx, name, row):
     rec = srec.table(row)
     check_valid(ctx, name, row)
     path = srcmod.source_path(ctx, row)
+    lead = srcmod.start_lead_h(row, getattr(ctx, "cfg", None))
     if not path.is_file():
+        if lead:
+            from datetime import timedelta
+            cyc = ctx.start - timedelta(hours=lead)
+            raise FileNotFoundError(f"{UNIT}: {path} missing: the start is {srcmod.lead_credit(lead, ctx.start)} "
+                                    f"(woof-nam fetch --cycle {cyc:%Y%m%d%H} --lead {lead} --case-dir {ctx.case_dir})")
         url = row.get("url", "").format(ymd=f"{ctx.start:%Y%m%d}", cyc=ctx.start.hour)
         raise FileNotFoundError(f"{UNIT}: {path} missing" + (f" (fetch {url})" if url else ""))
     tmpdir = str(Path(ctx.case_dir).resolve().parents[1] / "scratch")
@@ -1036,7 +1217,7 @@ def _stage_one(ctx, name, row):
     # TDEEP: a source with a deep (3 m) soil temperature of its own (RAP's last RUC node) gives Noah's TG from it
     soil_keys = SOIL_KEYS + (("TDEEP",) if "TDEEP" in sfc else ())
     filled = _ring_fill_many([sfc[k] for k in soil_keys], [(sfc[k] == MISSING) | ~land_src for k in soil_keys],
-                             lon_periodic=grid.lon_periodic)
+                             lon_periodic=grid.lon_periodic, grid=grid)
     for k, (a, m) in zip(soil_keys, filled):
         soil[k] = a
         left[k] = m
@@ -1076,6 +1257,12 @@ def _stage_one(ctx, name, row):
         "SOTYP": cp.rint(static["SOTYP"]).astype(cp.int32),
     }
     raw["WTMP"] = raw["TMP_SFC"]
+    nice = sea_ice_column(raw)
+    if nice:
+        print(f"{UNIT}: {nice} sea-ice cells start their four ice layers from the {name} skin temperature down to "
+              f"{SEA_ICE_TBOT} K under {SEA_ICE_THICK:g} m of ice (Noah's sea-ice column), not from soil filled in "
+              "from land", flush=True)
+    open_water_tg(raw)
     # Ensemble soil perturbation (configfile key soil_moisture_scale, e.g. the SREF drier-soil members): the
     # start's volumetric soil moisture times the factor on land, inside the same 0.02-0.6 bounds. 1 = unchanged.
     sms = float(ctx.cfg.raw.get("soil_moisture_scale", 1.0)) if getattr(ctx, "cfg", None) is not None else 1.0
@@ -1102,6 +1289,14 @@ def _stage_one(ctx, name, row):
                                  "attribution": row.get("attribution"), "licence": row.get("licence"),
                                  "donors": {k: v["file"] for k, v in rec["donors"].items()},
                                  "donors_used_for_missing_records": fallback_used}
+    if lead:
+        # the receipt says what the start is: a forecast of the source model, not an analysis
+        from datetime import timedelta
+        ctx.tables["grid_source"].update(
+            source_cycle=f"{ctx.start - timedelta(hours=lead):%Y-%m-%dT%H}", source_lead_h=int(lead),
+            start_is=srcmod.lead_credit(lead, ctx.start) + ": soil, snow, sea ice and the sea surface are that "
+                     "forecast's own values")
+        print(f"{UNIT}: {name} start is {srcmod.lead_credit(lead, ctx.start)} (a forecast, not an analysis)", flush=True)
     print(f"{UNIT}: {name} start from {path.name}: isobaric -> NMMB hybrid on the GPU; static surface "
           f"from {Path(static_from).name}", flush=True)
     return ctx.tables["grid_source"]

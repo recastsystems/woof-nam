@@ -290,7 +290,12 @@ class SuiteColumn:
         return {n: v[n] for n in self.species}
 
     def _hist_due(self) -> bool:
+        """True in the physics call that comes last before the next history write (it fills the reflectivity)."""
         c, n = self.ctx.cfg, int(self.ctx.ntimestep)
+        sch = getattr(self.ctx, "outputs", None)
+        if sch is not None:                      # the output schedule (namgpu/outputs.py), as driver._due("history")
+            nxt = sch.next_due(n)
+            return nxt is not None and nxt - n <= int(c.nphs)
         hs = max(1, round(float(c.raw.get("minutes_history", 60)) * 60.0 / float(c.dt)))
         return ((n // hs + 1) * hs) - n <= int(c.nphs)
 

@@ -95,6 +95,18 @@ GFS = {
 IFS_SOIL_LAYERS = ((0.0, 0.07), (0.07, 0.28), (0.28, 1.0), (1.0, 2.89))
 NOAH_SOIL_LAYERS = ((0.0, 0.1), (0.1, 0.4), (0.4, 1.0), (1.0, 2.0))
 
+# Pressure levels under the ground (p > the surface pressure). The NAM's vertical interpolation (init-gfs-vinterp,
+# nemsinterp's interp_press2press_lin) ignores the surface level for temperature and brackets a model level between the
+# isobaric levels around it, under-ground ones included, as NPS did on NCEP's files. NCEP's post writes an
+# under-ground temperature from the air near the ground (GFS 2025-01-21 12Z, the coldest 5 % of points north of 20N
+# with a level under the ground: that level 1.8 K above the 2 m temperature). ECMWF carries it down from above a
+# surface inversion (ERA5 2015-01-26 12Z, the same cut: 10.3 K above the 2 m temperature, 22 K at -57 C over
+# Baffin Island), so the lowest model levels started up to 20 K warm in arctic air and the 0 h 2 m temperature 6.9 K
+# warm on the coldest tenth of the land. BELOW_GROUND_FROM_2M: for the interpolation (not the surface-pressure
+# reduction, which keeps the source's own column), an under-ground level's temperature is the 2 m temperature carried
+# down with the standard 6.5 K/km (gfs_start.below_ground_from_2m). NCEP rows keep their own values.
+BELOW_GROUND_FROM_2M = "lapse-from-2m"
+
 # ECMWF open data IFS HRES (0.1 deg pl + sfc pair, or 0.25 deg single file): parameter numbers as the files
 # carry them (grib2_inventory of 2026-11-03 12Z f000: sp 0-3-0, z 0-3-4, skt 0-0-17, 2t 0-0-0/103, 2d 0-0-6/103,
 # 10u/10v 0-2-2/0-2-3 at 103 10 m, lsm 2-0-0, sd 0-1-254 (m of water equivalent), rsn 0-1-61 (kg m-3),
@@ -138,6 +150,7 @@ IFS = {
         "SNOD": {"file": "raw/ifs/gfs.t{cyc:02d}z.snod.f000.grib2", "spec": (0, 1, 11, "1", "0", None)},
     },
     "lat_crop": "both",
+    "below_ground": BELOW_GROUND_FROM_2M,
 }
 
 # ERA5 reanalysis as gpuwm.era5_arco writes it (fields named by gpuwm's regular-forcing schema, REGULAR_FIELD_UNITS:
@@ -173,6 +186,7 @@ ERA5 = {
     "derive_columns": ("HGT", "RH2"),
     "donors": {},
     "lat_crop": "both",
+    "below_ground": BELOW_GROUND_FROM_2M,
 }
 
 # RUC LSM soil: nine depth NODES (m), values at a depth, not layer means. RAP, HRRR and RRFS publish TSOIL/SOILW at

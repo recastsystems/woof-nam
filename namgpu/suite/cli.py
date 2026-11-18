@@ -169,6 +169,15 @@ class Suite:
         self.granted: dict[str, float | None] = {}
         self.cands: dict[str, list] = {}
 
+    def offset_h(self) -> float:
+        """Hours the parent starts before the time asked (woof-nam suite --lead H on an hour GFS does not post: the
+        parent starts at the nearest posted hour before it, runs that much longer and counts its outputs from H)."""
+        return float(self.plan.get("offset_h") or 0.0)
+
+    def nest_start(self) -> datetime:
+        """When the nests start: the time asked (the parent's start plus its offset)."""
+        return self.cycle + timedelta(hours=self.offset_h())
+
     # ---- card memory for nests that share a card
     #
     # Five nests started together on one 95 GiB card (release check 2026-11-10, suite-1h-d): each door read 94.4 GiB
@@ -290,7 +299,9 @@ class Suite:
             except ValueError:
                 continue
             hours.add(int(round((v - self.cycle.replace(tzinfo=None)).total_seconds() / 3600)))
-        h = -1
+        # a parent that started offset_h before the time asked writes from the time asked (its hours before are not
+        # outputs), so the hours are counted whole from there
+        h = int(round(self.offset_h())) - 1
         while h + 1 in hours:
             h += 1
         # one card writes each hour in place, the next only after it: hour h is whole once h + 1 exists or the run ended
@@ -309,7 +320,12 @@ class Suite:
         try:
             rec.update(state="fetch", started_utc=_now())
             t0 = time.monotonic()
-            f = Proc("fetch", [*woof_nam(), "fetch", "--cycle", f"{self.cycle:%Y%m%d%H}", "--hours", f"{row['hours']:g}",
+            lead = int(self.plan.get("lead_h") or 0)
+            # the fetch plans the hour asked (wanted_lead_h): it starts at `lead` and records the offset in the case
+            # (raw/START.json), which the run reads to run that much longer and count its outputs from the hour asked
+            want = int(self.plan.get("wanted_lead_h") or lead)
+            f = Proc("fetch", [*woof_nam(), "fetch", "--cycle", f"{self.cycle - timedelta(hours=lead):%Y%m%d%H}",
+                               *(["--lead", str(want)] if want else []), "--hours", f"{row['hours']:g}",
                                "--case-dir", str(case), "--gfs-only",
                                "--workers", str(max(8, min(32, (os.cpu_count() or 8) * 2)))],
                      self.logs / "12km-fetch.log", self.env(None))
@@ -318,7 +334,8 @@ class Suite:
             rec["fetch_s"] = round(time.monotonic() - t0, 1)
             rec["state"] = "forecast"
             argv = [*woof_nam(), "run", "--case", str(case), "--source", row["source"], "--hours", f"{row['hours']:g}",
-                    "--out", str(run), "--no-maps", "--no-columns", "--domain", row["row"]]
+                    "--out", str(run), "--no-maps", "--no-columns", "--domain", row["row"],
+                    *(["--lead", str(lead)] if lead else []), *self.output_words("parent")]
             p = Proc("12km", argv, self.logs / "12km-run.log", self.env(row["cards"]))
             prod = None
             if not self.a.no_products:
@@ -342,13 +359,40 @@ class Suite:
                 self.parent_ended.touch()
             rec["finished_utc"] = _now()
 
+    def output_words(self, who: str) -> list[str]:
+        """The output schedule words (namgpu/outputs.py) for the parent or a nest. The parent of a suite with nests
+        also writes every hour its nests read for their edges (--carry 1h: state carriers, never exported)."""
+        a = self.a
+        if who == "parent":
+            out = [("--write", a.write), ("--grib-at", a.grib_at)]
+            nests = any(r["kind"] == "nest" for r in self.plan["domains"].values())
+            if a.write and nests:
+                out.append(("--carry", "1h"))
+        else:
+            out = [("--write", a.nest_write), ("--grib-at", a.nest_grib_at)]
+        return [x for k, v in out if v for x in (k, str(v))]
+
+    def grib_hours(self, d: str, run: Path, hours: float) -> set[int]:
+        """The GRIB2 hours a domain owes: its run's output list (OUTPUTS.json, whole hours since the start), else every
+        hour 0..hours as before."""
+        from namgpu import outputs
+        doc = outputs.read(run)
+        if doc is None:
+            return set(range(0, int(hours) + 1))
+        listed = {int(round(t["model_h"])) for t in doc["times"] if t.get("grib")}
+        # a list that names no GRIB2 time owes every hour, so a run that wrote none is never called complete
+        return listed or set(range(0, int(hours) + 1))
+
     # ---- products
 
     def start_products(self, d: str, run: Path, hours: float, nest: str | None, cards: list[str] | None = None):
         out = self.pub / d
         out.mkdir(parents=True, exist_ok=True)
         until = run.parent / ".ended"
-        argv = [*woof_nam(), "products", "--run", str(run), "--out", str(out), "--hours", f"0-{int(hours)}",
+        # the parent of a suite from an unposted hour started `offset` hours before the time asked: its GRIB2 hours are
+        # model hours offset .. offset + hours (the follower counts from the run's start); a nest starts at the time asked
+        off = int(round(self.offset_h())) if nest is None else 0
+        argv = [*woof_nam(), "products", "--run", str(run), "--out", str(out), "--hours", f"{off}-{off + int(hours)}",
                 "--prefix", self.t["prefix"], "--follow", "--until", str(until)]
         if nest is not None:
             # the nest's own NOAA set, and enough writers in flight to keep up with the forecast (a writer on the
@@ -366,7 +410,8 @@ class Suite:
         rec = self.dom(d)
         # the door's parent fetch (nest/cli.py fetch_parent) checks the parent's history every 3 h up to
         # max(6, hours): a nest waits for every hour that check reads
-        need = T.parent_hours_for_nest(row["hours"])
+        # (counted from the parent's start: a nest starts at the time asked, offset_h after it)
+        need = int(round(self.offset_h())) + T.parent_hours_for_nest(row["hours"])
         rec.update(state="waiting-for-parent", hours=row["hours"], cards=len(row["cards"]))
         t_wait = time.monotonic()
         while True:
@@ -383,7 +428,8 @@ class Suite:
         until = out / ".ended"
         until.unlink(missing_ok=True)
         rec.update(state="waiting-for-card-memory", started_utc=_now())
-        argv = [*woof_nam(), *T.door_argv(d, row, self.cycle, self.parent_run, out, self.door_options, self.ncep_rows)]
+        argv = [*woof_nam(), *T.door_argv(d, row, self.nest_start(), self.parent_run, out, self.door_options,
+                                          self.ncep_rows, self.output_words("nest"))]
         rec["door"] = "ncep-nest" if "--ncep-nest" in argv else "centre-size (no NCEP row for this nest in the door)"
         prod = None
         if not self.a.no_products and d in self.nest_products:
@@ -505,8 +551,9 @@ class Suite:
             return
         folder = self.pub / d
         folder.mkdir(parents=True, exist_ok=True)
+        cyc = self.nest_start() if row["kind"] == "nest" else self.cycle     # a nest's files are named for its start
         if d == "firewxnest" and row.get("firewx"):
-            side = self.t["nests"][d]["side_file"].format(prefix=self.t["prefix"], HH=f"{self.cycle:%H}")
+            side = self.t["nests"][d]["side_file"].format(prefix=self.t["prefix"], HH=f"{cyc:%H}")
             (folder / side).write_text(T.write_center_latlon(row["firewx"]["lat"], row["firewx"]["lon"]))
         files, hours = [], set()
         for f in sorted(folder.iterdir()):
@@ -520,7 +567,8 @@ class Suite:
             if fh is not None and not f.name.endswith(".idx"):
                 hours.add(fh)
             files.append({"name": f.name, "bytes": f.stat().st_size, "sha256": _sha256(f)})
-        want = set(range(0, int(row["hours"]) + 1))
+        want = self.grib_hours(d, self.out / d / "run" if row["kind"] == "nest" else (getattr(self, "parent_run", None) or Path("-")),
+                               row["hours"])
         missing = sorted(want - hours)
         rec["grib2_hours"] = len(hours)
         rec["grib2_missing"] = missing
@@ -528,7 +576,7 @@ class Suite:
         state = "complete" if rec.get("state") == "complete" and not missing else "failed"
         if rec.get("state") == "complete" and missing:
             rec.setdefault("error", f"{len(missing)} GRIB2 hours missing: {missing[:6]}")
-        doc = {"model": "WOOF-NAM", "domain": d, "cycle": self.cycle.strftime("%Y-%m-%dT%H:%M:%SZ"), "state": state,
+        doc = {"model": "WOOF-NAM", "domain": d, "cycle": cyc.strftime("%Y-%m-%dT%H:%M:%SZ"), "state": state,
                "hours": row["hours"], "files": files, "hours_available": len(hours),
                "first_file_utc": rec.get("started_utc"), "finished_utc": _now(),
                "grid": row.get("product_grid") or self.t["parent"].get("product_grid"),
@@ -612,7 +660,20 @@ def build_parser() -> argparse.ArgumentParser:
     from namgpu.cli import HelpFormatter
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=HelpFormatter,
                                  epilog="\n\n".join(__doc__.split("\n\n")[1:]))
-    ap.add_argument("--cycle", required=True, help="YYYYMMDDHH, a 00/06/12/18Z cycle")
+    ap.add_argument("--cycle", required=True, help="YYYYMMDDHH, a 00/06/12/18Z cycle (with --lead: the GFS run the "
+                    "start is read from)")
+    ap.add_argument("--lead", type=int, default=0, metavar="H",
+                    help="start the parent from forecast hour H of the --cycle GFS run instead of its analysis: the "
+                         "suite starts at cycle + H and every file is named for that start time; the nests follow "
+                         "the parent. An hour GFS does not post (it goes 3-hourly after 120) starts at the nearest "
+                         "posted hour before it, runs that much longer with its outputs counted from H and its nests starting at H, and the suite says so; a parent longer than the posted hours is cut "
+                         "there. With --parent-run: the hour that parent was started from")
+    ap.add_argument("--write", default=None, metavar="SPEC", help="the parent's output times (woof-nam run --write: "
+                    "1h, 3h, 0,6,12 or 0-24/1h,24-84/3h); default every hour. Its nests' edge hours are written too")
+    ap.add_argument("--grib-at", default=None, metavar="SPEC", help="the parent's GRIB2 times, when not every "
+                    "--write time (whole hours)")
+    ap.add_argument("--nest-write", default=None, metavar="SPEC", help="every nest's output times (15m, 1h, ...)")
+    ap.add_argument("--nest-grib-at", default=None, metavar="SPEC", help="every nest's GRIB2 times (whole hours)")
     ap.add_argument("--out", type=Path, required=True, help="the cycle's folder (domains, logs, publish/)")
     ap.add_argument("--card-list", default="", help="comma list of the cards to use (default: every visible card)")
     ap.add_argument("--domains", default="", help="comma list of domains (default all: " + ", ".join(T.SUITE_ORDER) + ")")
@@ -639,13 +700,56 @@ def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
     cycle = datetime.strptime(a.cycle, "%Y%m%d%H").replace(tzinfo=timezone.utc)
     t = T.load(a.table)
+    want_lead, offset = a.lead, 0.0
+    if a.lead:
+        # --cycle is the GFS run; the suite's own cycle (case folder, file names, valid times) is its start time
+        from namgpu.init import sources
+        if cycle.hour not in t["cycles"]:
+            raise SystemExit(f"woof-nam suite: refused: --cycle {a.cycle}: with --lead, --cycle is the GFS run "
+                             f"({t['cycles']} UTC) and the suite starts {a.lead} h after it")
+        # with --parent-run the parent has already run from that hour (the nests only follow its history), so only
+        # the hour itself is checked; else the parent's own length must fit in what GFS posts after it
+        hours = None if a.parent_run is not None else \
+            (t["parent"]["hours"] if a.hours_cap is None else min(t["parent"]["hours"], a.hours_cap))
+        if a.parent_run is None:
+            # the nearest posted hour at or before the one asked (namgpu/init/window.py): never a refusal over that
+            from namgpu.init import window
+            try:
+                from namgpu.init import fetch_case
+                p = window.resolve("gfs", hours=float(hours), cycle=cycle.replace(tzinfo=None), lead=float(a.lead),
+                                   posted=fetch_case.posted_for("gfs"))
+            except ValueError as e:
+                raise SystemExit(f"woof-nam suite: refused: {e}") from None
+            if p["lead_h"] != a.lead or p["cut_h"]:
+                print(f"woof-nam suite: {p['line']}; the suite starts there (its files are named for that start)",
+                      flush=True)
+            a.lead = int(p["lead_h"])
+            offset = float(p["offset_h"])
+            if p["cut_h"] and a.hours_cap is None:
+                a.hours_cap = p["model_hours"] - p["offset_h"]
+        try:
+            sources.check_lead(sources.SOURCES["gfs"], a.lead, None if a.parent_run is not None else
+                               (t["parent"]["hours"] if a.hours_cap is None else min(t["parent"]["hours"], a.hours_cap)),
+                               cycle.replace(tzinfo=None))
+        except ValueError as e:
+            raise SystemExit(f"woof-nam suite: refused: {e}") from None
+        cycle = cycle + timedelta(hours=a.lead)
+        print(f"woof-nam suite: the parent starts {cycle:%Y-%m-%d %H}Z from "
+              f"{sources.lead_credit(a.lead, cycle.replace(tzinfo=None))} (a GFS forecast, not an analysis); "
+              + (f"its outputs count from {cycle + timedelta(hours=offset):%Y-%m-%d %H}Z, the hour asked, and the "
+                 "nests start there" if offset > 1e-9 else "the nests follow it"), flush=True)
     cards = [x.strip() for x in a.card_list.split(",") if x.strip()] or visible_cards()
     if not cards:
         raise SystemExit("woof-nam suite: no cards (nvidia-smi lists none; give --card-list)")
     only = [x.strip() for x in a.domains.split(",") if x.strip()] or None
     if a.parent_run is not None and only is None:
         only = [d for d in T.domains(t) if d != t["parent"]["domain"]]
-    plan = T.plan(t, cycle, cards, only, a.hours_cap, a.firewx_loc)
+    plan = T.plan(t, cycle, cards, only, a.hours_cap, a.firewx_loc, lead=a.lead)
+    if offset > 1e-9:
+        # the parent starts at the posted hour, runs `offset` longer and counts its outputs from the hour asked (its
+        # fetch plans that hour, so the case carries the offset the run reads); the nests start at the hour asked
+        plan.update(wanted_lead_h=int(want_lead), offset_h=offset,
+                    nest_start=(cycle + timedelta(hours=offset)).strftime("%Y-%m-%dT%HZ"))
     if a.dry_run:
         a.out.mkdir(parents=True, exist_ok=True)
         (a.out / "suite-plan.json").write_text(json.dumps(plan, indent=1) + "\n")

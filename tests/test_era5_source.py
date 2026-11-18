@@ -108,6 +108,26 @@ def test_era5_fetch_plan(tmp=None):
         fetch_case._get = real_get
 
 
+def test_era5_short_run_fetches_the_boundaries_it_reads():
+    """A run under 6 h reads boco.0000 and boco.0003, so it needs ERA5 to +6 h (domains.bc_hours), as the
+    boundary build asks (gfs_bocos.run). The plan for 3 h was +0 and +3 only, and the run stopped at
+    init-gfs-bocos after its fetch."""
+    from namgpu.domains import bc_hours
+    real_get = fetch_case._get
+    fetch_case._get = lambda url, rng=None, timeout=120: json.dumps({"valid_time_stop": "2026-06-30"}).encode()
+    real_mkdir = Path.mkdir
+    Path.mkdir = lambda self, *a, **k: None
+    try:
+        raw = Path("/nonexistent-case/raw")
+        for hours in (1, 3, 5, 6, 7):
+            jobs = fetch_case.plan_source("era5", datetime(1990, 12, 21, 12), hours, raw)
+            leads = [int((valid - datetime(1990, 12, 21, 12)).total_seconds() // 3600) for _, _, valid, _, _ in jobs]
+            assert leads == list(range(0, bc_hours(hours, 3) + 1, 3)), (hours, leads)
+    finally:
+        Path.mkdir = real_mkdir
+        fetch_case._get = real_get
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

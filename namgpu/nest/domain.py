@@ -123,7 +123,13 @@ INIT_POOL_GIB = 3.5          # init pool beyond the state (GFS + boundary decode
 #         0.81 GiB on the parent); 2.5 GiB on top of the per-column part covers the parent (cap 13.95 GiB) and the
 #         286 x 334 nest on a 96 GB card (18.41 GiB pool at the end of 48 h, cap 22.2).
 # fixed_gib: CUDA context and loaded modules (outside the pool); pool_headroom_gib: the pool cap above the estimate.
-VRAM_PATH = {"fit": {"fixed_pool_gib": 0.0, "per_column_kb": 23.0, "rrtm_mb_per_row_col": 0.26, "fixed_gib": 0.5,
+# 2026-11-13 (fit rrtm 0.26 -> 0.34 MB per row-column): the 11-09 batched radiation windows made each row chunk one
+# SW chunk, so a radiation call now holds 0.325-0.332 MB per row-column (South Africa 4 km box, 215 x 251, IFS 0.1
+# 2026-11-12 12Z, fit path, rrtm_call:row_bytes at 1 and 2 windows per batch). On 0.26 the step loop's batch choice
+# (rrtm_call.ROW_COL_BYTES, the same figure) put 2 windows in a 4.68 GiB cap and the box stopped with
+# OutOfMemoryError at its first radiation call on a 32 GB card (2026-11-13). Measured pool
+# reservations of that box are in MEASURED_POOL_GIB (south-4km-ifs-*): 3.21 GiB at 1 window, 5.21 at 2.
+VRAM_PATH = {"fit": {"fixed_pool_gib": 0.0, "per_column_kb": 23.0, "rrtm_mb_per_row_col": 0.34, "fixed_gib": 0.5,
                      "pool_headroom_gib": 0.25},
              "full": {"fixed_pool_gib": 2.5, "per_column_kb": 150.0, "rrtm_mb_per_row_col": 0.59, "fixed_gib": 1.0,
                       "pool_headroom_gib": 1.0}}
@@ -132,7 +138,9 @@ VRAM_PATH = {"fit": {"fixed_pool_gib": 0.0, "per_column_kb": 23.0, "rrtm_mb_per_
 MEASURED_PEAK_GIB = {"nest-286x333-fit-r32": 7.11, "nest-286x333-fit-r4": 5.21, "nest-300km-fit-r32": 2.97,
                      "3060ti-99x100-r32": 2011 / 1024, "3060ti-328x330-r8": 4104 / 1024,
                      "3060ti-360x359-r4": 4178 / 1024, "3060ti-378x377-r16": 5008 / 1024}
-MEASURED_POOL_GIB = {"milton-parent-full-r32": 12.67, "milton-parent-fit-r32": 7.84}
+MEASURED_POOL_GIB = {"milton-parent-full-r32": 12.67, "milton-parent-fit-r32": 7.84,
+                     # forecast pool reservation high-water (forecast receipt pool.reserved_high_gib), 1 h, RTX 4090
+                     "south-4km-ifs-215x251-fit-r32-b1": 3.211, "south-4km-ifs-215x251-fit-r32-b2": 5.213}
 # `woof-nam run` on a card of 64 GiB or more: the whole-run peak of the full path on a whole parent grid, measured on
 # 96 GB cards. The 12 km parent (954 x 835, 796,590 columns) peaks at 58-76 GB, up to about 100 KB per column. The
 # 7.6 km North America grid (1506 x 1318, 1,984,908 columns) cannot be held: on 2026-11-09 the bare door

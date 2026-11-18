@@ -26,7 +26,7 @@ jobs:
 
       - name: CPU import smoke (source tree)
         run: |
-          python -m pip install --quiet numpy
+          python -m pip install --quiet numpy netCDF4
           PYTHONPATH=. python -c "import namgpu, namgpu.config, namgpu.grid; print('import ok', namgpu.__file__)"
           python tests/test_cli.py
           python tests/test_restart_output.py
@@ -38,9 +38,11 @@ jobs:
           python tests/test_basemap.py
           python tests/test_wind_ladder.py
           python tests/test_maps_old_call.py
+          python tests/test_maps_credit_title.py
           python tests/test_pole_frame.py
           python tests/test_seam_frame.py
           python tests/test_maps_dry_window_skip.py
+          python tests/test_maps_edge_rows.py
           python tests/test_nest_twoway_default.py
           python tests/test_products_writer.py
           python tests/test_urban_soilw.py
@@ -55,8 +57,8 @@ jobs:
 
       - name: moving-nest tests (CPU)
         run: |
-          python -m pip install --quiet numpy scipy netCDF4 pytest
-          PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_follow_bocos.py tests/test_follow_door.py tests/test_follow_prepcap.py tests/test_follow_replay.py tests/test_follow_segment.py tests/test_small_card.py tests/test_helpers.py tests/test_memory_path.py tests/test_nest_door.py tests/test_ncep_nests.py tests/test_coupled_tables.py tests/test_soil_cdf_fetch.py tests/test_ptype.py tests/test_products_inventory.py tests/test_tempo_versions.py tests/test_woof_nam_next_rows.py tests/test_suite_card_share.py tests/test_suite_retry.py tests/test_suite_table.py tests/test_products_run_ctx.py tests/test_suite_no_products.py tests/test_hexdep.py tests/test_ruc_bnu_fetch.py tests/test_run_case_missing.py tests/test_products_pipeline.py tests/test_memslp.py tests/test_shm_leftovers.py tests/test_resume_bocos.py tests/test_products_late_rerun_windows.py tests/test_products_q2_mixing_ratio.py tests/test_albase_from_analysis.py tests/test_native_tke_is_q2.py tests/test_products_snowfall_bucket.py tests/test_native_diag_restore.py tests/test_noah_soil_table_ncep.py tests/test_land_cloud.py tests/test_bocos_stream_scope.py tests/test_pools_follow_pinned_cores.py tests/test_card_gate.py tests/test_shm_owner_lock.py tests/test_columns_workers.py tests/test_products_no_card.py tests/test_products_stop_cleanup.py tests/test_run_products_wait.py tests/test_native_land_file.py tests/test_products_conv_vis.py tests/test_run_card_before_wait.py tests/test_products_wait_heartbeat.py tests/test_products_card_release_wait.py tests/test_run_follower_after_checks.py tests/test_static_line.py tests/test_maps_mslet_process.py tests/test_case_land_line.py tests/test_shelter_poisson.py tests/test_hiresf_carriers.py tests/test_pools_long_tmpdir.py tests/test_zero_hour_refl.py
+          python -m pip install --quiet numpy scipy netCDF4 pytest Pillow
+          PYTHONPATH=. python -m pytest -q -p no:cacheprovider tests/test_follow_bocos.py tests/test_follow_door.py tests/test_follow_prepcap.py tests/test_follow_replay.py tests/test_follow_segment.py tests/test_small_card.py tests/test_helpers.py tests/test_memory_path.py tests/test_nest_door.py tests/test_fit_rrtm_batch.py tests/test_ncep_nests.py tests/test_coupled_tables.py tests/test_soil_cdf_fetch.py tests/test_ptype.py tests/test_products_inventory.py tests/test_tempo_versions.py tests/test_woof_nam_next_rows.py tests/test_suite_card_share.py tests/test_suite_retry.py tests/test_suite_table.py tests/test_products_run_ctx.py tests/test_suite_no_products.py tests/test_hexdep.py tests/test_ruc_bnu_fetch.py tests/test_run_case_missing.py tests/test_products_pipeline.py tests/test_memslp.py tests/test_shm_leftovers.py tests/test_resume_bocos.py tests/test_products_late_rerun_windows.py tests/test_products_q2_mixing_ratio.py tests/test_albase_from_analysis.py tests/test_native_tke_is_q2.py tests/test_products_snowfall_bucket.py tests/test_native_diag_restore.py tests/test_noah_soil_table_ncep.py tests/test_land_cloud.py tests/test_bocos_stream_scope.py tests/test_pools_follow_pinned_cores.py tests/test_card_gate.py tests/test_shm_owner_lock.py tests/test_columns_workers.py tests/test_products_no_card.py tests/test_products_stop_cleanup.py tests/test_run_products_wait.py tests/test_native_land_file.py tests/test_products_conv_vis.py tests/test_run_card_before_wait.py tests/test_products_wait_heartbeat.py tests/test_products_card_release_wait.py tests/test_run_follower_after_checks.py tests/test_static_line.py tests/test_maps_mslet_process.py tests/test_case_land_line.py tests/test_shelter_poisson.py tests/test_hiresf_carriers.py tests/test_pools_long_tmpdir.py tests/test_zero_hour_refl.py tests/test_below_ground_t.py tests/test_below_ground_vinterp_reads.py tests/test_boco_audit.py tests/test_catalog_frames.py tests/test_minutes_stall_gefs_credit.py tests/test_fast_frames.py tests/test_fetch_stall.py tests/test_gfs_cloud_water_name.py tests/test_history_merge_claim.py tests/test_lambert_south.py tests/test_lead_start.py tests/test_light_frame_prep.py tests/test_live_move.py tests/test_maps_move_frame_skip.py tests/test_mslet_on_card.py tests/test_nam_static_by_month.py tests/test_ncep_firewx_live_parent.py tests/test_nest_ladder.py tests/test_nest_live_parent_maps.py tests/test_nest_space_ratio.py tests/test_old_years_radiation.py tests/test_open_water_tg.py tests/test_products_lambert_south.py tests/test_ring_fill_pole.py tests/test_sea_ice_column.py tests/test_small_engine_gaps.py tests/test_wind_rotate_coef_fresh.py tests/test_windows.py tests/test_unposted_run.py tests/test_sheet_panel_sizes.py
 
       - name: winter/CAD scorer (Rust reader and station statistics)
         run: |

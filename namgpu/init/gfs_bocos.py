@@ -82,7 +82,8 @@ def source_files(case_dir: Path, start, hours: int, row: dict, cfg=None):
     """[(forecast hour, path)] of a row's boundary files: its cycle age_h older than start (sources.boco_age_h:
     NAMGPU_BOCO_AGE_H, configfile boco_age_h, else the row), every interval_h."""
     from namgpu.init import sources as srcmod
-    b = dict(row["boundary"], age_h=srcmod.boco_age_h(row, cfg, start=start))
+    b = dict(row["boundary"], age_h=srcmod.boco_age_h(row, cfg, start=start),
+             interval_h=srcmod.boundary_interval_h(row))   # a GEFS window past 240 h: every 6 h (window.py)
     # Any whole-hour interval: each boco file carries its own tboco (write_boco), drv-consts reads it from boco.0000
     # and READ_BC opens the next file every tboco / dt steps, as for the parent nests' hourly files (parent_bocos).
     # Was refused unless 3 h (the files carried a fixed tboco = 10800 s); the 6-hourly AI forecasts need 6 h.
@@ -158,6 +159,89 @@ def _record(f, payload: bytes):
     f.write(struct.pack("<i", len(payload)))
 
 
+# What a boundary value can be. A boundary folder is cut once and then read by every later run of that case and domain
+# (run() reuses a folder whose BOCO-SOURCE.json matches), so one file with impossible values poisons all of them.
+# Breakage these bounds prevent: case 2026-11-12_15z's boco.0000 and boco.0003 (12 km Kansas box, written at 22:31Z on
+# 12 Nov by a HRRR 15Z start) held V from -1.07e6 to +1.9e5 m/s on every strip, finite, so the non-finite check let
+# them through and the marker matched; every later start of that case (GFS hour 3, HRRR 15Z) went to NaN in T at step
+# 2. U, T, Q and PD in those files were bit-identical to a good build of the same hour.
+PHYS_BOUNDS = {"PD": (1.0e3, 1.2e5), "T": (150.0, 350.0), "U": (-200.0, 200.0), "V": (-200.0, 200.0)}
+BOCO_FIELDS = ("PD", "T", "Q", "CW", "U", "V")
+
+
+def out_of_bounds(name, a):
+    """(count, lowest, highest) of field `name`'s values outside PHYS_BOUNDS; count 0 when inside or unbounded.
+    numpy or cupy array."""
+    lim = PHYS_BOUNDS.get(name)
+    if lim is None or a.size == 0:
+        return 0, None, None
+    n = int(((a < lim[0]) | (a > lim[1])).sum())
+    return n, float(a.min()), float(a.max())
+
+
+def check_strips(cur, where):
+    """Refuse a boundary time whose strips are non-finite or outside PHYS_BOUNDS, before any file is written."""
+    import cupy as cp
+    bad = {n: int(sum(int((~cp.isfinite(x)).sum()) for x in v)) for n, v in cur.items()}
+    if any(bad.values()):
+        raise RuntimeError(f"{UNIT}: non-finite boundary values at {where}: {bad}")
+    wild = {}
+    for n, v in cur.items():
+        k, lo, hi = out_of_bounds(n, cp.concatenate([x.ravel() for x in v]))
+        if k:
+            wild[n] = f"{k} values from {lo:.4g} to {hi:.4g} (allowed {PHYS_BOUNDS[n][0]:g} to {PHYS_BOUNDS[n][1]:g})"
+    if wild:
+        raise RuntimeError(f"{UNIT}: impossible boundary values at {where}: {wild}")
+
+
+def read_boco(path: Path, im: int, jm: int, lm: int, lnsh: int, lnsv: int) -> dict:
+    """{field: (values at the interval start, values at its end)} of one boco file, flat float32 numpy (slot 1, and
+    slot 1 + tboco x slot 2). The inverse of write_boco for a grid of im x jm x lm with strips lnsh (H) and lnsv (V)."""
+    b = Path(path).read_bytes()
+    recs, o = [], 0
+    while o + 4 <= len(b):
+        n = struct.unpack("<i", b[o:o + 4])[0]
+        recs.append(b[o + 4:o + 4 + n])
+        o += 8 + n
+    if len(recs) != 1 + len(BOCO_FIELDS):
+        raise ValueError(f"{UNIT}: {path}: {len(recs)} records, a boco file has {1 + len(BOCO_FIELDS)}")
+    tboco = np.float32(struct.unpack("<i3iif", recs[0])[-1])
+    out = {}
+    for name, r in zip(BOCO_FIELDS, recs[1:]):
+        w = lnsv if name in ("U", "V") else lnsh
+        nl = 1 if name == "PD" else lm
+        sizes = (nl * w * im, nl * w * im, nl * jm * w, nl * jm * w)     # S, N, W, E; each strip is [2][...]
+        a = np.frombuffer(r, "<f4")
+        if a.size != 2 * sum(sizes):
+            raise ValueError(f"{UNIT}: {path}: {name} has {a.size} values, the grid's strips {2 * sum(sizes)}")
+        s1, s2, o = [], [], 0
+        for k in sizes:
+            s1.append(a[o:o + k])
+            s2.append(a[o + k:o + 2 * k])
+            o += 2 * k
+        v1, v2 = np.concatenate(s1), np.concatenate(s2)
+        out[name] = (v1, v1 + tboco * v2)
+    return out
+
+
+def audit(paths, im, jm, lm, lnsh, lnsv) -> str:
+    """'' when every boco file in paths holds finite values inside PHYS_BOUNDS at both ends of its interval, else
+    one line naming the first file and field that does not (what run() prints before rebuilding the folder)."""
+    for p in paths:
+        try:
+            got = read_boco(p, im, jm, lm, lnsh, lnsv)
+        except (OSError, ValueError, struct.error) as e:
+            return f"{Path(p).name} cannot be read as this grid's boundary file ({e})"
+        for name, ends in got.items():
+            for a in ends:
+                if not np.isfinite(a).all():
+                    return f"{Path(p).name} holds non-finite {name}"
+                k, lo, hi = out_of_bounds(name, a)
+                if k:
+                    return f"{Path(p).name} holds {name} from {lo:.4g} to {hi:.4g} at {k} points"
+    return ""
+
+
 def write_boco(path: Path, t0, old, new, tboco: float = TBOCO):
     """One boco file: slot 1 = old, slot 2 = (new - old) / tboco, in NPS record order (tboco 10800 s for GFS;
     the parent source can write 3600 s intervals, parent_bocos.py)."""
@@ -219,7 +303,7 @@ def _build(ctx, hours, out_dir, log, from_hour, generation, only):
     bname, brow = boundary_row(ctx)
     rec = srec.boundary_table(brow)
     age_h = srcmod.boco_age_h(brow, cfg, start=ctx.start)
-    interval_h = int(brow["boundary"]["interval_h"])
+    interval_h = srcmod.boundary_interval_h(brow)      # the row's, or a GEFS window's 6 h (window.py)
     files = source_files(ctx.case_dir, ctx.start, hours, brow, cfg)
     if from_hour:
         if int(from_hour) % interval_h:
@@ -273,9 +357,7 @@ def _build(ctx, hours, out_dir, log, from_hour, generation, only):
         del dec
         ahead[k] = None
         cur = strips(st, lm, lnsh, lnsv)
-        bad = {n: int(sum(int((~cp.isfinite(x)).sum()) for x in v)) for n, v in cur.items()}
-        if any(bad.values()):
-            raise RuntimeError(f"{UNIT}: non-finite boundary values at +{fh} h: {bad}")
+        check_strips(cur, f"+{fh} h ({Path(path).name})")
         # with `only`, two times in a row can be the ends of two different intervals (a gap between them): no file
         if prev is not None and fh - files[k - 1][0] == interval_h and (only is None or files[k - 1][0] in only):
             t0 = ctx.start + timedelta(hours=files[k - 1][0])
@@ -326,7 +408,7 @@ def resume_check(ctx, from_fhr: float, hours: float, log=print, build_fn=None) -
             parent_bocos.build(ctx, int(hours + 0.999), out_dir)
         return []
     bname, brow = boundary_row(ctx)
-    interval = int(brow["boundary"]["interval_h"])
+    interval = srcmod.boundary_interval_h(brow)
     total = bc_hours(hours, interval)
     bdir = Path(getattr(ctx, "boco_dir", None) or boco_dir(ctx))
     first = int(float(from_fhr) // interval) * interval
@@ -377,7 +459,7 @@ def run(ctx, hours: int | None = None):
         return out_dir
     from namgpu.domains import bc_hours
     bname, row = boundary_row(ctx)
-    age_h, interval_h = srcmod.boco_age_h(row, ctx.cfg, start=ctx.start), int(row["boundary"]["interval_h"])
+    age_h, interval_h = srcmod.boco_age_h(row, ctx.cfg, start=ctx.start), srcmod.boundary_interval_h(row)
     hours = bc_hours(hours, interval_h)   # 3-hourly GFS steps: a 7 h run reads boco.0006, so it needs GFS to +9 h
     out_dir = boco_dir(ctx)
     want = [out_dir / f"boco.{fh:04d}" for fh in range(0, hours, interval_h)]
@@ -401,6 +483,10 @@ def run(ctx, hours: int | None = None):
         diff = [k for k, v in want_m.items() if have.get(k, "gfs" if k == "source" else None) != v]
         same = not diff
         why = "; ".join(f"{k} {have.get(k)} -> {want_m[k]}" for k in diff)
+    if same and all(p.is_file() for p in want):
+        g = ctx.grid
+        why = audit(want, int(g.im), int(g.jm), int(g.lm), int(ctx.cfg.lnsh), int(ctx.cfg.lnsv))
+        same = not why
     if not same:
         print(f"{UNIT}: {out_dir.name} does not match this run ({why}): rebuilding", flush=True)
     if not same or not all(p.is_file() for p in want):

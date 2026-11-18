@@ -67,6 +67,18 @@ RENDERER_ENV = "NAMGPU_RENDERER"     # full path of an rw_wrfbatch that draws da
 from namgpu import paths as _paths  # noqa: E402
 PINNED_RENDERER = (_paths.checkout_root() or _paths.work_root()) / "tools" / "renderer" / "bin" / "rw_wrfbatch"
 FRAME_PAD = 0.03                     # fraction of the domain span added on each side of the frame
+# BOUNDARY ROWS. The outer rows of a WOOF-NAM grid are not the model's forecast: every step NMMB's BOCOH and BOCOV
+# (namgpu/boundary, module_FLTBNDS) write the start's boundary values into the LNSH (H) and LNSV (V) rows on each
+# side, weighted 1.0 at the edge to 0.1 at row LNSH, so those rows hold the GFS/IFS/ERA5 fields, and the rows just
+# inside them hold the model's adjustment to that seam. Every map is drawn on the grid less EDGE_ROWS_EXTRA rows
+# past LNSH on each side (edge_rows, trim_edges); the history, GRIB2 and column store keep every row.
+# Breakage it prevents: a box's maps showed a band of stronger 10 m wind along its edges and a warm strip along its
+# west edge (3 km box over the southern Plains from GFS 2026-11-13 00Z, 24 h). In that run: east edge at +3 h
+# 9.3-10.0 kt in the outer five rows against 4.0-5.0 kt from the seventh in; against METARs (hours 1-20) the outer
+# five rows were +7.6 F and +4.1 kt (60 pairs), rows 30 and more in +0.2 F and -0.4 kt (691).
+EDGE_ROWS_LNSH = 5                   # nam_configfile lnsh: a history written before it carried LNSH
+EDGE_ROWS_EXTRA = 2                  # rows inside LNSH the seam's adjustment shows in (row LNSH+1 halfway, LNSH+2 a dip)
+EDGE_ROWS_MIN_KEEP = 4               # a grid under (2 x rows + 4 x this) points a side is drawn whole (tests' grids)
 
 # The 1 h precipitation ladder (in), as the CF table's "scale" (the renderer takes exactly ten edges, nine colour
 # bands). Amounts under the first edge are left blank. The edges are (near) evenly spaced because rw_wrfbatch draws
@@ -181,6 +193,18 @@ NEEDS = {"composite_reflectivity": ("COMPOSITE",), "t2m": ("T2",), "d2m": ("Q2",
 WINDOW_H = {"qpf_1h": 1, "qpf_6h": 6}   # accumulation products: hours back to the frame they difference
 
 
+def mrms_file(folder: Path, valid) -> Path | None:
+    """The case's MRMS composite for this frame's overlay, or None. The case holds one file a whole hour
+    (mrms_refc_YYYYmmddHH.grib2), so a frame off the hour has none and is drawn without the overlay. Breakage it
+    prevents: a 5-minute frame took its hour's file, the renderer refused it as more than 120 s from the frame
+    ("no accepted observation for 2026-11-12T18:05:00"), and the run's maps ended MAPS ERROR, rc 1 (a 5-minute
+    output run, 2026-11-13)."""
+    if valid.minute or valid.second:
+        return None
+    src = Path(folder) / f"mrms_refc_{valid:%Y%m%d%H}.grib2"
+    return src if src.is_file() else None
+
+
 def _parse(argv):
     from namgpu.cli import HelpFormatter
     ap = argparse.ArgumentParser(
@@ -195,6 +219,9 @@ def _parse(argv):
     ap.add_argument("--out", type=Path, required=True, help="output folder; maps go to <out>/<product>/")
     ap.add_argument("--products", default=DEFAULT_PRODUCTS, help=f"comma list (default {DEFAULT_PRODUCTS})")
     ap.add_argument("--frames", default="all", help="which history frames to draw (default all)")
+    ap.add_argument("--only", default=None, metavar="NAMES",
+                    help="draw only these history files (a comma list of file names); the others are read only for the "
+                         "rain maps' differences (a run's carrier frames, namgpu/outputs.py)")
     ap.add_argument("--width", type=int, default=1200, help="image width in pixels (default 1200)")
     ap.add_argument("--height", type=int, default=900, help="image height in pixels (default 900)")
     ap.add_argument("--mrms", type=Path, default=None, help="folder of mrms_refc_YYYYmmddHH.grib2 (overlay)")
@@ -351,7 +378,7 @@ def legacy_frame(frame) -> tuple | None:
 
 # Installed gpuwm renderers that accept a frame across 180 but draw it wrong: gpuwm 2.9.12's rw_wrfbatch paints a
 # curvilinear domain across 180 from the wrong neighbours, every row smeared east-west (2026-11-05, published wheel:
-# a CONUS window moved across 180, drawn beside the same window unmoved). tools/renderer/01-cf_grid-recenter-order.patch
+# a CONUS window moved across 180, drawn beside the same window unmoved). tools/renderer/01-cf_grid-curvilinear-mesh.patch
 # fixes it in the pinned build; raise this bound when a released gpuwm carries that fix.
 SEAM_SMEAR_UPTO = (2, 9, 12)
 
@@ -408,9 +435,78 @@ def credit_note() -> str | None:
     return f"data: {c}" if c else None
 
 
-def panel_title(field: str, start: datetime, valid: datetime) -> str:
-    fh = int(round((valid - start).total_seconds() / 3600))
-    return f"{field}  init {start:%Y-%m-%d %H}Z  valid {valid:%Y-%m-%d %H}Z (+{fh}h)"
+# CREDIT ON A PIP INSTALL. The subtitle note is drawn only by a renderer with the note patch: the pinned build
+# (tools/renderer/bin in a checkout) or one named in NAMGPU_RENDERER. gpuwm's own renderer, the one a plain
+# `pip install recast-woof-nam` draws with (gpuwm 2.9.13), ignores a CF row's "note" and has no other line a CF map
+# carries words on (a theme's text.source_label does not reach the CF route), so its maps from a CC BY start (ECMWF
+# IFS, ERA5) or with CC BY statics (SoilGrids, ERA5 soil temperature) carried no credit at all (seen on the
+# hour-201 proof maps, 2026-11-12, and every box from IFS). On such a renderer the credit goes on the title line,
+# whole, and the run's own words give way so "<label> | <title>" keeps within TITLE_LINE_MAX: that line is cut with
+# "..." past about 1,075 px of a 1,200 px map (117 characters cut, 104 drawn whole, measured with gpuwm 2.9.13 on
+# 2026-11-13).
+TITLE_LINE_MAX = 108
+
+
+def note_drawn() -> bool:
+    """Whether the renderer maps are drawn with here draws a CF row's subtitle note (the pinned build, or the one
+    NAMGPU_RENDERER names, as seam_defect trusts them); else the credit goes on the title (credited_title)."""
+    return bool(os.environ.get(RENDERER_ENV)) or PINNED_RENDERER.is_file()
+
+
+def credited_title(label: str, field: str, start: datetime, valid: datetime, note: str,
+                   words: str | None = None) -> str:
+    """The panel title with `note` (the credit) after it, for a renderer that draws no note: panel_title's whole line
+    when "<label> | <title> · <note>" fits TITLE_LINE_MAX, else without the valid time (the subtitle draws it), else
+    the field, start words and lead, else the field and lead, else the field. The note is never shortened."""
+    mins = int(round((valid - start).total_seconds() / 60))
+    lead = f"(+{mins // 60}h{mins % 60:02d}m)" if mins % 60 else f"(+{mins // 60}h)"
+    words = start_words() if words is None else words
+    heads = (panel_title(field, start, valid, words), f"{field}  init {start:%Y-%m-%d %H}Z{words} {lead}",
+             f"{field}{words} {lead}", f"{field} {lead}", field)
+    head = next((h for h in heads if len(f"{label} | {h} · {note}") <= TITLE_LINE_MAX), field)
+    return f"{head} · {note}"
+
+
+def start_words() -> str:
+    """' from GFS hour 201' for a run started from a forecast hour of its GFS run (the door's NAMGPU_START_LEAD_H),
+    else ''. It goes in every panel's title, short: such a start is a forecast, not an analysis, and the map must
+    say so by itself; the subtitle note (credit_note) is drawn only by a renderer with the note patch."""
+    try:
+        lead = int(os.environ.get("NAMGPU_START_LEAD_H") or 0)
+    except ValueError:
+        lead = 0
+    src = (os.environ.get("NAMGPU_START_SOURCE") or "gfs").strip().lower()
+    if src == "gefs":
+        # a GEFS window starts from a forecast hour of its run: the run age is that hour (window.env_for)
+        try:
+            age = int(os.environ.get("NAMGPU_BOCO_AGE_H") or 0)
+        except ValueError:
+            age = 0
+        return f" from GEFS hour {age}" if age > 0 else ""
+    if lead > 0 and src not in ("gfs", "parent", "auto"):
+        # rap, hrrr, rrfs at a time that is not a GFS cycle: their own analysis, the GFS forecast hour around it
+        return f" from {src.upper()}, GFS hour {lead} around it"
+    return f" from GFS hour {lead}" if lead > 0 else ""
+
+
+def lead_words(start: datetime, valid: datetime) -> str:
+    """The lead in a caller's title: "+3 h" on the whole hour, "+1h35m" off it.
+    Breakage it prevents: a 5-minute frame's title read "init 2026-11-12 18Z +1.58333 h" (a 5-minute output run)."""
+    mins = int(round((valid - start).total_seconds() / 60))
+    if mins % 60:
+        return f"+{mins // 60}h{mins % 60:02d}m"
+    return f"+{(valid - start).total_seconds() / 3600:g} h"
+
+
+def panel_title(field: str, start: datetime, valid: datetime, words: str | None = None) -> str:
+    """The panel's title line. words: what follows the init time (default start_words(): the run's own start). A frame
+    off the hour (woof-nam run --write 30m) says its minutes: valid 21:30Z (+3h30m)."""
+    mins = int(round((valid - start).total_seconds() / 60))
+    words = start_words() if words is None else words
+    if mins % 60:
+        return (f"{field}  init {start:%Y-%m-%d %H}Z{words}  valid {valid:%Y-%m-%d %H:%M}Z "
+                f"(+{mins // 60}h{mins % 60:02d}m)")
+    return f"{field}  init {start:%Y-%m-%d %H}Z{words}  valid {valid:%Y-%m-%d %H}Z (+{mins // 60}h)"
 
 
 def cf_row(product: str, title: str, note: str | None = None, scale: dict | None = None) -> dict:
@@ -457,17 +553,49 @@ def _times(path: Path):
         return datetime.strptime(t, "%Y-%m-%d_%H:%M:%S"), datetime.strptime(nc.START_DATE, "%Y-%m-%d_%H:%M:%S")
 
 
-def _read(path: Path, names=None):
+LEVEL_PA = {"wind850": 85000.0}   # the one pressure level a map draws (fields_for: _at_pressure)
+TRIMMED = ("U", "V", "PRES")      # the 3-D fields a map reads only up to that level
+
+
+def _levels_to(v, target):
+    """How many model levels (from the ground up) hold every column's crossing of pressure `target` (Pa): up to and
+    including the first level whose highest pressure is at or above it in height (PRES <= target everywhere). Read one
+    level at a time, so the levels above it are never decompressed. _at_pressure on those levels gives the same value
+    as on the whole column: every column's first level at or above the target is inside them."""
+    pres = v["PRES"]
+    n = pres.shape[1]
+    for k in range(n):
+        if float(np.max(pres[0, k])) <= target:
+            return max(k + 1, 2)
+    return n
+
+
+def _read(path: Path, names=None, upto_pa=None):
     """(valid, start, {name: array}) of one history frame; with `names`, only those variables (a frame is
-    ~1 GB of 3-D fields and the maps need a handful of 2-D ones)."""
+    ~1 GB of 3-D fields and the maps need a handful of 2-D ones). With `upto_pa` (Pa), the 3-D U, V and PRES are read
+    only up to the level that holds every column's crossing of that pressure (_levels_to): a light frame's 850 hPa
+    wind needs about a quarter of the column, and decompressing the whole column was most of a frame's read time.
+    Read as stored (float32, no masked arrays), then widened to float64, exactly, so the maps' arithmetic is the
+    same as before."""
     import netCDF4  # noqa: PLC0415
     with netCDF4.Dataset(path) as nc:
+        nc.set_auto_mask(False)
         v = nc.variables
         t = "".join(c.decode() for c in nc.variables["Times"][0])
         valid = datetime.strptime(t, "%Y-%m-%d_%H:%M:%S")
         start = datetime.strptime(nc.START_DATE, "%Y-%m-%d_%H:%M:%S")
-        get = {n: np.asarray(v[n][0], dtype=np.float64) for n in v
-               if n not in ("Times", "XTIME") and v[n].dimensions[0] == "Time" and (names is None or n in names)}
+        want = [n for n in v if n not in ("Times", "XTIME") and v[n].dimensions[0] == "Time"
+                and (names is None or n in names)]
+        top = None
+        if upto_pa is not None and "PRES" in v and any(n in TRIMMED for n in want):
+            top = _levels_to(v, upto_pa)
+        get = {}
+        for n in want:
+            if top is not None and n in TRIMMED and v[n].ndim == 4:
+                a = v[n][0, :top]
+            else:
+                a = v[n][0]
+            get[n] = np.asarray(a, dtype=np.float64)
     return valid, start, get
 
 
@@ -552,6 +680,28 @@ def _write_cf(path, lat, lon, valid, fields, label):
             v[0] = arr.astype(np.float32)
 
 
+def edge_rows(path) -> int:
+    """Rows to leave off each side of a history frame's maps (BOUNDARY ROWS): the history's LNSH (written since
+    woof-nam 0.2.2; EDGE_ROWS_LNSH before) plus EDGE_ROWS_EXTRA."""
+    lnsh = EDGE_ROWS_LNSH
+    try:
+        import netCDF4  # noqa: PLC0415
+        with netCDF4.Dataset(path) as nc:
+            if "LNSH" in nc.ncattrs():
+                lnsh = int(nc.getncattr("LNSH"))
+    except (OSError, ImportError):
+        pass                                   # not a file here (a test's stand-in): the configfile's lnsh
+    return max(0, int(lnsh)) + EDGE_ROWS_EXTRA
+
+
+def trim_edges(a, n: int):
+    """The 2-D (or trailing-2-D) array without its n outer rows and columns; whole when the grid is too small."""
+    a = np.asarray(a)
+    if n <= 0 or min(a.shape[-2:]) < 2 * n + 4 * EDGE_ROWS_MIN_KEEP:
+        return a
+    return a[..., n:-n, n:-n]
+
+
 def _follow_of(path):
     """FOLLOW_* attributes of a history file (namgpu.nest.window.read_follow), None for a static run."""
     import netCDF4  # noqa: PLC0415
@@ -575,7 +725,12 @@ def _mslet(path, work, save=False):
     import netCDF4  # noqa: PLC0415
     from namgpu.products import memslp  # noqa: PLC0415
     with netCDF4.Dataset(path) as nc:
-        a = memslp.from_history(nc)
+        if "MSLET" in nc.variables:
+            # the forecast wrote this time's MSLET itself (memslp on its own state): no second relaxation here
+            a = np.asarray(nc.variables["MSLET"][0], dtype=np.float32)
+            a = np.asarray(np.ma.getdata(a), dtype=np.float32)
+        else:
+            a = memslp.from_history(nc)
     if save and a is not None:
         np.save(out, a)
     return a
@@ -648,7 +803,8 @@ def _prep_frame(job):
     if old_call:
         prev_paths = {1: prev_paths} if prev_paths is not None else {}
     path = Path(path)
-    valid, start, f = _read(path, set(need))
+    lv = [LEVEL_PA[p] for p in products if p in LEVEL_PA]
+    valid, start, f = _read(path, set(need), max(lv) if len(set(lv)) == 1 else None)
     if "mslp" in products:
         f["MSLET"] = _mslet(path, work)
     prevs = {}
@@ -667,13 +823,20 @@ def _prep_frame(job):
     lat, lon = f.get("XLAT"), f.get("XLONG")
     if lat is None or lon is None:
         raise RuntimeError(f"woof-nam maps: {path.name} has no XLAT/XLONG")
+    n = edge_rows(path)                        # BOUNDARY ROWS: the maps leave the boundary rows off
+    lat, lon = trim_edges(lat, n), trim_edges(lon, n)
+    flds = {k: (trim_edges(v, n), u) for k, (v, u) in flds.items()}
+    for prod in products:                      # rain only in the boundary rows: a dry window, as fields_for says
+        var = TABLE[prod][0]
+        if prod in WINDOW_H and var in flds and not np.isfinite(flds[var][0]).any():
+            del flds[var]
+            sk.append((prod, f"{path.name}: dry window inside the boundary rows, no point at the first edge"))
     if old_call:
         if not flds:
             return None, valid, start, [], sk
         lon = (lon + 180.0) % 360.0 - 180.0
         cf = Path(work) / f"namgpu_{valid:%Y%m%d%H%M}.nc"
-        _write_cf(cf, lat, lon, valid, flds,
-                  f"{label}, init {start:%Y-%m-%d %HZ} +{(valid - start).total_seconds() / 3600:g} h")
+        _write_cf(cf, lat, lon, valid, flds, f"{label}, init {start:%Y-%m-%d %HZ} {lead_words(start, valid)}")
         return str(cf), valid, start, sorted(flds), sk
     frame = frame_bounds(lat, lon)
     if not flds:
@@ -683,7 +846,11 @@ def _prep_frame(job):
     _write_cf(cf, lat, lon, valid, flds, label)
     table = Path(work) / f"cf-table_{valid:%Y%m%d%H%M}.json"
     note = credit_note()
-    table.write_text(json.dumps([cf_row(p, panel_title(TABLE[p][1]["title"], start, valid), note,
+    # CREDIT ON A PIP INSTALL: the credit itself on the title (the note says "data: " before it; the title has no room)
+    on_title = os.environ.get(CREDIT_ENV, "").strip() if note and not note_drawn() else None
+    table.write_text(json.dumps([cf_row(p, credited_title(label, TABLE[p][1]["title"], start, valid, on_title)
+                                        if on_title else panel_title(TABLE[p][1]["title"], start, valid),
+                                        None if on_title else note,
                                         wind_row_scale(p, flds.get(TABLE[p][0], (None,))[0])) for p in products]))
     return str(cf), valid, start, sorted(flds), sk, str(table), frame
 
@@ -724,7 +891,10 @@ def render(argv=None) -> dict:
             from namgpu.nest import window  # noqa: PLC0415
             gens = window.gens_from_frames(fols)
     preps = []
+    only = {s.strip() for s in a.only.split(",") if s.strip()} if a.only else None
     for k in range(first, len(files)):
+        if only is not None and Path(files[k]).name not in only:
+            continue
         back = {n: str(by_valid[valids[k] - timedelta(hours=n)]) for n in windows
                 if (valids[k] - timedelta(hours=n)) in by_valid}
         preps.append((str(files[k]), back, sorted(need), products, str(work), label)
@@ -788,8 +958,8 @@ def render(argv=None) -> dict:
                 continue
             obs = None
             if prod == "composite_reflectivity" and a.mrms is not None and _overlaps(fr, mrms_region):
-                src = a.mrms / f"mrms_refc_{valid:%Y%m%d%H}.grib2"
-                if src.is_file():
+                src = mrms_file(a.mrms, valid)
+                if src is not None:
                     obs = work / f"MRMS_MergedReflectivityQCComposite_00.50_{valid:%Y%m%d-%H}0000.grib2"
                     if not obs.exists():
                         obs.symlink_to(src.resolve())

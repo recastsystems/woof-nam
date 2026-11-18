@@ -136,12 +136,14 @@ def update_points(i_ps: int, j_ps: int, ratio: int, im_c: int, jm_c: int, n_blen
 class Coupler:
     """Device tables and launches for one parent/nest pair. Every launch is on the (shared) stream; nothing syncs."""
 
-    def __init__(self, ctx_p, ctx_c, ratio: int, i_ps: int, j_ps: int, two_way: bool, wgt: float = 1.0):
+    def __init__(self, ctx_p, ctx_c, ratio: int, i_ps: int, j_ps: int, two_way: bool, wgt: float = 1.0,
+                 sratio: int | None = None):
         import cupy as cp
         from namgpu import kernels
         self.cp, self.kernels = cp, kernels
         self.p, self.c = ctx_p, ctx_c
-        self.ratio, self.i_ps, self.j_ps = int(ratio), int(i_ps), int(j_ps)
+        self.ratio, self.i_ps, self.j_ps = int(ratio), int(i_ps), int(j_ps)   # ratio: nest steps per parent step
+        self.sratio = int(sratio) if sratio else space_ratio(ctx_p.cfg, ctx_c.cfg)   # the grids' ratio
         self.two_way, self.wgt = bool(two_way), float(wgt)
         gp, gc = ctx_p.grid, ctx_c.grid
         self.imp, self.jmp, self.lm = int(gp.im), int(gp.jm), int(gp.lm)
@@ -168,14 +170,14 @@ class Coupler:
             return cp.asarray(np.ascontiguousarray(x))
         # parent -> nest boundary tables
         ri, rj = ring_points(self.imc, self.jmc, max(lnsh, lnsv))
-        iw, js, w = interp_factors(i_ps, j_ps, ratio, ri, rj, False)
+        iw, js, w = interp_factors(i_ps, j_ps, self.sratio, ri, rj, False)
         self._check_parent(iw, js, 1, "boundary H")
         self.ring = [dev(ri), dev(rj), dev(iw), dev(js), dev(w), len(ri)]
         hi, hj, hs, ho, hl = strip_points(self.imc, self.jmc, lnsh, False)
-        iw, js, w = interp_factors(i_ps, j_ps, ratio, hi, hj, False)
+        iw, js, w = interp_factors(i_ps, j_ps, self.sratio, hi, hj, False)
         self.h = [dev(hi), dev(hj), dev(iw), dev(js), dev(w), dev(hs), dev(ho), dev(hl), len(hi)]
         vi, vj, vs, vo, vl = strip_points(self.imc, self.jmc, lnsv, True)
-        iw, js, w = interp_factors(i_ps, j_ps, ratio, vi, vj, True)
+        iw, js, w = interp_factors(i_ps, j_ps, self.sratio, vi, vj, True)
         self._check_parent(iw, js, 2, "boundary V")
         self.v = [dev(vi), dev(vj), dev(iw), dev(js), dev(w), dev(vs), dev(vo), dev(vl), len(vi)]
         self.pdb = cp.zeros((self.jmc, self.imc), cp.float32)
@@ -184,11 +186,11 @@ class Coupler:
         self.npts = 0
         self.region = None
         if self.two_way:
-            st = STENCILS["even" if ratio % 2 == 0 else "odd"]
+            st = STENCILS["even" if self.sratio % 2 == 0 else "odd"]
             self.nst_h, self.nst_v, self.nst_sfc = st[0], st[1], st[2]
-            pi, pj, self.region = update_points(i_ps, j_ps, ratio, self.imc, self.jmc, lnsh, self.imp, self.jmp)
-            ich = (pi - i_ps) * ratio                  # (I - I_SW)*RATIO + 1, 0-based
-            jch = (pj - j_ps) * ratio
+            pi, pj, self.region = update_points(i_ps, j_ps, self.sratio, self.imc, self.jmc, lnsh, self.imp, self.jmp)
+            ich = (pi - i_ps) * self.sratio                  # (I - I_SW)*RATIO + 1, 0-based
+            jch = (pj - j_ps) * self.sratio
             self._check_stencils(ich, jch)
             self.npts = len(pi)
             self.up = [dev(pi - 1), dev(pj - 1), dev(ich), dev(jch)]
@@ -204,7 +206,7 @@ class Coupler:
                              f"{self.imp}, {js.min()}..{js.max()} of {self.jmp})")
 
     def _check_stencils(self, ich, jch):
-        half_v = self.ratio // 2
+        half_v = self.sratio // 2
         lo_h, hi_h = self.nst_h // 2, self.nst_h - 1 - self.nst_h // 2
         lo_v = self.nst_v // 2
         bad = (ich.min() - lo_h < 0 or jch.min() - lo_h < 0 or ich.max() + hi_h >= self.imc or jch.max() + hi_h >= self.jmc
@@ -259,7 +261,7 @@ class Coupler:
         gx = (self.npts + BLOCK - 1) // BLOCK
         K.get(UNIT_2WAY, "nest_2way_gen")((gx, self.lm, len(FEEDBACK)), (BLOCK,), (
             c["T"], c["Q"], c["CW"], c["U"], c["V"], i32(self.imc), i32(self.jmc), i32(self.lm),
-            i32(self.npts), ich, jch, i32(self.ratio // 2), i32(self.nst_h), i32(self.nst_v), self.buf))
+            i32(self.npts), ich, jch, i32(self.sratio // 2), i32(self.nst_h), i32(self.nst_v), self.buf))
         K.get(UNIT_2WAY, "nest_2way_sfc")((gx,), (BLOCK,), (
             c["FIS"], c["PD"], i32(self.imc), i32(self.npts), ich, jch, i32(self.nst_sfc), self.sfc))
         self.have_feedback = True
@@ -276,7 +278,7 @@ class Coupler:
             self.buf, self.sfc, f32(self.wgt)))
 
     def receipt(self) -> dict:
-        r = {"ratio": self.ratio, "i_parent_start": self.i_ps, "j_parent_start": self.j_ps, "two_way": self.two_way,
+        r = {"ratio": self.ratio, "space_ratio": self.sratio, "i_parent_start": self.i_ps, "j_parent_start": self.j_ps, "two_way": self.two_way,
              "boundary_points": {"psfc_ring": self.ring[-1], "h": self.h[-1], "v": self.v[-1]}}
         if self.two_way:
             r.update(wgt_child=self.wgt, update_points=self.npts, update_region_parent_1based=self.region,
@@ -310,6 +312,20 @@ def _ctx(cfgfile: Path, init_dir: Path, stream, out: Path, case_dir: Path, start
     with stream:
         drv_loop_limits.run(ctx)
     return ctx, drv, load
+
+
+def space_ratio(cfg_p, cfg_c) -> int:
+    """PARENT_CHILD_SPACE_RATIO: the parent's grid spacing over the nest's (configfile parent_child_space_ratio, which
+    domain.nest_grid_associated and the NCEP rows write; else dlmd_parent / dlmd_nest). It is not the time ratio: NAM's
+    fire-weather nest is space ratio 2 and time ratio 3 (6+1/4 s / 2+1/12 s) in the 3 km nest, and a 1.5 km nest in a
+    12 km parent is space 8 and time 12. Breakage it prevents: the boundary interpolation and the two-way stencils took
+    the time ratio as the space ratio, so a 12 -> 1.5 km nest read its boundary values from a parent box 2/3 of the
+    nest's size, anchored at its SW corner (2026-11-18)."""
+    v = cfg_c.raw.get("parent_child_space_ratio")
+    q = float(v) if v not in (None, "") else float(cfg_p.dlmd) / float(cfg_c.dlmd)
+    if abs(q - round(q)) > 1e-6 or round(q) < 1:
+        raise SystemExit(f"nest: the space ratio {q} (parent / nest spacing) is not a whole number")
+    return int(round(q))
 
 
 def _ratio(cfg_p, cfg_c) -> int:
@@ -375,9 +391,10 @@ def main(argv=None) -> int:
         ctx.restart_writer = None
     rec["grids"] = {"parent": [int(ctx_p.grid.im), int(ctx_p.grid.jm), int(ctx_p.grid.lm)],
                     "nest": [int(ctx_c.grid.im), int(ctx_c.grid.jm), int(ctx_c.grid.lm)]}
-    rec["dt"] = {"parent": float(ctx_p.cfg.dt), "nest": float(ctx_c.cfg.dt), "ratio": ratio}
+    rec["dt"] = {"parent": float(ctx_p.cfg.dt), "nest": float(ctx_c.cfg.dt), "ratio": ratio,
+                 "space_ratio": space_ratio(ctx_p.cfg, ctx_c.cfg)}
     print(f"two-way: parent {rec['grids']['parent']} dt {ctx_p.cfg.dt:g} s, nest {rec['grids']['nest']} dt "
-          f"{ctx_c.cfg.dt:g} s, ratio {ratio}, SW corner on parent H ({i_ps}, {j_ps}), feedback "
+          f"{ctx_c.cfg.dt:g} s, ratio {ratio} in time and {space_ratio(ctx_p.cfg, ctx_c.cfg)} in space, SW corner on parent H ({i_ps}, {j_ps}), feedback "
           f"{'on, w ' + str(a.wgt) if a.two_way else 'off (concurrent one-way)'}", flush=True)
 
     hours_log = []

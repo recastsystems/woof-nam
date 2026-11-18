@@ -22,8 +22,9 @@ gathers them (every rank packs the ones it owns, one allgather per parent step p
 a window of the parent that covers the nest's boundary frame, and runs the one-card boundary kernels on the window, so
 each rank fills its own boundary rows with the same bits one card would. NMMB moves the same values by MPI between the
 parent's and the child's task sets (PARENTS_SEND_CHILD_DATA / CHILDREN_RECV_PARENT_DATA; not ported).
-Not here: two-way feedback on several cards (NCEP's nests were one-way; one card: namgpu/nest/twoway.py --two-way),
-moving nests (the NAM nests did not move).
+Not here: two-way feedback on several cards (NCEP's nests were one-way; one card: namgpu/nest/twoway.py --two-way).
+A plan entry with "move" is a storm-following nest that re-centres on the storm inside this live parent, in this process
+(namgpu/nest/live_move.py; one card, no nest inside it); without "move" nothing here changes.
 
 Output: <out>/<name>/wrfout_d01_* per domain (an ordinary run folder each), <out>/coupled-receipt.json (and
 coupled-receipt.r<rank>.json): load, TDFI, ms per parent step with the nests' steps, the sampled split per stage
@@ -134,13 +135,14 @@ class WindowCoupler:
     nest_bc kernels on the window (ring PSFC on every rank for the whole ring, H/V strips for this rank's own strip
     rows: S on the south rank, N on the north rank, W/E for the local memory rows)."""
 
-    def __init__(self, ctx_p, ctx_c, ratio: int, i_ps: int, j_ps: int):
+    def __init__(self, ctx_p, ctx_c, ratio: int, i_ps: int, j_ps: int, sratio: int | None = None):
         import cupy as cp
         from namgpu import kernels, parallel, slab as slabmod
         from namgpu.nest import twoway as tw
         self.cp, self.K = cp, kernels
         self.p, self.c = ctx_p, ctx_c
-        self.ratio, self.i_ps, self.j_ps = int(ratio), int(i_ps), int(j_ps)
+        self.ratio, self.i_ps, self.j_ps = int(ratio), int(i_ps), int(j_ps)   # ratio: nest steps per parent step
+        self.sratio = int(sratio) if sratio else tw.space_ratio(ctx_p.cfg, ctx_c.cfg)   # the grids' ratio
         sp, sc = slabmod.of(ctx_p), slabmod.of(ctx_c)
         self.comm = parallel.get(ctx_p)
         if (sp is None) != (sc is None) or (sp is not None and sp.nranks != sc.nranks):
@@ -167,7 +169,7 @@ class WindowCoupler:
         lnsh, lnsv = int(ctx_c.cfg.lnsh), int(ctx_c.cfg.lnsv)
         self.recip = np.float32(1.0) / np.float32(np.float32(ctx_c.cfg.dt) * np.float32(self.ratio))
 
-        t = tables(self.imp, self.jmpg, self.jmpl, self.imc, self.jmcg, self.jmcl, i_ps, j_ps, ratio, lnsh, lnsv,
+        t = tables(self.imp, self.jmpg, self.jmpl, self.imc, self.jmcg, self.jmcl, i_ps, j_ps, self.sratio, lnsh, lnsv,
                    self.nranks, self.rank)
         self.t = t
         if sc is not None and t["joff_c"] != sc.joff:
@@ -268,7 +270,8 @@ class WindowCoupler:
                 self.pdb, i32(self.imc), i32(n), ic, jc, iw, js, w, sd, off, self.vptr, ls, f32(self.recip)))
 
     def receipt(self) -> dict:
-        return {"ratio": self.ratio, "i_parent_start": self.i_ps, "j_parent_start": self.j_ps, "two_way": False,
+        return {"ratio": self.ratio, "space_ratio": self.sratio, "i_parent_start": self.i_ps,
+                "j_parent_start": self.j_ps, "two_way": False,
                 "boundary_points": {"psfc_ring": self.ring[-1], "h_local": self.h[-1], "v_local": self.v[-1]},
                 "window": {"i0": self.i0w, "j0": self.j0w, "iw": self.iww, "jw": self.jww,
                            "mib": round((2 + 5 * self.lm) * self.wplane * 4 / 2**20, 1)},
@@ -290,6 +293,8 @@ class Domain:
         self.children: list = []
         self.ctx = self.drv = self.cpl = None
         self.ratio = 1
+        self.move = spec.get("move")          # a storm-following nest (namgpu/nest/live_move.py), else None
+        self.mover = None
 
 
 def _build(dom: Domain, stream, comm, rank: int, nranks: int, a, start, shm):
@@ -386,6 +391,10 @@ def rank_main(a) -> int:
     for d in doms.values():
         if d.parent_name is not None:
             doms[d.parent_name].children.append(d)
+    for d in doms.values():
+        if d.move and (d.children or d.parent_name is None or nranks > 1):
+            raise SystemExit(f"coupled: {d.name} moves: a moving nest is one card, inside the parent, with no nest "
+                             "inside it (live_move.py; nests that move with it are not built)")
     start = datetime.strptime(Path(a.case).name[:14], "%Y-%m-%d_%Hz")
     a.out = a.out.resolve()
     shm = Path(os.environ["NAMGPU_HIST_SHM"]) if nranks > 1 else None
@@ -441,6 +450,8 @@ def rank_main(a) -> int:
     def advance(d):
         """One step of d, its history, then each child's boundary and RATIO child steps (recursively)."""
         d.drv.step()
+        if d.mover is not None:
+            d.mover.after_step()
         if d.drv._due("history"):
             d.drv.write_history()
         for c in d.children:
@@ -478,6 +489,16 @@ def rank_main(a) -> int:
                 d.cpl = WindowCoupler(doms[d.parent_name].ctx, c, d.ratio, int(c.cfg.raw["i_parent_start"]),
                                       int(c.cfg.raw["j_parent_start"]))
                 rec["coupler"][d.name] = d.cpl.receipt()
+            movers = []
+            for d in order[1:]:
+                if d.move:
+                    from namgpu.nest import live_move
+                    d.mover = live_move.LiveMover(d, doms[d.parent_name], d.move, a, start, a.out / d.name)
+                    movers.append(d.mover)
+            n_check = max(1, int(round(float((movers[0].every if movers else 15.0)) * 60.0 / float(root.ctx.cfg.dt))))
+            if movers:
+                print(f"coupled: moving nest(s) {[m.dom.name for m in movers]}: a fix every {n_check} parent steps, "
+                      f"a move past {movers[0].cells} parent cells", flush=True)
             for c in root.children:
                 acc[f"{c.name}_boundary"] = 0.0
                 acc[f"{c.name}_steps_x{c.ratio}"] = 0.0
@@ -507,6 +528,9 @@ def rank_main(a) -> int:
                             advance(c)
                         if timed:
                             ev_c[c.name][2].record(stream)
+                if movers and nests_on and n % n_check == 0:
+                    for mvr in movers:
+                        mvr.check(n, n * dtp / 3600.0)
                 if timed:
                     pending = nests_on
                     pend_parent = True
@@ -521,6 +545,8 @@ def rank_main(a) -> int:
                     stream.synchronize()                      # once per forecast hour: the only host sync
                     for d in order:
                         timing.drain(d.ctx)
+                    for mvr in movers:
+                        mvr.drain()
                     devmem.release(stream)
                     if pend_parent:
                         pend_parent = False
@@ -563,6 +589,16 @@ def rank_main(a) -> int:
         except Exception as e:  # noqa: BLE001
             rec.setdefault("receipt_errors", []).append(f"{d.name}: {type(e).__name__}: {e}")
     rec["hour_lines"] = hours_log
+    for d in order:
+        if d.mover is not None:
+            try:
+                d.mover.drain()
+            except Exception:  # noqa: BLE001
+                pass
+            mr = d.mover.receipt()
+            rec.setdefault("move", {})[d.name] = {"moves": len(mr["moves"]), "receipt": f"{d.name}/move-receipt.json",
+                                                  "move_s": [m.get("move_s") for m in mr["moves"]]}
+            (a.out / d.name / "move-receipt.json").write_text(json.dumps(mr, indent=1, default=str))
     rec["nonfinite_end"] = {d.name: _census(d.ctx) for d in order}
     rec["pool_end_gib"] = round(cp.get_default_memory_pool().total_bytes() / 2**30, 2)
     rec["card_used_gib"] = round((lambda m: (m[1] - m[0]) / 2**30)(cp.cuda.Device().mem_info), 1)

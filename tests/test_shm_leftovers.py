@@ -208,9 +208,12 @@ def test_cap_limits_the_room(tmp_path, monkeypatch):
 def test_cap_is_on_host_ram_only(tmp_path, monkeypatch):
     # the cap is on host RAM: the column store's disk scratch (<out>/.scratch) keeps its own free space. Breakage it
     # prevents: under the cap each frame's view, already on disk, was reported as short of room again (proof leg B)
+    # The disk's free space is fixed here: two reads of a live shared disk differ by what others wrote between them
+    # (8192 bytes, 2026-11-13), and that is not what this test is about.
     monkeypatch.setattr(scratch, "in_ram", lambda p: False)
+    monkeypatch.setattr(scratch, "disk_free", lambda p: 7 << 30)
     monkeypatch.setenv("NAMGPU_SHM_CAP_MIB", "1")
-    assert scratch.free_bytes(tmp_path) == scratch.disk_free(tmp_path) > (1 << 20)
+    assert scratch.free_bytes(tmp_path) == 7 << 30
 
 
 class _Event:

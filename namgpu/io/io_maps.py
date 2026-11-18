@@ -74,14 +74,24 @@ def _drawn(ctx, f: Path, products, first_name: str) -> bool:
         valid = datetime.strptime(f.name.split("_", 2)[2], "%Y-%m-%d_%H:%M:%S")
     except ValueError:
         return False
-    fhr = int(round((valid - start).total_seconds() / 3600))
+    from namgpu.outputs import tag_of
+    tag = tag_of(valid, start)                # fHHH, or fHHHmMM for a frame off the hour (maps.render names it so)
     out = Path(ctx.out_dir) / "maps"
     for prod in products:
         if f.name == first_name and prod in FIRST_FRAME_SKIPS:
             continue
-        if not (out / prod / f"namgpu_{start:%Y%m%d_%H}z_f{fhr:03d}_{prod}.png").is_file():
+        if not (out / prod / f"namgpu_{start:%Y%m%d_%H}z_{tag}_{prod}.png").is_file():
             return False
     return True
+
+
+def map_names(ctx) -> set | None:
+    """The history files this run draws (its output list, namgpu/outputs.py: the map times), or None when the run
+    has no list: every history file is drawn. ctx.map_files (a regridded companion set) is drawn whole."""
+    if getattr(ctx, "map_files", None) or getattr(ctx, "out_dir", None) is None:
+        return None
+    from namgpu import outputs
+    return outputs.files(ctx.out_dir, "maps")
 
 
 def history_files(ctx, products: str = DEFAULT_PRODUCTS) -> list[Path]:
@@ -91,8 +101,9 @@ def history_files(ctx, products: str = DEFAULT_PRODUCTS) -> list[Path]:
     first = cands[0].name if cands else ""
     prods = [p.strip() for p in products.split(",") if p.strip()]
     todo = []
+    draw = map_names(ctx)
     for f in cands:
-        if f.name in done:
+        if f.name in done or (draw is not None and f.name not in draw):
             continue
         if _drawn(ctx, f, prods, first):
             done.add(f.name)
@@ -101,9 +112,35 @@ def history_files(ctx, products: str = DEFAULT_PRODUCTS) -> list[Path]:
     return todo
 
 
-def _expected_skip(slug: str, reason: str, first_name: str) -> bool:
+def _expected_skip(slug: str, reason: str, first_name: str, listed: set | None = None,
+                   present: set | None = None) -> bool:
     if slug not in EXPECTED_SKIPS:
         return False
+    if listed is not None and slug in WINDOW_H and "earlier to difference" in reason:
+        # a run with an output list (namgpu/outputs.py) writes the frame 1 h and 6 h before every map time as a
+        # carrier whenever the model has reached it: an absent one is before the model start (expected), and one
+        # the list names but the folder lacks is a real gap
+        import re
+        from datetime import datetime, timedelta
+        m = re.match(r"wrfout_d\d\d_(\d{4}-\d\d-\d\d_\d\d:\d\d:\d\d)", reason)
+        if not m:
+            return False
+        valid = datetime.strptime(m.group(1), "%Y-%m-%d_%H:%M:%S")
+        return f"wrfout_d01_{valid - timedelta(hours=WINDOW_H[slug]):%Y-%m-%d_%H:%M:%S}" not in listed
+    if present is not None and slug in WINDOW_H and "earlier to difference" in reason:
+        # a frame off the whole hour that the run wrote outside any output list (a live moving nest writes its window
+        # just before each move and just after it, namgpu/nest/live_move.py) has no frame WINDOW_H earlier unless one
+        # was written there: that rain window is skipped. Breakage it prevents: every `woof-nam nest --concurrent
+        # --move-nest` run with maps on ended "maps nest rc 1" on its first move frame (+1:45, 2026-11-18). A frame on
+        # the whole hour keeps the rules below, so a missing hourly frame still raises.
+        import re
+        from datetime import datetime, timedelta
+        m = re.match(r"wrfout_d\d\d_(\d{4}-\d\d-\d\d_\d\d:\d\d:\d\d)", reason)
+        if m:
+            valid = datetime.strptime(m.group(1), "%Y-%m-%d_%H:%M:%S")
+            before = f"wrfout_d01_{valid - timedelta(hours=WINDOW_H[slug]):%Y-%m-%d_%H:%M:%S}"
+            if (valid.minute or valid.second) and before not in present:
+                return True
     if slug in WINDOW_H and "dry window" in reason:
         # maps.py skips a rain window with no rain instead of painting zeros domain-wide; a 3 km nest's first hour is
         # often dry, and the nest door exited rc 1 here after a finished forecast (2026-11-05)
@@ -124,21 +161,27 @@ def run(ctx, products: str = DEFAULT_PRODUCTS, frames: str = "all",
     out = Path(ctx.out_dir) / "maps"
     if not files:
         return out
-    files = everything[everything.index(files[0]):]
+    draw = map_names(ctx)
+    if draw is None:
+        files = everything[everything.index(files[0]):]
     mrms = Path(ctx.case_dir) / "raw" / "mrms" if getattr(ctx, "case_dir", None) else None
     extra = ["--mrms", str(mrms)] if mrms is not None and mrms.is_dir() else []
     # every frame so far goes to the renderer for qpf_1h differencing; only the new ones are drawn
-    argv = [str(f) for f in everything] + extra + ["--frames", str(len(files))] + ["--out", str(out), "--products", products,
-                                      "--width", str(width),
-                                      "--height", str(height)]
+    pick = ["--frames", str(len(files))] if draw is None else ["--only", ",".join(f.name for f in files)]
+    argv = [str(f) for f in everything] + extra + pick + ["--out", str(out), "--products", products,
+                                                          "--width", str(width), "--height", str(height)]
     result = render_series(argv)
     if result["failures"]:
         raise RuntimeError("io-maps: renderer FAILED: " + "; ".join(result["failures"]))
     first_name = everything[0].name
+    listed = None
+    if draw is not None:
+        from namgpu import outputs
+        listed = outputs.files(ctx.out_dir, "all")
     expected: list[tuple[str, str]] = []
     unexpected: list[str] = []
     for slug, reason in result["skipped"]:
-        if _expected_skip(slug, reason, first_name):
+        if _expected_skip(slug, reason, first_name, listed, {f.name for f in everything}):
             expected.append((slug, reason))
         else:
             unexpected.append(f"{slug}: {reason}")

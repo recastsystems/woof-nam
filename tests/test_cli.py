@@ -45,6 +45,14 @@ def test_help():
         assert "usage: woof-nam" in out, (args, out[:200])
 
 
+def test_lead_is_on_every_door():
+    """A start from a GFS forecast hour is one option on fetch, run, nest and suite; fetch also takes --at."""
+    for args in (["fetch"], ["run"], ["nest"], ["suite"]):
+        rc, out = _help(args)
+        assert rc == 0 and "--lead" in out, args
+    assert "--at" in _help(["fetch"])[1]
+
+
 def test_run_help_names_every_suite():
     from namgpu.physics import suites
     rc, out = _help(["run"])

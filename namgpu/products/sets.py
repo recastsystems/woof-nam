@@ -91,7 +91,9 @@ class OutGrid:
         if self.kind == "lambert":
             n, F = self._lcc()
             rho = np.sign(n) * np.hypot(x, y)
-            theta = np.arctan2(x, -y)
+            # the cone's sign on both, as on rho (Snyder 15-10): forward's rho is negative where n is (south of the
+            # equator), so atan2(x, -y) alone is off by 180 degrees, 180/n of longitude
+            theta = np.arctan2(np.sign(n) * x, -np.sign(n) * y)
             lat = 2.0 * np.arctan((R * F / rho) ** (1.0 / n)) - np.pi / 2
             return np.degrees(lat), (self.lov + np.degrees(theta / n)) % 360.0
         if self.kind == "polar":

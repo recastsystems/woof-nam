@@ -88,10 +88,11 @@ def rig(tmp_path, monkeypatch):
 
     def strips(st, lm, lnsh, lnsv):
         seen["strips"].append((st.hour, stream.current()))
-        return {"T": (np.full(4, float(st.hour), np.float32),)}
+        # the boundary time is carried in T as 200 K + its hour: a temperature the builder's bounds accept
+        return {"T": (np.full(4, 200.0 + st.hour, np.float32),)}
 
     def write_boco(path, t0, old, new, tboco=10800.0):
-        seen["write"].append((Path(path).name, int(old["T"][0][0]), int(new["T"][0][0]), stream.current()))
+        seen["write"].append((Path(path).name, int(old["T"][0][0]) - 200, int(new["T"][0][0]) - 200, stream.current()))
         Path(path).write_bytes(b"built")
 
     monkeypatch.setattr(statemod, "State", FakeState)

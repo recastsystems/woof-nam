@@ -20,12 +20,20 @@ No CUDA kernel and no device arithmetic.  The unit does two things per output ho
      the critical path once the step loop got faster (profile, 2026-11-09).  NAMGPU_HISTORY_WRITERS=0
      keeps the single writer thread.  ``drain(ctx)`` waits for every file and re-raises any write error;
      Driver.run calls it before the receipt.  The files are byte-identical either way (same write_payload).
+  3. FAST FRAMES. The step loop no longer waits for a free writer: files queue in shared memory, bounded by host memory
+     (_shm_room: /dev/shm and MemAvailable, each with its reserve), and the step loop waits only when that is full.
+     With a dense schedule (more than DENSE_PER_HOUR files a model hour) the pool takes every core but RESERVED_CORES.
+     Breakage it prevents: with 5-minute output the four writers (33 s a 12 km products frame on one core) were all
+     busy, the step loop waited on the oldest one and the card sat about 70 % idle (5.3-8.3 s of forecast a frame,
+     2026-11-13). The run says in one line when it waits, and at the end how long
+     it waited in all (summary_line).
 Reference for the field list and attributes: io/history.py (module docstring).
 """
 from __future__ import annotations
 
 import os
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -37,14 +45,29 @@ _PROCS: ProcessPoolExecutor | None = None
 _PROCS_LOCK = threading.Lock()
 
 
+DENSE_PER_HOUR = 2.0     # files a model hour above which a schedule is dense (FAST FRAMES)
+RESERVED_CORES = 4       # left to the forecast's own threads and the site's map processes when dense
+_DENSE = False
+
+
 def writers() -> int:
-    """Writer processes (NAMGPU_HISTORY_WRITERS; default min(4, cores / 4), at least 1; 0 = the writer thread).
-    cores = the ones this process may use (namgpu.cores.usable: affinity set and cgroup quota), not the host's."""
+    """Writer processes (NAMGPU_HISTORY_WRITERS; default min(4, cores / 4), at least 1; 0 = the writer thread; with a
+    dense schedule, cores - RESERVED_CORES, at least that). cores = the ones this process may use
+    (namgpu.cores.usable: affinity set and cgroup quota), not the host's."""
     v = os.environ.get("NAMGPU_HISTORY_WRITERS", "").strip()
     if v:
         return max(0, int(v))
     from namgpu import cores
-    return max(1, min(4, cores.usable() // 4))
+    hourly = max(1, min(4, cores.usable() // 4))
+    return max(hourly, cores.usable() - RESERVED_CORES) if _DENSE else hourly
+
+
+def set_schedule(sch) -> None:
+    """Size the pool for the run's output schedule (before its first file: the pool is made once)."""
+    global _DENSE
+    per_h = getattr(sch, "frames_per_hour", None)
+    if _PROCS is None:
+        _DENSE = bool(per_h is not None and per_h() > DENSE_PER_HOUR)
 
 
 def _pool() -> ProcessPoolExecutor:
@@ -71,12 +94,37 @@ _INFLIGHT: list = []             # the writer-process futures of those blocks
 _SEQ = iter(range(1 << 62))
 
 
+# FAST FRAMES: host memory the queue leaves free, as a share of MemTotal (the forecast, its pinned buffers and the
+# site's map processes live there too).
+MEM_RESERVE_SHARE = float(os.environ.get("NAMGPU_HISTORY_MEM_RESERVE", "0.25"))
+
+
+def _meminfo() -> tuple[int, int]:
+    """(MemAvailable, MemTotal) in bytes, or (0, 0) where /proc/meminfo cannot be read."""
+    got = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, _, v = line.partition(":")
+            if k in ("MemAvailable", "MemTotal"):
+                got[k] = int(v.split()[0]) * 1024
+    except (OSError, ValueError):
+        return 0, 0
+    return got.get("MemAvailable", 0), got.get("MemTotal", 0)
+
+
 def _shm_room(need: int) -> tuple[bool, int]:
+    """Room for one more queued block: /dev/shm holds it plus SHM_RESERVE_B, and host memory keeps
+    MEM_RESERVE_SHARE of MemTotal free after it. Returns (room, the smaller of the two free figures)."""
     from .scratch import free_bytes  # noqa: PLC0415
     if not Path(SHM).is_dir():
         return True, 0           # no /dev/shm here (not Linux): multiprocessing places the block itself
     free = free_bytes(SHM)
-    return free >= need + SHM_RESERVE_B, free
+    ok = free >= need + SHM_RESERVE_B
+    avail, total = _meminfo()
+    if total:
+        ok = ok and avail >= need + int(MEM_RESERVE_SHARE * total)
+        free = min(free, avail)
+    return ok, free
 
 
 def _unlink(name: str) -> None:
@@ -179,15 +227,50 @@ def shutdown() -> None:
         pass
 
 
-def _ready_for_next(ctx) -> None:
-    """Before staging an hour: the previous hour is out of the pinned buffers, and a writer process is free."""
+# FAST FRAMES: what the step loop waited on the history path (the previous file out of the pinned buffers into the
+# queue, and the queue's room), per process; waits() reads it, summary_line() says it at the end of the run.
+WAIT_SAY_S = 1.0
+_WAITS = {"files": 0, "s": 0.0, "max_s": 0.0, "over": 0, "said": 0}
+
+
+def waits() -> dict:
+    return {"files": _WAITS["files"], "wait_s": round(_WAITS["s"], 2), "max_s": round(_WAITS["max_s"], 2),
+            "over_1s": _WAITS["over"], "writers": writers()}
+
+
+def _note_wait(took: float, queued: int, valid) -> None:
+    _WAITS["files"] += 1
+    _WAITS["s"] += took
+    _WAITS["max_s"] = max(_WAITS["max_s"], took)
+    if took > WAIT_SAY_S:
+        _WAITS["over"] += 1
+        if _WAITS["said"] < 3 or _WAITS["over"] % 25 == 0:
+            _WAITS["said"] += 1
+            print(f"io-history: the forecast waited {took:.1f} s on the history writers before "
+                  f"{valid:%Y-%m-%d_%H:%M:%S} ({queued} files queued, {writers()} writers): host memory or the "
+                  f"writers are short on this machine; the run goes on {took:.1f} s later", flush=True)
+
+
+def summary_line() -> str:
+    w = waits()
+    return (f"io-history: {w['files']} files, {w['writers']} writers; the forecast waited {w['wait_s']:.1f} s on "
+            f"the history path in all (largest {w['max_s']:.1f} s, {w['over_1s']} over {WAIT_SAY_S:g} s)")
+
+
+def _ready_for_next(ctx, valid=None) -> None:
+    """Before staging a file: the previous one is out of the pinned buffers and queued (with room in host memory:
+    _stage_and_submit). No wait for a free writer (FAST FRAMES); NAMGPU_HISTORY_QUEUE caps the files queued."""
+    t0 = time.monotonic()
     _collect(ctx)
     files = [f for f in (getattr(ctx, "history_files", None) or []) if not f.done() or f.exception()]
     for f in [f for f in files if f.done()]:
         f.result()                       # a failed file stops the run here, as the thread's error did
-    while len(files) >= max(1, writers()):
+    cap = int(os.environ.get("NAMGPU_HISTORY_QUEUE", "0") or 0)
+    while cap > 0 and len(files) >= cap:
         files.pop(0).result()
     ctx.history_files = files
+    if valid is not None:
+        _note_wait(time.monotonic() - t0, len(files), valid)
 
 
 def run(ctx) -> Path:
@@ -204,13 +287,18 @@ def run(ctx) -> Path:
     fields = select(ctx, fields)         # --history-fields / --full-every (history_select.py)
     if getattr(ctx, "slab", None) is not None:
         return _run_slab(ctx, fields, start, timing)
-    _ready_for_next(ctx)                 # previous hour copied out of the pinned buffers (reused), a writer free
-    timing.stamp(ctx, "io-history/d2h")
+    if _PROCS is None:
+        set_schedule(getattr(ctx, "outputs", None))   # FAST FRAMES: the pool's size, before its first file
     valid = start + timedelta(seconds=ctx.ntimestep * ctx.cfg.dt)
+    _ready_for_next(ctx, valid)          # previous file copied out of the pinned buffers (reused) into the queue
+    timing.stamp(ctx, "io-history/d2h")
     path = Path(ctx.out_dir) / f"wrfout_d01_{valid:%Y-%m-%d_%H:%M:%S}"
     # async copies on ctx.stream into pinned host buffers; the writer thread waits on their event, so the
     # step path no longer syncs or copies (history.stage_history; was 2-65 s per hour with the GPU idle)
     staged = stage_history(ctx, fields, start)
+    sch = getattr(ctx, "outputs", None)
+    if sch is not None and getattr(sch, "catalog", None) is not None and sch.catalog(int(ctx.ntimestep)):
+        staged["zlib"] = False           # a catalog frame (namgpu/outputs.py): the same fields, written raw
     timing.stamp(ctx, "io-history/submit")
     ctx.history_future = (_WRITER.submit(_stage_and_submit, path, staged) if writers() > 0
                           else _WRITER.submit(stage_and_write, path, staged))

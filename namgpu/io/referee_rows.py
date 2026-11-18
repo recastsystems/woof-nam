@@ -368,6 +368,14 @@ def _k2f(k):
     return (k - 273.15) * 1.8 + 32.0
 
 
+def _start_lead(row) -> int:
+    """The forecast hour of its source run a run was started from, for a source-forecast row (0: an analysis)."""
+    if row.get("role") != "source":
+        return 0
+    from namgpu.init import sources as srcmod
+    return max((srcmod.start_lead_h(srcmod.SOURCES.get(s) or {}) for s in row.get("for_sources", ())), default=0)
+
+
 class Fetcher:
     """Fetches and samples one row's fields for a set of valid times onto one nest grid. Files are cached
     under `cache` (one folder per row), so the sheets of later leads and later runs reuse them."""
@@ -431,7 +439,11 @@ class Fetcher:
                 raise LookupError(f"{row['label']}: no analysis at {valid:%HZ} (cycles every {row['cadence_h']} h)")
             cycle, f = valid, 0
         else:
-            cycle, f = start, lead_h
+            # a run started from a forecast hour of its source run (woof-nam ... --lead H, sources.start_lead_h) is
+            # compared with that same run: its cycle is H hours before the start, and hour H + lead is valid now.
+            # Without this the source column asked for a cycle at the start time, which for a 21Z start is no cycle
+            lead0 = _start_lead(row)
+            cycle, f = start - timedelta(hours=lead0), lead_h + lead0
         ifs = row["kind"] == "grib-jsonl"
         if product in ("qpf_1h", "qpf_6h"):
             n = 1 if product == "qpf_1h" else 6

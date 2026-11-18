@@ -13,5 +13,8 @@ get global_solarconstant_noaa_a0.txt           solarconstant_noaa_a0.txt
 get global_sfc_emissivity_idx.txt              sfc_emissivity_idx.txt
 get global_co2historicaldata_glob.txt          co2historicaldata_glob.txt
 get co2monthlycyc.txt                          co2monthlycyc.txt
-for y in $(seq 2004 2024); do get co2dat_4a/global_co2historicaldata_$y.txt co2historicaldata_$y.txt; done
+# 1956-2003 for starts from older archives (ERA5 reaches 1940); before 1956 gas_update reads the glob file
+for y in $(seq 1956 2024); do get co2dat_4a/global_co2historicaldata_$y.txt co2historicaldata_$y.txt; done
 for y in 2025 2026; do get co2dat_4a/global_co2historicaldata_$y.txt_proj co2historicaldata_$y.txt; done
+# The decade volcanic-aerosol tables aer_update reads for a year 1850-1999 (volc_update; after 1999 it reads none).
+for d in $(seq 1850 10 1990); do get global_volcanic_aerosols_$d-$((d+9)).txt volcanic_aerosols_$d-$((d+9)).txt; done

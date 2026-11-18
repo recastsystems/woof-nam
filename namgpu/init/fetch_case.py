@@ -1,7 +1,7 @@
 """Fetch one case's inputs from AWS NODD into cases/<case>/raw/ (parallel, byte-range subsets), for any domain.
 
     python -m namgpu.init.fetch_case --cycle 2026110412 --hours 48 [--config parm/nam_configfile_X]
-        [--source gfs] [--boco-age 6] [--case-dir DIR] [--dry-run]
+        [--source gfs] [--boco-age 6] [--lead H] [--case-dir DIR] [--dry-run]
 
 What is fetched is the FETCH_ROWS table: one row per source file family, with the archive's date range, its
 path template per era, the record subset, the role (init / boco / referee / truth) and the region it covers.
@@ -16,6 +16,9 @@ Rows today:
              2004-03), whole files. Written where sources.SOURCES["gfs"]["file"] expects it.
 - gfs-boco   GFS 0.25 deg forecast leads every boco_interval_h covering the run, from the cycle boco_age_h
              older than the start (SOURCES["gfs"]: 6 h as operational NAM; 0 h for past cases), global.
+             A start from a forecast hour (--lead H, sources.start_lead_h): --cycle is then the START time, the
+             run it comes from is H hours older, the boundaries are that run's hours H, H+3, ... and hour H itself
+             is fetched with the start record set (follow_dest); the gfs-f000 row is skipped (no analysis is read).
 - nam-*      NAM native B-grid analysis bgrd3d00 (the native start), native surface bgrdsfFF and the grid 218
              awphysFF picture referee: only where the domain overlaps the NAM 12 km grid, only for cycles
              before the NAM retirement (2026-11-03 12Z).
@@ -84,8 +87,12 @@ MRMS_NOCOVER_TOL = 0.01
 MRMS_OUTAGE_TOL = 0.05
 ROOT = Path(__file__).resolve().parents[2]
 
+# Cloud water (0-1-22) is CLMR in NCEP's .idx before 2021-02-26 00Z and from 2023-02-03 00Z, and CLWMR in between
+# (read from the noaa-gfs-bdp-pds f000 .idx files on 2026-11-13). With CLMR alone, every start and boundary file of
+# those two years came with no cloud water record: the decode (source_records.GFS, by code 0-1-22) found none and left
+# the slot at 0. The two names are the same record, so both are selected.
 GFS_VARS = re.compile(
-    r":(HGT|TMP|SPFH|RH|UGRD|VGRD|CLMR|ICMR|RWMR|SNMR|GRLE|O3MR):(\d+(\.\d+)? mb):"
+    r":(HGT|TMP|SPFH|RH|UGRD|VGRD|CLMR|CLWMR|ICMR|RWMR|SNMR|GRLE|O3MR):(\d+(\.\d+)? mb):"
     r"|:(PRES|HGT|TMP|PRMSL|LAND|ICEC|WEASD|SNOD|TSOIL|SOILW):(surface|mean sea level|"
     r"0-0.1 m below ground|0.1-0.4 m below ground|0.4-1 m below ground|1-2 m below ground):"
     r"|:(TMP|SPFH|RH):2 m above ground:|:(UGRD|VGRD):10 m above ground:")
@@ -96,10 +103,12 @@ GFS_VARS = re.compile(
 # above it (0.01-0.7 mb) were downloaded in every boundary file and dropped (the door lane's 1b6435d pattern,
 # 259 -> 183 MB per file with the GRLE/O3MR cut, was lost in the nest/all merge).
 GFS_BOCO_VARS = re.compile(
-    r":(HGT|TMP|SPFH|RH|UGRD|VGRD|CLMR|ICMR|RWMR|SNMR):([1-9]\d*(\.\d+)?) mb:"
+    r":(HGT|TMP|SPFH|RH|UGRD|VGRD|CLMR|CLWMR|ICMR|RWMR|SNMR):([1-9]\d*(\.\d+)?) mb:"
     r"|:(PRES|HGT|TMP):surface:|:PRMSL:mean sea level:"
     r"|:(TMP|SPFH|RH):2 m above ground:|:(UGRD|VGRD):10 m above ground:")
-# The start also reads canopy water (gfs_start.SFC CNWAT), which only the analysis carries.
+# The start also reads canopy water (gfs_start.SFC CNWAT). Every GFS file carries it, analysis and forecast alike
+# (the .idx of f000, f003, f006, f120, f201 and f384 of the 2026-11-12 12Z run); the boundary set leaves it out because a
+# boundary time never reads it.
 GFS_INIT_VARS = re.compile(GFS_VARS.pattern + r"|:CNWAT:surface:")
 NAM_HOURLY = re.compile(
     r":(REFC):entire atmosphere|:APCP:surface:|:TMP:2 m above ground:|:DPT:2 m above ground:"
@@ -202,7 +211,8 @@ FETCH_ROWS = (
     # lead, where the new window's fresh start is made from that lead (namgpu/nest/prepare.py), so each lead is
     # fetched with the START record set (soil, snow, ice, canopy water: gfs_init) as follow_dest, and the boundary
     # file name is a hard link to it (the start set holds every boundary record). Lead 0 of the start cycle is
-    # the gfs-f000 row's file.
+    # the gfs-f000 row's file. A start from a forecast hour (plan lead_h) uses the same two keys for its one start
+    # hour: hour H of the source run is fetched once, with the start record set, under follow_dest.
     {"name": "gfs-boco", "licence": "NOAA/NCEP GFS 0.25, US government work (public domain), AWS NODD noaa-gfs-bdp-pds",
      "source": "gfs", "role": "boco", "host": GFS, "eras": GFS_ERAS, "cycle": "boco",
      "leads": "boco", "kind": "subset", "records": "gfs_boco", "region": "global",
@@ -277,8 +287,34 @@ def _retry(fn, tries=5, slow_tries=10):
             k += 1
 
 
+#: An S3 bucket's host: the global name, or the bucket's regional one (s3.eu-central-1, s3-us-west-2, s3.dualstack...).
+_S3_HOST = re.compile(r"\.s3[.-]([a-z0-9-]+\.)*amazonaws\.com$")
+
+
+def _stall_s(url: str, timeout: float) -> float:
+    """The wait for a first byte. An S3 host (*.s3.amazonaws.com, and a bucket's regional name
+    *.s3.<region>.amazonaws.com) answers in well under a second, so a request that has sent nothing for
+    RECAST_NAM_FETCH_STALL_S seconds (default 20; 0 turns it off) is stalled and is retried then. Breakage it
+    prevents: one stalled ranged GET of a NOAA bucket held a run 120 s before its retry. The ECMWF
+    open-data bucket is read by its regional name (ecmwf-forecasts.s3.eu-central-1.amazonaws.com), which the first
+    rule did not match, so its ranged GETs kept the caller's 300 s: a 144 h IFS 0.25 box (2026-11-14) spent 2,062.6 s
+    in its fetch where the same order the next night took 91.6 s; the cause of that one slow fetch was not kept, and
+    this closes the one gap the code shows. The archive hosts (NCEI, NCAR GDEX) keep the caller's wait: they can be
+    slow to start."""
+    import os
+    try:
+        cap = float(os.environ.get("RECAST_NAM_FETCH_STALL_S", "20") or 0)
+    except ValueError:
+        cap = 20.0
+    host = url.split("/")[2] if "://" in url else ""
+    if cap > 0 and _S3_HOST.search(host):
+        return min(float(timeout), cap)
+    return timeout
+
+
 def _get(url: str, rng: str | None = None, timeout=120) -> bytes:
     req = urllib.request.Request(url, headers={"Range": f"bytes={rng}"} if rng else {})
+    timeout = _stall_s(url, timeout)
 
     def once():
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -564,15 +600,28 @@ def _leads(row, hours: int, age: int, interval: int):
 
 
 def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", age_h: int | None = None,
-         rows=FETCH_ROWS, follow: bool = False):
+         rows=FETCH_ROWS, follow: bool = False, lead_h: int | None = None):
     """Jobs [(fn, *args, required)] for one case on one domain, plus the skipped rows [(name, reason)].
-    follow: a storm-following run; rows with follow_dest fetch each lead's start record set (see FETCH_ROWS)."""
+    cycle: the run's START time. follow: a storm-following run; rows with follow_dest fetch each lead's start
+    record set (see FETCH_ROWS). lead_h: the start is forecast hour lead_h of the GFS run lead_h hours before
+    `cycle` (None: sources.start_lead_h, i.e. NAMGPU_START_LEAD_H or the configfile; 0: the analysis). Which hours
+    exist and how long a run they carry is one rule, sources.check_lead (ValueError, in plain words)."""
     from namgpu.init import sources as srcmod
     srow = srcmod.SOURCES["gfs"]
     own = srcmod.SOURCES.get(source, {})
     bsrc = source if "boundary" in own else "gfs"
     fsrc = (own.get("fallback") or {}).get("source")
-    age = srcmod.boco_age_h(srow, cfg, age_h)
+    lead0 = srcmod.start_lead_h(srow, cfg, lead_h)
+    if lead0:
+        # gfs, or the GFS half of a regional analysis (rap, hrrr, rrfs at a time that is not a GFS cycle: the fill
+        # outside its grid and the edges are the GFS forecast hour valid then, window.py)
+        if source != "gfs" and fsrc != "gfs":
+            raise ValueError(f"fetch-case: a start from GFS forecast hour {lead0} needs --source gfs, not {source}")
+        if follow:
+            raise ValueError("fetch-case: a storm-following run from a GFS forecast hour is not written yet (each "
+                             "window move makes its own fresh start from the hour it lands on)")
+        srcmod.check_lead(srow, lead0, hours, cycle - timedelta(hours=lead0))
+    age = srcmod.boco_age_h(srow, cfg, age_h, start=cycle if lead0 else None, lead=lead0)
     interval = int(srow.get("boco_interval_h", 3))
     lat, lon = domain_points(cfg)
     jobs, skipped = [], []
@@ -595,6 +644,11 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
         if row["role"] == "init" and not required and (srcmod.SOURCES.get(row["source"]) or {}).get("fallback"):
             skipped.append((row["name"], f"start source is {source}, not {row['source']}"))
             continue
+        if lead0 and row["role"] == "init" and row["source"] == "gfs":
+            skipped.append((row["name"], f"the start is forecast hour {lead0} of the "
+                                         f"{cycle - timedelta(hours=lead0):%Y-%m-%d %HZ} GFS run, fetched with the "
+                                         "start records by gfs-boco (no analysis is read)"))
+            continue
         cyc = cycle - timedelta(hours=age) if row["cycle"] == "boco" else cycle
         try:
             era = era_of(row, cyc) if "eras" in row else {}
@@ -612,7 +666,10 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
         for f in _leads(row, hours, age, interval):
             url = f"{host}/{_era_path(row, cyc, f)}"
             dest = raw / row["dest"].format(hh=f"{cyc:%H}", lead=f)
-            if follow and row.get("follow_dest") and not (cyc == cycle and f == 0):
+            lead_start = bool(lead0) and row["role"] == "boco" and row["source"] == "gfs" and f == lead0
+            if lead_start and not row.get("follow_dest"):
+                raise ValueError(f"fetch-case: row {row['name']} has no follow_dest for the start hour {lead0}")
+            if (follow and row.get("follow_dest") and not (cyc == cycle and f == 0)) or lead_start:
                 sdest = raw / row["follow_dest"].format(hh=f"{cyc:%H}", lead=f)
                 if kind == "whole":
                     jobs.append((_download_linked, url, sdest, dest, required))
@@ -627,7 +684,8 @@ def plan(cycle: datetime, hours: int, raw: Path, cfg=None, source: str = "gfs", 
 
 
 def fetch(cycle: datetime, case_dir: Path, hours: int = 48, workers: int = 16, cfg=None, source: str = "gfs",
-          age_h: int | None = None, log=print, rows=FETCH_ROWS, follow: bool = False) -> int:
+          age_h: int | None = None, log=print, rows=FETCH_ROWS, follow: bool = False,
+          lead_h: int | None = None) -> int:
     """Fetch every planned input of one case. Returns the number of failed REQUIRED requests (0 = the run's
     init and boundary files are complete); failed referee/truth requests are printed and not counted.
     follow: a storm-following run (start record sets at every boundary lead; plan()). The ifs rows need nothing
@@ -652,7 +710,7 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = 48, workers: int = 16, c
         log(f"fetch-case: {source} {len(sjobs)} files, {total / 1e6:.0f} MB in {time.perf_counter() - t0:.0f} s, "
             f"{bad} failed")
         return bad
-    jobs, skipped = plan(cycle, hours, raw, cfg, source, age_h, rows, follow=follow)
+    jobs, skipped = plan(cycle, hours, raw, cfg, source, age_h, rows, follow=follow, lead_h=lead_h)
     for name, why in skipped:
         log(f"fetch-case: skip {name}: {why}")
     for d in {Path(j[2]).parent if j[0] is not _mrms_hour else Path(j[2]) for j in jobs}:
@@ -685,7 +743,7 @@ def fetch_spinup(cycle: datetime, case_dir: Path, spinup_hours: int, workers: in
     from namgpu import spinup
     from namgpu.init import sources as srcmod
     row = srcmod.SOURCES[source]
-    main_age = srcmod.boco_age_h(row, cfg, age_h)
+    main_age = srcmod.boco_age_h(row, cfg, age_h, lead=0)     # a spin-up start is refused with a forecast-hour start
     s = cycle - timedelta(hours=int(spinup_hours))
     bad = 0
     if "fetch" in row:
@@ -696,10 +754,10 @@ def fetch_spinup(cycle: datetime, case_dir: Path, spinup_hours: int, workers: in
         return bad
     rows = tuple(r for r in FETCH_ROWS if r["source"] == source and r["role"] in ("init", "boco"))
     bad += fetch(s, case_dir, int(spinup_hours), workers, cfg, source, spinup.spinup_age(main_age, spinup_hours),
-                 log, rows=rows)
+                 log, rows=rows, lead_h=0)
     if not (Path(case_dir) / row["file"].format(cyc=cycle.hour)).is_file():
         bad += fetch(cycle, case_dir, 6, workers, cfg, source, main_age, log,
-                     rows=tuple(r for r in rows if r["role"] == "init"))
+                     rows=tuple(r for r in rows if r["role"] == "init"), lead_h=0)
     return bad
 
 
@@ -828,14 +886,19 @@ def _arco_time(fetch: dict, valid: datetime, area: str, dest: Path) -> str:
 
 def _arco_jobs(name: str, row: dict, cycle: datetime, hours: int, raw: Path, cfg=None):
     fetch, b = row["fetch"], row["boundary"]
-    last = cycle + timedelta(hours=hours)
+    # the boundary times a run of `hours` reads (domains.bc_hours: at least 6 h, in whole intervals), as every other
+    # fetch plans them. Breakage this prevents: a 3 h ERA5 run fetched +0 and +3 h only and stopped at init-gfs-bocos
+    # on the missing +6 h file, after its fetch (12 km grid from ERA5 1990-12-21 12Z, 2026-11-13).
+    from namgpu.domains import bc_hours
+    need = bc_hours(hours, int(b["interval_h"]))
+    last = cycle + timedelta(hours=need)
     stop = store_stop(fetch)
     if stop is not None and last > stop:
         raise ValueError(f"fetch_case: source {name!r}: the store's last published hour is {stop:%Y-%m-%d %H}Z, "
                          f"this run needs {last:%Y-%m-%d %H}Z")
     area = domain_band(float(fetch["lat_margin_deg"]), cfg)
     jobs = []
-    for lead in range(0, hours + 1, int(b["interval_h"])):
+    for lead in range(0, need + 1, int(b["interval_h"])):
         dest = raw.parent / b["file"].format(bcyc=cycle.hour, lead=lead)
         dest.parent.mkdir(parents=True, exist_ok=True)
         jobs.append((_arco_time, fetch, cycle + timedelta(hours=lead), area, dest))
@@ -919,16 +982,55 @@ def _pair_jobs(name: str, row: dict, start: datetime, hours: int, raw: Path, cfg
     cyc = start - timedelta(hours=age)
     mem = srcmod.source_member(row, cfg)
     last = max(s for s, _ in fetch["steps"])
-    if age + hours > last:
-        raise ValueError(f"fetch_case: source {name!r} publishes leads to {last} h; this run needs {age + hours} h")
+    k = srcmod.boundary_interval_h(row)          # 6 for a window past GEFS's 3-hourly hours (window.py)
+    if age + bc_hours(hours, k) > last:
+        raise ValueError(f"fetch_case: source {name!r} publishes leads to {last} h; this run needs "
+                         f"{age + bc_hours(hours, k)} h")
     jobs = []
-    for lead in range(age, age + bc_hours(hours) + 1, int(b["interval_h"])):
+    for lead in range(age, age + bc_hours(hours, k) + 1, k):
         dest = raw.parent / b["file"].format(bcyc=cyc.hour, lead=lead, mem=mem)
         dest.parent.mkdir(parents=True, exist_ok=True)
         urls = [f"{fetch['host']}/" + f.format(ymd=f"{cyc:%Y%m%d}", hh=f"{cyc:%H}", mem=mem, lead=lead)
                 for f in fetch["files"]]
         jobs.append((_subset_pair, urls, dest, PATTERNS[fetch["records"]]))
     return jobs
+
+
+def gfs_posted(cycle: datetime, lead: int) -> bool:
+    """True when the archive holds forecast hour `lead` of the GFS run `cycle`: one HEAD request on the file the
+    gfs-boco row would read, in its era's archive. What sources.start_for_time asks (woof-nam fetch --at)."""
+    row = next(r for r in FETCH_ROWS if r["name"] == "gfs-boco")
+    try:
+        era = era_of(row, cycle)
+    except ValueError:
+        return False
+    url = f"{era.get('host', row['host'])}/{_era_path(row, cycle, int(lead))}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=30):
+            return True
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return False
+        raise
+
+
+def gefs_posted(cycle: datetime, lead: int, member: str = "c00") -> bool:
+    """True when the GEFS bucket holds forecast hour `lead` of the run `cycle` (one HEAD on the pgrb2a file)."""
+    from namgpu.init.sources import SOURCES
+    f = SOURCES["gefs"]["fetch"]
+    url = f"{f['host']}/" + f["files"][0].format(ymd=f"{cycle:%Y%m%d}", hh=f"{cycle:%H}", mem=member, lead=int(lead))
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=30):
+            return True
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return False
+        raise
+
+
+def posted_for(name: str):
+    """The archive question window.resolve asks for a source with forecast-hour starts (gfs, gefs), else None."""
+    return {"gfs": gfs_posted, "gefs": gefs_posted}.get(name)
 
 
 def plan_source(name: str, cycle: datetime, hours: int, raw: Path, cfg=None):
@@ -1005,6 +1107,8 @@ def main(argv=None):
     ap.add_argument("--source", default="gfs", help="init source row (its init/boco rows are required; ifs, ifs-0p25, "
                     "era5 fetch through the row's own fetch entry)")
     ap.add_argument("--boco-age", type=int, default=None, help="boundary cycle age, h (default: the row's)")
+    ap.add_argument("--lead", type=int, default=None, help="--cycle is the START time and the start is this forecast "
+                    "hour of the GFS run that many hours before it (default: NAMGPU_START_LEAD_H, else the analysis)")
     ap.add_argument("--case-dir", type=Path, default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--follow", action="store_true", help="storm-following run: the start record set at every "
@@ -1018,13 +1122,14 @@ def main(argv=None):
     cycle = datetime.strptime(a.cycle, "%Y%m%d%H")
     case = a.case_dir or paths.work_root() / "cases" / cycle.strftime("%Y-%m-%d_%Hz")
     if a.dry_run:
-        jobs, skipped = plan(cycle, a.hours, case / "raw", cfg, a.source, a.boco_age, follow=a.follow)
+        jobs, skipped = plan(cycle, a.hours, case / "raw", cfg, a.source, a.boco_age, follow=a.follow,
+                             lead_h=a.lead)
         for name, why in skipped:
             print(f"skip {name}: {why}")
         for fn, *args in jobs:
             print(fn.__name__, *(str(x) for x in args[:2]), "required" if args[-1] else "optional")
         return 0
-    bad = fetch(cycle, case, a.hours, a.workers, cfg, a.source, a.boco_age, follow=a.follow)
+    bad = fetch(cycle, case, a.hours, a.workers, cfg, a.source, a.boco_age, follow=a.follow, lead_h=a.lead)
     return 1 if bad else 0
 
 

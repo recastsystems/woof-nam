@@ -5,7 +5,7 @@ WOOF-NAM is a GPU port of NOAA/NCEP's North American Mesoscale model (NAM, nam.v
 on one NVIDIA card or on several cards of one machine. NCEP retired the NAM on 2026-11-03 12Z; this
 package keeps the model running.
 
-Distribution name `recast-woof-nam` (on PyPI: `pip install recast-woof-nam`), import name `namgpu`, command `woof-nam`, version 0.2.1.
+Distribution name `recast-woof-nam` (on PyPI: `pip install recast-woof-nam`), import name `namgpu`, command `woof-nam`, version 0.2.2.
 
 ## What it looks like
 
@@ -160,6 +160,85 @@ woof-nam static cases/2025-03-14_12z/raw/nam/bgrd3d00.grib2
 ```
 
 This writes `static/nam12_static.npz` (1.4 MB, a few seconds). Every later GFS start reuses it.
+
+**A start from a GFS forecast hour, or at a chosen time.** A run need not start from an analysis. `--lead H`
+starts it from forecast hour H of the `--cycle` GFS run: the run starts at cycle + H, its start state is that GFS
+forecast, and its boundaries are the same GFS run's later hours, every 3 h. The case folder is named for the
+start time.
+
+```
+woof-nam fetch --cycle 2026111212 --lead 201 --hours 24 --case-dir cases/2026-11-20_21z --gfs-only
+woof-nam run --case 2026-11-20_21z --source gfs --hours 24 --out runs/2026-11-20_21z
+```
+
+`--at TIME` picks the GFS run itself. It takes the analysis when TIME is 00, 06, 12 or 18Z and that analysis is
+posted; otherwise it takes the newest posted GFS run that reaches TIME, and prints which run and hour it chose:
+
+```
+woof-nam fetch --at 2026012315 --hours 24 --gfs-only      # prints: GFS forecast hour 3 of the 2026-01-23 12Z run
+woof-nam run --case 2026-01-23_15z --source gfs --hours 24 --out runs/2026-01-23_15z
+```
+
+The fetch writes its choice to `<case>/raw/START.json`, and `woof-nam run` reads it, so the run cannot disagree
+with the fetch (`woof-nam run --lead H` says it again and must match). `woof-nam nest --start TIME --lead H` and
+`woof-nam suite --cycle CYCLE --lead H` take the same option; a nest under a WOOF-NAM parent follows its parent.
+For `woof-nam nest`, `--start` is the start time and the run it is read from is H hours earlier. A 3 km box from hour
+90 of the 2026-11-13 06Z GFS run (valid 2026-11-17 00Z), written every 15 minutes:
+
+```
+woof-nam nest --center 30N,90W --size-km 300 --res-km 3 --source gfs --start 2026111700 --lead 90 --hours 1 \
+    --write 15m --products hiresf --no-sheets --out runs/box-h90
+```
+
+With a live parent (`--concurrent`) the parent and the nest both start from that forecast hour, and the parent's
+edges are the same run's later hours (the command above with `--concurrent --parent-size-km 1200`).
+
+What exists, and what does not:
+- GFS posts every hour to 120 h and every 3 hours from 123 to 384 h. **Hour 200 does not exist**, and it is not
+  refused: the run starts at 198, the nearest posted hour before it, runs 2 h longer, and its first output is at
+  hour 200. One line says so. Likewise hour 100 for 24 h starts at 99 (its boundaries cross hour 120, where GFS goes
+  3-hourly), and a window past hour 384 is cut there, with the line saying by how much.
+- A start from a forecast hour is the NAM downscaling a GFS forecast. Soil temperature and moisture, snow, sea ice
+  and the sea-surface temperature are the GFS's own forecast of them at that hour, not an analysis. The receipt
+  (`source_cycle`, `source_lead_h`, `start_is`) and the start log say which GFS run and hour, and every map's title or
+  subtitle names the hour.
+- Not available: forecast-hour starts of GFS runs before 2015-01-15 (only analyses are archived; from then
+  to 2020 the archive holds every 3 hours to 240 h); `--start spinup` with a forecast-hour start (the spin-up
+  reads an analysis six hours earlier); a storm-following nest (`--follow`) from a forecast hour.
+
+**Any source, any start, any output times.** `--at TIME` and `--cycle C --lead H` work on every `--source`, with the
+same rule: the wanted time when the source has it, else the nearest posted time before it, and the model runs that
+much longer. GFS and GEFS start from their forecast hours (GEFS posts every 3 h to 240 h, then every 6 h; a window
+past 240 h takes its edges every 6 h). The others start from their newest analysis at or before the time: the NAM's
+own analysis and IFS, AIFS and AIGFS every 6 h; ERA5, RAP, HRRR and RRFS every hour. RAP, HRRR and RRFS take GFS
+outside their grid and on the edges; at a time that is not a GFS cycle that is the GFS forecast hour valid then.
+A time may have minutes (`--at 202611201530`).
+
+```
+woof-nam fetch --source gfs --cycle 2026111212 --lead 200 --hours 6
+  start 2026-11-20 18Z from GFS forecast hour 198 of the 2026-11-12 12Z run (a forecast, not an analysis);
+  hour 200 is not posted: 2 h earlier, the model runs 2 h longer, first output 2026-11-20 20Z; 8 h; edges every 3 h
+woof-nam fetch --source native --at 2025031414 --hours 6       # the 12Z analysis, first output 14Z
+woof-nam fetch --source gefs --member p07 --cycle 2026111206 --lead 246 --hours 48     # edges every 6 h
+woof-nam fetch --source hrrr --at 2026111215 --hours 18        # HRRR 15Z, GFS 12Z hour 3 around it
+woof-nam sources                                               # every source, its archive and posted hours
+```
+
+`woof-nam run --hours N` counts N from the time asked; the model runs the plan's offset longer. **Which times are
+written** is `--write SPEC`: an interval (`1h`, `30m`, `15m`, `3h`), hours after the time asked (`0,1.5,3,6`), or
+pieces (`0-6/15m,6-24/1h`). Default `1h`, the files every run wrote before. `--maps-at` and `--grib-at` take the same
+form when maps or GRIB2 should be fewer. Any time that is a multiple of 5 minutes is exact on every grid; another
+time takes the nearest model step. GRIB2 is written on whole forecast hours (a half hour is history and maps only,
+and the run says so). The run adds the few history times its products read (the rain bucket starts of each GRIB2
+time, the frames 1 h and 6 h before each map time, the hours a nest reads from its parent), writes them with the
+rain fields only, and never draws or exports them. `<out>/OUTPUTS.json` lists every file and what it is for. The
+forecast is the same whatever is written: the convection driver keeps reading `minutes_history`, which stays 60.
+
+```
+woof-nam run --case 2026-11-20_18z --source gfs --hours 6 --out runs/a --write 0,1.5,3,6 --grib-at 0,3,6 --products
+woof-nam nest --center 35.2,-97.4 --size-km 600 --res-km 3 --source gfs --at 2026111921 --hours 12 --write 15m --out runs/n1
+woof-nam suite --cycle 2026111212 --lead 198 --write 3h --nest-write 15m --out runs/s1
+```
 
 **IFS start (ECMWF open data, CC BY 4.0).** `--source ifs-0p25` (0.25 degree, cycles from 2025-03-14 12Z)
 or `--source ifs` (0.1 degree, cycles from 2026-10-20 12Z) fetches the IFS start, its 3-hourly
@@ -400,6 +479,8 @@ and order.
 woof-nam nest --center 32N,96W --size-km 1000 --res-km 3 --source gfs --start 2026110306 --hours 4 \
     --out runs/tx --products conusnest                         # write each hour while the nest runs
 woof-nam products --run runs/tx/run --set conusnest            # or afterwards
+woof-nam nest --center 9S,163W --size-km 300 --res-km 3 --source gfs --start 2026111700 --hours 1 \
+    --products --no-sheets --out runs/south                    # no set: the NCEP nest this box is, else hiresf
 woof-nam products --compare nam.t06z.conusnest.hiresf01.tm00.grib2 \
     runs/tx/run/products/woof-nam.t06z.conusnest.hiresf01.tm00.grib2   # grid and inventory against NOAA's file
 ```
@@ -708,7 +789,7 @@ woof-nam nest --center 35.7N,139.7E --size-km 1000 --res-km 3 --source gfs \
 ```
 
 - `--center LAT,LON` with N/S/E/W or signed degrees; `--size-km` (and `--size-y-km` for a rectangle);
-  `--res-km` 3, 4, 5 or 12. The 3 km row takes the NAM CONUS-nest step and physics keys (dt 6.25 s, radiation
+  `--res-km` 1.5, 3, 4, 5, 7.6 or 12. The 3 km row takes the NAM CONUS-nest step and physics keys (dt 6.25 s, radiation
   every 192 steps, no parameterised convection).
 - `--source auto | gfs | ifs | ifs-0p25 | era5 | parent`. `auto` takes IFS 0.1 degree where it is published and GFS
   before; `era5` starts from the ERA5 reanalysis (from 1940 to about 6 days ago), as `woof-nam run --source era5`. `parent --parent-run DIR` is a one-way nest inside a WOOF-NAM 12 km run that wrote its hand-off set.
@@ -773,6 +854,37 @@ at +48 h, within 1-9 hPa of the nest at every hour; without it the parent stayed
 further west; its deepest, 908.8 hPa, was 27 hPa below the observed 937 (one-way: 923.7). No seam shows at the
 nest edge.
 
+A 3 km nest in a 12 km parent takes 4 steps to each parent step and has 4 cells to each parent cell (a 4 km nest: 3
+and 3). A 1.5 km nest takes 12 steps to each parent step but has 8 cells to each parent cell. The run log says both (`ratio 12 in time and 8 in
+space`). Versions 0.2.0 and 0.2.1 used the time ratio for both, so their 1.5 km nests in a live 12 km parent read
+wrong edges (CHANGELOG, 0.2.2).
+
+Each domain of a live-parent run draws its maps in its own folder (`<out>/parent/maps/`, `<out>/nest/maps/`).
+
+**Ladders.** `--ladder RES:SIZE[,RES:SIZE...]` puts more nests inside the nest, each a whole number of times finer
+than the one outside it, all in one process on one card, one-way:
+
+```
+woof-nam nest --concurrent --center 9S,163W --res-km 3 --size-km 480 --parent-size-km 1200 --ladder 1.5:240 \
+    --source gfs --start 2026111700 --hours 1 --no-sheets --out runs/ladder
+```
+
+The 12 km parent, the 3 km nest and the 1.5 km nest land in `<out>/parent/`, `<out>/nest/` and `<out>/nest2/`, each
+with its maps. On this case (a South Pacific tropical cyclone, one RTX 4090 shared with other work), the run took about
+a minute from start to maps and at most 4.9 GiB on the card. At +1 h the 3 km nest's surface pressure on its outer 12 rows was within 0.13 hPa of
+the 12 km parent's (mean of the absolute difference) and the 1.5 km nest's within 0.07 hPa of the 3 km nest's. A step
+can take its own north-south size (`1.5:240x300`). `--parent-res-km 3` starts the ladder at 3 km, for a source fine
+enough to feed it, such as IFS at 0.1 degree:
+
+```
+woof-nam nest --concurrent --parent-res-km 3 --center=-9,-163 --res-km 1.5 --size-km 300 --parent-size-km 600 \
+    --parent-size-y-km 600 --source ifs --start 2026111700 --hours 1 --no-sheets --out runs/ifs-3-1.5
+```
+
+A step that is not a whole number of times finer (4 km to 1.5 km), `--two-way` with `--ladder`, and a nest of NCEP's
+fire-weather row with a live parent (`--ncep-nest firewxnest --concurrent`, whose true parent is the 3 km nest) are
+refused in words.
+
 ### Moving nests
 
 `woof-nam nest --follow TRACKER` runs a nest that follows a storm. It runs one-way from its boundary source: a
@@ -803,8 +915,7 @@ woof-nam nest --follow tc --storm-id 2024225N22135 --size-km 1000 --res-km 3 --s
   `tools/follow_score.py` scores a run against IBTrACS.
 - The `tc` tracker keeps the storm at least max(150 km, 0.62 x the window's half-width) from the edge, which is about
   300 km on a 1000 km nest. That keeps the rain shield inside the window, not only the eye.
-- A live parent (`--two-way`, `--concurrent`, `--parent-*`) does not move its nest, and `--follow` is
-  refused there.
+- With a live parent (`--two-way`, `--concurrent`, `--parent-*`) `--follow` is refused; use `--move-nest` (below).
 - Memory: the forecast and a background worker share the card, so a 1000 km moving nest at 3 km peaked at
   45-57 GiB on a 96 GB card.
 
@@ -841,6 +952,33 @@ the storm and its rain shield are near the centre of the window.*
 Tokyo holds it until +42 h. Both moving runs keep the storm to +48 h; their central pressure is 18-19 hPa too deep
 at +18 h and 4-6 hPa too deep at +48 h. In the legend, "moving follow/all" is the default margin and "F1" is a
 150 km margin.*
+
+### A moving nest inside the live parent
+
+`woof-nam nest --concurrent --move-nest` moves a nest with the storm inside the live 12 km parent, in one process,
+one-way. It is off by default.
+
+```
+woof-nam nest --concurrent --move-nest --center 50.75N,173.5E --size-km 420 --size-y-km 480 --res-km 3 \
+    --parent-center 54.3N,178.5E --parent-size-km 1500 --parent-size-y-km 1650 --move-reach-km 1240,1400 \
+    --source gfs --start 2026111700 --hours 2 --no-sheets --out runs/moving
+```
+
+- Before the forecast the door builds the static fields, soil, sea surface and snow of the whole area the nest may
+  visit (`--move-reach-km X,Y`, centred on the parent unless `--move-reach-center` is given), so every cell of a new
+  window has its own fine terrain and land.
+- Every `--move-every-min` minutes of model time (15) the storm centre is found on the card (the sea-level-pressure
+  minimum after a `--move-smooth-km` box smooth, 60 km). When it is more than `--move-cells` parent cells (3) from the
+  nest's centre, the nest moves by whole parent cells. Kept cells are carried over bit for bit; new ground is filled
+  from the live parent at that step, on the nest's terrain, and blended into the kept cells over
+  `--move-blend-cells` (12). A move that would leave the parent or the reach is held.
+- The nest writes its window just before each move and just after it, beside the hourly history; the receipt's
+  `move` block and `<out>/nest/move-receipt.json` list every move.
+- On the North Pacific low of GFS 2026-11-17 00Z (the command above, one RTX 4090), the nest moved once in 2 h, at
+  +1:45, by 8 parent cells east and 5 north, in about 2 s. All 271 state arrays of the kept cells were carried bit for
+  bit. The run took about 75 s from start to maps and peaked at 11.2 GiB on the card.
+- Refused in words: `--two-way` (no feedback during moves), `--ladder` (no nests inside a moving nest), and a window
+  with as many rows as columns (give a different `--size-y-km`). Every live-parent run is on one card (`--cards 1`).
 
 ### Data sources for nests
 
@@ -886,13 +1024,18 @@ CONTRACT.md        array layout, step order, kernel convention, done rule
   the 12 km run's hourly history, not from NCEP's in-executable coupling, and the fire-weather nest from the 12 km run
   rather than from the 3 km nest. In the nest files, flight-level records carry values below the ground where NOAA's
   are missing, and cloud ice is not written (71 records in all, docs/nests/COMPATIBILITY.md).
-- **Moving nests:** for the first 1-3 h after a move, the new strip holds the source's smooth rain, with a
-  visible join along the old edge. The strip starts from GFS or IFS, not from the model's own state.
+- **Moving nests:** with `--follow`, for the first 1-3 h after a move, the new strip holds the source's smooth rain,
+  with a visible join along the old edge. The strip starts from GFS or IFS, not from the model's own state. With
+  `--move-nest` the new ground starts from the live parent, so its rain totals start at zero and its small-scale
+  detail is the parent's for the first hours; it runs one-way, one moving nest, one card, and has not been run over
+  a landfall.
 - **Multi-card:** one machine only (no multi-node runs). The 5 km and band configfiles are not rows of
   `domains.json` (not measured as a whole run); they run from a checkout through `tools/run_nam_domain.sh`.
 - **Memory fit on several cards:** measured on the 954 x 279 band (2 cards, same bits as 1 card). The full
   12 km grid on several cards is measured on the full memory path only.
 - **Restarts:** one card ("Restarts" above); the NAM's own restart files are not read.
+- **Starts from a forecast hour:** GFS (the 12 km grid and boxes) and GEFS (the 12 km grid), and only the hours they
+  post ("Get the input data" above); the other sources start from their newest analysis at or before the time. No spin-up start and no storm-following nest from a forecast hour yet.
 - **GRIB2 products:** 3 of NOAA's 454 awphys records and 71 of NOAA's 876 conusnest (871 other nests) records are
   not produced ("GRIB2 products" and "Nest GRIB2 products" above). The prebuilt
   writer is for Linux x86-64; elsewhere, build `rw_rrfs_upp` from gpuwm and set `WOOF_NAM_RW_RRFS_UPP`.

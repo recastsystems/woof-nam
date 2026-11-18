@@ -54,7 +54,7 @@ NCLASS = 30                           # soil_hydraulics table length (init-nativ
 # One row per source. "file" is relative to the case directory; {cyc} is the cycle hour.
 SOURCES = {
     "native": {"kind": "nam_native", "file": "raw/nam/bgrd3d00.grib2", "gdt": 32769,
-               "valid_before": "2026-11-03T12",
+               "valid_before": "2026-11-03T12", "analysis_every_h": 6,
                "attribution": "NOAA/NCEP NAM analysis (public domain)",
                "licence": "public-domain (US government work, NOAA NOMADS / AWS NODD noaa-nam-pds)"},
     "gfs":    {"kind": "isobaric", "file": "raw/gfs/gfs.t{cyc:02d}z.pgrb2.0p25.f000", "gdt": 0,
@@ -75,6 +75,18 @@ SOURCES = {
                # f000 about 3.5 h after the cycle and f384 by about 5 h); the door takes age 0 after it
                "boundary": {"age_h": 6, "interval_h": 3, "file": "raw/gfs/gfs.t{bcyc:02d}z.f{lead:03d}.grib2",
                             "published_after_h": 6},
+               # A start from a forecast hour of a GFS run (woof-nam fetch / run / nest / suite --lead H, and
+               # woof-nam fetch --at TIME): the start is hour H of the run H hours before the start time, read with
+               # the start record set (every GFS forecast file carries soil, snow, sea ice, canopy water, skin
+               # temperature and the hydrometeors), and the boundaries are hours H, H+3, ... of that same run.
+               # leads: [last hour, step] as NCEP posts the 0.25 deg files (read from the bucket 2026-11-12: every
+               # hour to 120, every 3 h to 384; hour 200 does not exist). lead_eras: the steps of the archived eras
+               # (fetch_case.GFS_ERAS: NCAR's archive holds 3-hourly files to 240 h from 2015-01-15; before it only
+               # analyses are kept, so no forecast-hour start). lead_file: the name a storm-following run already
+               # gives a forecast hour fetched with the start records (fetch_case row gfs-boco, follow_dest).
+               "leads": [[120, 1], [384, 3]], "analysis_every_h": 6,
+               "lead_eras": [["2015-01-15T00", [[240, 3]]], ["2021-01-01T00", [[120, 1], [384, 3]]]],
+               "lead_file": "raw/gfs/gfs.t{bcyc:02d}z.f{lead:03d}.start.grib2",
                "attribution": "NOAA/NCEP GFS (public domain)", "licence": "public-domain"},
     # ECMWF open data IFS HRES (CC BY 4.0). Rows copied from gpuwm authorities/rw-wps-fetch-routes.v1.json
     # (routes ecmwf-open-data-0p1 measured 2026-10-24/29, ecmwf-open-data measured 2026-09-28/30): hosts, file
@@ -84,7 +96,11 @@ SOURCES = {
     # ECMWF open data: ICEC comes from the same cycle's GFS f000 (source_records.IFS donors). Boundaries are the
     # same cycle's leads every 3 h (age 0: the start and the boundaries are one forecast).
     "ifs":    {"kind": "isobaric", "file": "raw/ifs/ifs.t{cyc:02d}z.0p1.f000.grib2", "gdt": 0, "grid": "ifs_0p1",
-               "records": "ifs", "valid_from": "2026-10-20T12", "before_use": "ifs-0p25",
+               "records": "ifs", "valid_from": "2026-10-20T12", "before_use": "ifs-0p25", "analysis_every_h": 6,
+               # what ECMWF posts per cycle hour (its bucket, 2026-11-12): data for the site's table; a start from an
+               # IFS forecast hour is not written yet, so a window starts from the analysis at or before it
+               "posted_by_cycle": {"0": [[144, 3], [360, 6]], "12": [[144, 3], [360, 6]], "6": [[144, 3]],
+                                   "18": [[144, 3]]},
                "boundary": {"age_h": 0, "interval_h": 3, "file": "raw/ifs/ifs.t{bcyc:02d}z.0p1.f{lead:03d}.grib2"},
                "attribution": "ECMWF open data, CC BY 4.0", "licence": "CC-BY-4.0",
                "fetch": {
@@ -117,7 +133,9 @@ SOURCES = {
                  # (source_records donor_fallback). ECMWF's own .index files: sol sot/vsw from 2024-11-15, sfc z by
                  # 2025-03-15 (present in the 2025-03-14 12Z file, which ran the IFS start), sd by 2025-12-01, rsn
                  # from 2026-02-11 12Z. Was 2024-03-18 12Z, whose files lack sot/vsw; earlier cycles take gfs.
-                 "records": "ifs", "valid_from": "2025-03-14T12",
+                 "records": "ifs", "valid_from": "2025-03-14T12", "analysis_every_h": 6,
+                 "posted_by_cycle": {"0": [[144, 3], [360, 6]], "12": [[144, 3], [360, 6]], "6": [[144, 3]],
+                                     "18": [[144, 3]]},
                  "boundary": {"age_h": 0, "interval_h": 3,
                               "file": "raw/ifs/ifs.t{bcyc:02d}z.0p25.f{lead:03d}.grib2"},
                  "attribution": "ECMWF open data, CC BY 4.0", "licence": "CC-BY-4.0",
@@ -133,7 +151,10 @@ SOURCES = {
                                "files": ["{ymd}/{hh}z/ifs/0p25/scda/{ymd}{hh}0000-{lead}h-scda-fc.grib2"]},
                               {"from": "2026-05-12T06", "until": None, "cycles": [6, 18],
                                "files": ["{ymd}/{hh}z/ifs/0p25/oper/{ymd}{hh}0000-{lead}h-oper-fc.grib2"]}],
-                     "steps": [[90, 3]],
+                     # every 3 h to 144 h at every cycle (ECMWF's bucket, read 2026-11-13: hour 144 of the 06Z oper
+                     # and of the 2025-03-15 06Z scda runs present, hour 147 of 00Z absent). Was [[90, 3]], the old
+                     # 06/18Z scda length, while posted_by_cycle said 144 and 360: a 100 h run stopped in its fetch
+                     "steps": [[144, 3]],
                      "publication_lag_h": {"0": 7.5, "12": 7.5, "6": 6.4, "18": 6.4},
                      "select": [{"levtype": "pl", "param": ["gh", "q", "t", "u", "v"]},
                                 {"levtype": "sfc", "param": ["10u", "10v", "2d", "2t", "lsm", "skt", "sp", "z",
@@ -157,7 +178,7 @@ SOURCES = {
     # Every boundary time is an analysis (age 0): the start and the boundaries are one reanalysis, every 3 h (the NAM's
     # boco interval, tboco 10800 s) out of the hourly record. No donors: ERA5 carries sea ice, snow, soil and SST.
     "era5":   {"kind": "isobaric", "file": "raw/era5/t{cyc:02d}z.f000/era5-combined.nc", "gdt": 0, "grid": "era5_0p25",
-               "records": "era5", "valid_from": "1940-01-01T00",
+               "records": "era5", "valid_from": "1940-01-01T00", "analysis_every_h": 1,
                "boundary": {"age_h": 0, "interval_h": 3, "file": "raw/era5/t{bcyc:02d}z.f{lead:03d}/era5-combined.nc"},
                "attribution": "Contains modified Copernicus Climate Change Service information (ERA5 reanalysis, "
                               "Hersbach et al. 2020, CC BY 4.0), read from Google's public ARCO-ERA5 copy",
@@ -181,10 +202,13 @@ SOURCES = {
     # p01-p30, from the configfile key source_member or NAMGPU_SOURCE_MEMBER (woof-nam fetch/run --member).
     "gefs":   {"kind": "isobaric", "file": "raw/gefs/{mem}/gefs.t{bcyc:02d}z.f{lead:03d}.grib2", "gdt": 0,
                "grid": "gefs_0p5", "records": "gfs_0p25", "valid_from": "2020-09-23T12", "lead_start": True,
+               # the forecast hours a window can start from (the bucket, 2026-11-12 and 2020-09-23 12Z: every 3 h to
+               # 240, every 6 h to 384); a window past 240 h takes its edges every 6 h (window.py, INTERVAL_ENV)
+               "posted_leads": [[240, 3], [384, 6]],
                "cycle_step_h": 6, "member_default": "c00", "members": ["c00"] + [f"p{k:02d}" for k in range(1, 31)],
                "boundary": {"interval_h": 3, "file": "raw/gefs/{mem}/gefs.t{bcyc:02d}z.f{lead:03d}.grib2"},
                "attribution": "NOAA/NCEP GEFS v12 (public domain)",
-               "licence": "public-domain (US government work, AWS NODD noaa-gefs-pds)",
+               "licence": "public-domain (US government work: NOAA/NCEP GEFS, from the NOAA Open Data Dissemination programme)",
                "fetch": {"kind": "ncep-idx-pair", "host": "https://noaa-gefs-pds.s3.amazonaws.com",
                          "files": ["gefs.{ymd}/{hh}/atmos/pgrb2ap5/ge{mem}.t{hh}z.pgrb2a.0p50.f{lead:03d}",
                                    "gefs.{ymd}/{hh}/atmos/pgrb2bp5/ge{mem}.t{hh}z.pgrb2b.0p50.f{lead:03d}"],
@@ -197,7 +221,7 @@ SOURCES = {
     # --soil-from gfs, the soil. Boundaries: none of its own, so GFS's (boco_age_h 6 as the operational NAM), like the
     # native start: a RAP start differs from a GFS start only in the start.
     "rap":    {"kind": "isobaric", "file": "raw/rap/rap.t{cyc:02d}z.wrfprsf00.grib2", "gdt": 32769, "grid": "rap_rotated",
-               "records": "rap", "valid_from": "2021-02-22T12",
+               "records": "rap", "valid_from": "2021-02-22T12", "analysis_every_h": 1,
                "fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
                "soil_from": ("source", "gfs", "gfs-moisture"),
                "attribution": "NOAA/NCEP Rapid Refresh (RAP) analysis (public domain)",
@@ -211,7 +235,7 @@ SOURCES = {
                "grid": "hrrr_lambert", "records": "hrrr",
                # AWS NODD noaa-hrrr-bdp-pds holds wrfprsf00 from 2014-07-30 18Z; the record table is HRRR v4's
                # (2020-12-02 on), measured on 2026-01-23 12Z. An older file missing a record is refused at decode.
-               "valid_from": "2014-07-30T18",
+               "valid_from": "2014-07-30T18", "analysis_every_h": 1,
                "fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
                "soil_from": ("source", "gfs", "gfs-moisture"),
                # default gfs-moisture (HRRR soil temperature, GFS soil moisture): 2026-01-23 12Z, 12 h, frozen NAM physics,
@@ -224,7 +248,7 @@ SOURCES = {
     # prslev, surface and RUC soil in 2dfld (source_records RRFS, sfc_file_from), the hrrr row's fallback and GFS
     # boundaries. Public archive noaa-rrfs-ops-pds from 2026-08-12 (no earlier cycles there), f000 at every 3 h cycle.
     "rrfs":   {"kind": "isobaric", "file": "raw/rrfs/rrfs.t{cyc:02d}z.prslev.3km.f000.conus.grib2", "gdt": 30,
-               "grid": "rrfs_lambert", "records": "rrfs", "valid_from": "2026-08-12T00",
+               "grid": "rrfs_lambert", "records": "rrfs", "valid_from": "2026-08-12T00", "analysis_every_h": 1,
                "fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
                "soil_from": ("source", "gfs", "gfs-moisture"),
                "attribution": "NOAA/NCEP Rapid Refresh Forecast System (RRFS v1) analysis (public domain)",
@@ -241,7 +265,7 @@ SOURCES = {
     "aifs":   {"kind": "isobaric", "start_from": "ifs-0p25",
                "start_fallback": {"source": "gfs", "edge_cells": 8, "top_blend_pa": 2000.0},
                "file": "raw/aifs/aifs.t{cyc:02d}z.0p25.f000.grib2",
-               "gdt": 0, "grid": "ifs_0p25", "records": "aifs", "valid_from": "2025-03-14T12",
+               "gdt": 0, "grid": "ifs_0p25", "records": "aifs", "valid_from": "2025-03-14T12", "analysis_every_h": 6,
                "boundary": {"age_h": 0, "interval_h": 6, "records": "aifs",
                             "file": "raw/aifs/aifs.t{bcyc:02d}z.0p25.f{lead:03d}.grib2"},
                "attribution": "ECMWF AIFS Single open data (CC BY 4.0); start: ECMWF IFS open data analysis",
@@ -266,6 +290,7 @@ SOURCES = {
     # and 2 m humidity derived from the isobaric profile at the model terrain (source_records AIGFS).
     "aigfs":  {"kind": "isobaric", "start_from": "gfs", "file": "raw/aigfs/aigfs.t{cyc:02d}z.f000.grib2", "gdt": 0,
                "grid": "gfs_0p25", "records": "aigfs", "valid_from": "2025-12-01T00", "retention_h": 240,
+               "analysis_every_h": 6,
                "boundary": {"age_h": 0, "interval_h": 6, "records": "aigfs",
                             "file": "raw/aigfs/aigfs.t{bcyc:02d}z.f{lead:03d}.grib2"},
                "attribution": "NOAA/NCEP AIGFS (public domain); start: NOAA/NCEP GFS analysis",
@@ -516,13 +541,254 @@ def source_row(ctx) -> tuple[str, dict]:
     return name, SOURCES[name]
 
 
-def boco_age_h(row: dict, cfg=None, override=None, start=None) -> int:
+LEAD_ENV = "NAMGPU_START_LEAD_H"      # the start's forecast hour in its source run (a row with "leads": gfs)
+INTERVAL_ENV = "NAMGPU_BOCO_INTERVAL_H"   # a window's boundary spacing when it is coarser than the row's (gefs > 240 h)
+
+
+def boundary_interval_h(row: dict) -> int:
+    """The boundary spacing of a run from this row: NAMGPU_BOCO_INTERVAL_H when a window set it (a GEFS window past
+    240 h, where GEFS posts every 6 h), else the row's own."""
+    import os
+    own = int((row.get("boundary") or {}).get("interval_h") or row.get("boco_interval_h") or 3)
+    v = os.environ.get(INTERVAL_ENV, "").strip()
+    if not v:
+        return own
+    k = int(v)
+    if k <= 0 or k % own:
+        raise ValueError(f"{UNIT}: boundary spacing {k} h: must be a multiple of the source's own {own} h")
+    return k
+
+
+def reach_h(name: str) -> int | None:
+    """The longest run from a source whose edges are its own forecast (ifs, ifs-0p25, aifs, aigfs): the last lead its
+    fetch reads (the row's fetch "steps"), counted from its analysis. None when the edges are GFS's (native, rap, hrrr,
+    rrfs), GEFS's own posted table (window.fit) or ERA5's later analyses (its archive's newest hour). One number for
+    the window plan, the fetch and `woof-nam sources --json` (the site's table holds it equal)."""
+    row = SOURCES.get(name) or {}
+    fetch = row.get("fetch") or {}
+    if "boundary" not in row or fetch.get("kind") not in ("ecmwf-jsonl", "whole-files") or not fetch.get("steps"):
+        return None
+    return int(max(s for s, _ in fetch["steps"]))
+START_FILE = "raw/START.json"         # what the fetch chose for a case: the source run and the forecast hour
+
+
+def start_lead_h(row: dict, cfg=None, override=None) -> int:
+    """The forecast hour of the source run the start is read from, for a row with "leads" (gfs): 0 is the
+    analysis. First set wins: override (a CLI value), NAMGPU_START_LEAD_H (a door sets it for the run and its
+    card processes), configfile key start_lead_h. A row without "leads" always answers 0."""
+    import os
+    if not row.get("leads"):
+        return 0
+    for v in (override, os.environ.get(LEAD_ENV), (cfg.raw.get("start_lead_h") if cfg is not None else None)):
+        if v is not None and str(v).strip() != "":
+            h = int(v)
+            if h < 0:
+                raise ValueError(f"{UNIT}: start forecast hour {h}: must be 0 or more")
+            return h
+    return 0
+
+
+def lead_steps(row: dict, cycle=None) -> list:
+    """[[last hour, step], ...]: the forecast hours the row's source posts for `cycle` (row "lead_eras"; the
+    row's "leads" when no cycle is given). A cycle before the first era has no forecast files: refused."""
+    eras = row.get("lead_eras")
+    if cycle is None or not eras:
+        return row["leads"]
+    t = cycle.strftime("%Y-%m-%dT%H")
+    steps = None
+    for since, s in eras:
+        if t >= since:
+            steps = s
+    if steps is None:
+        raise ValueError(f"a start from a forecast hour needs the archived forecast files, which begin "
+                         f"{eras[0][0].replace('T', ' ')}Z; the {cycle:%Y-%m-%d %H}Z run has only analyses")
+    return steps
+
+
+def posted_leads(steps) -> list:
+    """Every forecast hour of a [[last, step], ...] table, in order."""
+    out, prev = [], None
+    for last, step in steps:
+        out += list(range(0 if prev is None else prev + int(step), int(last) + 1, int(step)))
+        prev = int(last)
+    return out
+
+
+def _steps_text(steps) -> str:
+    parts = [f"every {'hour' if int(s) == 1 else f'{int(s)} hours'} to {int(last)}" for last, s in steps]
+    return ", then ".join(parts)
+
+
+def lead_max_hours(row: dict, lead: int, cycle=None) -> int:
+    """The longest run (hours) from forecast hour `lead`: its boundaries are hours lead, lead + 3, ... of the
+    same run, and every one of them must be posted."""
+    k = int(row.get("boco_interval_h", 3))
+    posted = set(posted_leads(lead_steps(row, cycle)))
+    n = 0
+    while int(lead) + n + k in posted:
+        n += k
+    return n if int(lead) in posted else 0
+
+
+def check_lead(row: dict, lead: int, hours=None, cycle=None) -> int:
+    """Refuse (ValueError, in plain words) a forecast hour the source does not post, or a run longer than the
+    posted hours cover; else return the longest run from that hour. One rule for fetch, run, nest and suite."""
+    from namgpu.domains import bc_hours
+    steps = lead_steps(row, cycle)
+    posted = posted_leads(steps)
+    lead, k = int(lead), int(row.get("boco_interval_h", 3))
+    said = _steps_text(steps)
+    if lead not in posted:
+        near = [str(p) for p in (max((p for p in posted if p < lead), default=None),
+                                 min((p for p in posted if p > lead), default=None)) if p is not None]
+        raise ValueError(f"GFS forecast hour {lead} is not posted (GFS posts {said}); the nearest "
+                         f"{'are' if len(near) > 1 else 'is'} {' and '.join(near)}")
+    longest = lead_max_hours(row, lead, cycle)
+    on_grid = [p for p in (lead - lead % k, lead - lead % k + k) if p in posted and p != lead]
+    alt = ""
+    if lead % k and on_grid:
+        alt = "; " + " and ".join(f"hour {p} allows {lead_max_hours(row, p, cycle)} h" for p in on_grid)
+    if longest < 6:
+        last = max(p for p in posted if lead_max_hours(row, p, cycle) >= 6)
+        raise ValueError(f"no run fits from GFS forecast hour {lead}: its boundaries are hours {lead}, {lead + k}, "
+                         f"{lead + 2 * k} of the same run and hour {lead + longest + k} is not posted (GFS posts "
+                         f"{said}); the latest start is hour {last}{alt}")
+    if hours is not None and bc_hours(hours, k) > longest:
+        raise ValueError(f"a {float(hours):g} h run from GFS forecast hour {lead} needs boundaries to hour "
+                         f"{lead + bc_hours(hours, k)}, and hour {lead + longest + k} is not posted (GFS posts {said}); "
+                         f"the longest run from hour {lead} is {longest} h{alt}")
+    return longest
+
+
+def start_for_time(row: dict, t, hours, posted, now=None):
+    """(cycle, forecast hour) of the GFS run a start at time `t` (a whole hour, UTC) is read from. The analysis
+    when t is a 00/06/12/18Z cycle and its analysis is posted; otherwise the newest posted run at or before t
+    whose hour t - cycle is posted and can carry a run of `hours` (check_lead). posted(cycle, lead) -> bool asks
+    the archive; now (UTC) only saves asking for runs that have not happened. ValueError names why nothing fits."""
+    from datetime import timedelta
+    from namgpu.domains import bc_hours
+    step, k = int(row.get("cycle_step_h", 6)), int(row.get("boco_interval_h", 3))
+    last_posted = max(posted_leads(row["leads"]))
+    if now is not None and t - now > timedelta(hours=last_posted):
+        raise ValueError(f"{t:%Y-%m-%d %H}Z is more than {last_posted} h ahead; no GFS run reaches it")
+    if t.hour % step == 0 and (now is None or t <= now) and posted(t, 0):
+        return t, 0
+    c = t.replace(hour=t.hour - t.hour % step)
+    if c == t:
+        c -= timedelta(hours=step)
+    late, rule = None, []
+    while (t - c) <= timedelta(hours=last_posted):
+        lead = int((t - c).total_seconds() // 3600)
+        if now is None or c <= now:
+            try:
+                check_lead(row, lead, hours, c)
+            except ValueError as e:
+                rule.append((c, lead, str(e)))
+            else:
+                if posted(c, lead) and posted(c, lead + bc_hours(hours, k)):
+                    return c, lead
+                late = late or (f"the {c:%Y-%m-%d %H}Z GFS run has not posted hours {lead} to "
+                                f"{lead + bc_hours(hours, k)} yet, and no older run that reaches "
+                                f"{t:%Y-%m-%d %H}Z has them")
+        c -= timedelta(hours=step)
+    # nothing fits: say why for the newest run that exists (a run that has posted nothing yet explains nothing)
+    for c, lead, msg in rule:
+        if posted(c, 0):
+            late = f"from the {c:%Y-%m-%d %H}Z run it would be forecast hour {lead}: {msg}"
+            break
+    raise ValueError(f"no GFS run can start a {float(hours):g} h run at {t:%Y-%m-%d %H}Z: "
+                     + (late or (rule[0][2] if rule else "no run at or before it is posted")))
+
+
+def lead_credit(lead: int, start=None) -> str:
+    """The words every receipt, map and file list carries for a start from a forecast hour."""
+    from datetime import timedelta
+    if start is None:
+        return f"GFS forecast hour {int(lead)} (a forecast, not an analysis)"
+    return f"GFS forecast hour {int(lead)} of the {start - timedelta(hours=int(lead)):%Y-%m-%d %H}Z run"
+
+
+def read_start(case_dir) -> dict | None:
+    """The case's raw/START.json (what its fetch chose), or None."""
+    import json
+    try:
+        return json.loads((Path(case_dir) / START_FILE).read_text())
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def record_start(case_dir, start, lead: int, how: str = "--cycle", source: str = "gfs", hours=None) -> dict | None:
+    """Write the case's raw/START.json for a start from a forecast hour (or one chosen by --at); a plain
+    analysis fetch removes a stale one, so a case folder fetched twice never keeps the earlier choice."""
+    import json
+    from datetime import timedelta
+    p = Path(case_dir) / START_FILE
+    if not int(lead) and how != "--at":
+        p.unlink(missing_ok=True)
+        return None
+    cyc = start - timedelta(hours=int(lead))
+    rec = {"start": f"{start:%Y-%m-%dT%H}", "source": source, "cycle": f"{cyc:%Y-%m-%dT%H}", "lead_h": int(lead),
+           "chosen_by": how, "what": (lead_credit(lead, start) if int(lead) else
+                                      f"the {source} analysis of {start:%Y-%m-%d %H}Z")}
+    if hours is not None:
+        rec["hours"] = hours
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(rec, indent=1) + "\n")
+    return rec
+
+
+def door_lead(case_dir, source: str, given=None, start=None) -> int:
+    """The forecast hour a door (run, nest, suite) starts from: --lead when given, else what the case's fetch
+    recorded (raw/START.json), else what the calling door put in NAMGPU_START_LEAD_H. They must agree
+    (ValueError). Sets NAMGPU_START_LEAD_H for this process and its children, or clears it for an analysis."""
+    import os
+    from datetime import timedelta
+    rec = read_start(case_dir) if case_dir is not None else None
+    said = {}
+    if given is not None:
+        said["--lead"] = int(given)
+    if rec is not None and rec.get("source", "gfs") == source and (source == "gfs" or rec.get("gfs_lead_h")):
+        said[f"{Path(case_dir) / START_FILE}"] = int(rec.get("gfs_lead_h", rec.get("lead_h", 0)) or 0)
+    fill = (SOURCES.get(source, {}).get("fallback") or {}).get("source") == "gfs"
+    if str(os.environ.get(LEAD_ENV, "")).strip() != "" and (source == "gfs" or fill):
+        said[LEAD_ENV] = int(os.environ[LEAD_ENV])
+    if len(set(said.values())) > 1:
+        raise ValueError("the start's GFS forecast hour is given twice and differs: "
+                         + ", ".join(f"{k} says {v}" for k, v in said.items())
+                         + "; fetch the case again with the hour you want, or drop --lead")
+    lead = next(iter(said.values()), 0)
+    if lead and source != "gfs" and not (fill and given is None):
+        raise ValueError(f"--lead starts from a GFS forecast hour; use --source gfs (the {source} start has no "
+                         "forecast-hour files)")
+    if lead:
+        check_lead(SOURCES["gfs"], lead, None, (start - timedelta(hours=lead)) if start is not None else None)
+        if start is not None and (start.hour - lead) % int(SOURCES["gfs"].get("cycle_step_h", 6)):
+            raise ValueError(f"a {start:%H}Z start from forecast hour {lead} would come from a "
+                             f"{(start - timedelta(hours=lead)):%H}Z GFS run; GFS runs at 00, 06, 12 and 18Z")
+        os.environ[LEAD_ENV] = str(lead)
+    elif source == "gfs" or fill:
+        os.environ.pop(LEAD_ENV, None)
+    return lead
+
+
+def boco_age_h(row: dict, cfg=None, override=None, start=None, lead=None) -> int:
     """Hours between the start and the cycle the boundaries come from, for one SOURCES row. First set
     wins: override (a CLI value), NAMGPU_BOCO_AGE_H, configfile key boco_age_h, the row's boco_age_h.
     A lead_start row (gefs) takes start.hour mod cycle_step_h when nothing is set (the start is that lead of
-    the newest cycle at or before it), and any set age must land on one of its cycles."""
+    the newest cycle at or before it), and any set age must land on one of its cycles.
+    A start from a forecast hour (start_lead_h above 0; `lead` passes a door's own value): the boundaries are
+    that same run's hours, so the age is the forecast hour, and the run it names must be a cycle."""
     import os
     step = int(row.get("cycle_step_h", 6))
+    lead0 = start_lead_h(row, cfg, lead)
+    if lead0:
+        if override is not None and str(override).strip() != "" and int(override) != lead0:
+            raise ValueError(f"{UNIT}: boundary age {int(override)} h with a start from forecast hour {lead0}: the "
+                             f"boundaries are that run's own hours (age {lead0}); drop the boundary age")
+        if start is not None and (start.hour - lead0) % step:
+            raise ValueError(f"{UNIT}: a {start:%H}Z start from forecast hour {lead0} is not a {step}-hourly cycle "
+                             "of this source")
+        return lead0
     for v in (override, os.environ.get("NAMGPU_BOCO_AGE_H"),
               (cfg.raw.get("boco_age_h") if cfg is not None else None), row.get("boco_age_h"),
               (row.get("boundary") or {}).get("age_h")):
@@ -560,17 +826,22 @@ def source_member(row: dict, cfg=None) -> str:
 
 def file_keys(row: dict, start, cfg=None) -> dict:
     """The template keys of a row's file names for a run starting at `start`: cyc (start hour), bcyc (the
-    boundary cycle's hour), lead (the start's lead in that cycle: 0 unless the row is lead_start) and mem."""
+    boundary cycle's hour), lead (the start's lead in that cycle: 0 unless the row is lead_start, or a row with
+    "leads" is started from a forecast hour, start_lead_h) and mem."""
     from datetime import timedelta
     if start is None:
         return {"cyc": 0, "bcyc": 0, "lead": 0, "mem": source_member(row, cfg)}
-    age = boco_age_h(row, cfg, start=start) if row.get("lead_start") else 0
+    age = boco_age_h(row, cfg, start=start) if (row.get("lead_start") or start_lead_h(row, cfg)) else 0
     return {"cyc": int(start.hour), "bcyc": int((start - timedelta(hours=age)).hour), "lead": age,
             "mem": source_member(row, cfg)}
 
 
 def source_path(ctx, row) -> Path:
-    return Path(ctx.case_dir) / row["file"].format(**file_keys(row, ctx.start, getattr(ctx, "cfg", None)))
+    """The start file of a row in the case folder: its "file", or its "lead_file" when the start is a forecast
+    hour of the source run (a row with "leads": gfs --lead H)."""
+    keys = file_keys(row, ctx.start, getattr(ctx, "cfg", None))
+    tmpl = row["lead_file"] if (row.get("leads") and row.get("lead_file") and keys["lead"]) else row["file"]
+    return Path(ctx.case_dir) / tmpl.format(**keys)
 
 
 def soil_hydraulics():

@@ -50,9 +50,11 @@ def _nam_cycle_exists(cycle: datetime) -> bool:
 
 def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: int = DEFAULT_WORKERS,
           gfs_only: bool = False, source: str | None = None, cfg=None, age_h: int | None = None,
-          inputs_only: bool = False, spinup_hours: int = 0) -> int:
+          inputs_only: bool = False, spinup_hours: int = 0, lead_h: int = 0) -> int:
     """Fetch every input of one case for the configured domain (fetch_case.FETCH_ROWS). Returns the number of
     failed required requests (0 = complete).
+    cycle: the run's start time. lead_h above 0: the start is that forecast hour of the GFS run lead_h hours
+    before it, and the boundaries are that run's later hours (source gfs; fetch_case.plan).
     hours: the forecast length. The boundaries cover exactly what a run of that length reads (domains.bc_hours:
     at least 6 h, in 3-hourly steps); the referee and truth rows (archived NAM forecast, MRMS) cover 0..hours.
     source None: the NAM set (native start) when NODD holds this cycle's NAM files, else GFS only.
@@ -77,7 +79,7 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: 
     import time
     t0 = time.perf_counter()
     if source is None:
-        source = "gfs" if gfs_only else "native"
+        source = "gfs" if (gfs_only or lead_h) else "native"
     if source == "native" and not _nam_cycle_exists(cycle):
         # NCEP retired the NAM on 2026-11-03 12Z: later cycles (and gaps in the archive) have no NAM files
         print(f"{UNIT}: no NAM files for cycle {cycle:%Y%m%d%H} on NODD; fetching GFS and MRMS only "
@@ -88,7 +90,7 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: 
     if hours > 36 and not gfs_only and not inputs_only:
         print(f"{UNIT}: note, hourly NAM picture-referee subsets stop at 36 h (NAM hourly limit)", flush=True)
     bad = fetch_case.fetch(cycle, Path(case_dir), hours, workers, cfg=cfg, source=source, age_h=age_h,
-                           log=lambda m: print(m, flush=True), rows=rows)
+                           log=lambda m: print(m, flush=True), rows=rows, lead_h=int(lead_h))
     secs = round(time.perf_counter() - t0, 1)
     raw = Path(case_dir) / "raw"
     nbytes = sum(p.stat().st_size for p in raw.rglob("*") if p.is_file()) if raw.is_dir() else 0
@@ -97,8 +99,74 @@ def fetch(cycle: datetime, case_dir: Path, hours: int = DEFAULT_HOURS, workers: 
         {"cycle": f"{cycle:%Y%m%d%H}", "hours": hours, "source": source, "gfs_only": gfs_only,
          "inputs_only": inputs_only, "rows": [r["name"] for r in rows], "failed": bad, "seconds": secs,
          "raw_bytes": nbytes, "parallelism": f"{workers} threads (I/O)"}
+        | ({"source_cycle": f"{cycle - timedelta(hours=int(lead_h)):%Y%m%d%H}", "source_lead_h": int(lead_h)}
+           if lead_h else {})
         | ({"spinup_hours": int(spinup_hours), "spinup_failed": sbad} if spinup_hours else {}), indent=1))
     return bad + sbad
+
+
+def choose(a, now: datetime | None = None, posted=None) -> dict:
+    """The fetch's plan from --cycle [--lead H] or --at TIME, on any source (namgpu/init/window.py). A plain --cycle
+    (no --lead, no --at) is the analysis of that cycle, as before: {"start", "lead_h": 0, "plan": None}. Otherwise
+    window.resolve: the wanted hour, or the nearest posted one before it with the run that much longer, said in one
+    line. SystemExit in one plain line only when nothing can run, or the options contradict each other."""
+    from namgpu.init import window  # noqa: PLC0415
+
+    def stop(msg):
+        raise SystemExit(f"woof-nam fetch: refused: {msg}")
+
+    def when(s, opt):
+        try:
+            return window.parse_time(s, opt)
+        except ValueError as e:
+            stop(str(e))
+
+    if a.at is not None and (a.cycle is not None or a.lead is not None):
+        stop("--at chooses the source run and its forecast hour itself; give --at TIME, or --cycle with --lead")
+    if a.at is None and a.cycle is None:
+        stop("give --cycle YYYYMMDDHH (with --lead H for a start from a forecast hour) or --at TIME")
+    if a.at is None and not a.lead:
+        cyc = when(a.cycle, "--cycle")
+        why = window.reach_error(a.source or "gfs", cyc, float(a.hours))
+        if why:
+            stop(why)
+        return {"start": cyc, "lead_h": 0, "plan": None, "how": "--cycle",
+                "line": f"start {cyc:%Y-%m-%d %H}Z from the analysis of that hour"}
+    source = a.source or "gfs"
+    if a.spinup_hours:
+        stop("--spinup-hours with --at or --lead: the spin-up reads an analysis six hours before a cycle start; fetch "
+             "the cycle with --cycle")
+    try:
+        p = window.resolve(source, hours=float(a.hours), at=when(a.at, "--at") if a.at is not None else None,
+                           cycle=when(a.cycle, "--cycle") if a.at is None else None,
+                           lead=float(a.lead) if a.lead is not None else None, now=now,
+                           posted=posted if posted is not None else fetch_case.posted_for(source))
+    except ValueError as e:
+        stop(str(e))
+    if a.boco_age is not None and p.get("lead_h") and int(a.boco_age) != int(p["lead_h"]):
+        stop(f"--boco-age {a.boco_age} with a start from forecast hour {p['lead_h']}: the boundaries are the same "
+             "run's later hours")
+    return {"start": p["start"], "lead_h": int(p.get("gfs_lead_h") or 0), "plan": p, "how": p["how"],
+            "line": p["line"]}
+
+
+def choose_start(a, now: datetime | None = None, posted=None) -> tuple[datetime, int, str]:
+    """(model start, GFS forecast hour, the line) of choose()."""
+    c = choose(a, now, posted)
+    return c["start"], c["lead_h"], c["line"]
+
+
+def case_folder(case_dir, start: datetime, lead: int, how: str) -> Path:
+    """The case folder: --case-dir, or cases/<start> under the work root. woof-nam run reads the start time from
+    the folder's name, so a start that is not the --cycle (a forecast hour, --at) must be named for the start."""
+    from namgpu import paths  # noqa: PLC0415
+    name = f"{start:%Y-%m-%d_%H}z"
+    if case_dir is None:
+        return paths.work_root() / "cases" / name
+    if (lead or how == "--at") and Path(case_dir).name[:14] != name:
+        raise SystemExit(f"woof-nam fetch: refused: --case-dir {case_dir}: name the case folder for the start time, "
+                         f"{name} (woof-nam run reads the start time from the folder's name)")
+    return Path(case_dir)
 
 
 def _fetch_source(cycle: datetime, case_dir: Path, hours: int, workers: int, source: str) -> int:
@@ -153,13 +221,36 @@ def main(argv=None) -> int:
                "  woof-nam fetch --cycle 2026110412 --hours 24 --case-dir cases/2026-11-04_12z --gfs-only\n"
                "  woof-nam fetch --cycle 2025031412 --hours 24 --case-dir cases/2025-03-14_12z --source ifs-0p25\n"
                "  woof-nam fetch --cycle 2025031412 --hours 24 --case-dir cases/2025-03-14_12z --source era5\n"
+               "a start from a GFS forecast hour, or at a chosen time (the case folder is named for the start):\n"
+               "  woof-nam fetch --cycle 2026111212 --lead 201 --hours 24 --case-dir cases/2026-11-20_21z --gfs-only\n"
+               "  woof-nam fetch --at 2026012315 --hours 24 --gfs-only\n"
+               "  woof-nam fetch --source gfs --cycle 2026111212 --lead 200 --hours 24   (hour 200 is not posted: starts at 198)\n"
+               "  woof-nam fetch --source native --at 2025031414 --hours 6     (the 12Z analysis, 2 h longer)\n"
+               "  woof-nam fetch --source gefs --member p07 --cycle 2026111206 --lead 246 --hours 48\n"
+               "  woof-nam fetch --source hrrr --at 2026111215 --hours 18      (GFS 12Z hour 3 around it)\n"
                "Name the case folder YYYY-MM-DD_HHz: woof-nam run reads the start time from it. Any domain: "
                "woof-nam nest fetches for its own grid.",
         formatter_class=HelpFormatter)
-    ap.add_argument("--cycle", required=True, help="start cycle, YYYYMMDDHH (00, 06, 12 or 18 UTC)")
+    ap.add_argument("--cycle", default=None,
+                    help="start cycle, YYYYMMDDHH (00, 06, 12 or 18 UTC); with --lead, the GFS run the start is read from")
+    ap.add_argument("--lead", type=float, default=None, metavar="H",
+                    help="the window starts at hour H of the --cycle run of --source (default gfs). gfs and gefs: the "
+                         "start is that forecast (soil, snow, sea ice and the sea surface are the source's own forecast "
+                         "of them) and the edges are the same run's later hours. An hour the source does not post (GFS "
+                         "goes 3-hourly after 120, GEFS 6-hourly after 240) starts at the nearest posted hour before "
+                         "it and runs that much longer; the outputs stay on the hours asked (woof-nam run --write). "
+                         "Other sources: their analysis at or before that time, the same way")
+    ap.add_argument("--at", default=None, metavar="TIME",
+                    help="the window starts at this time, YYYYMMDDHH or YYYYMMDDHHMM (UTC), in place of --cycle, on "
+                         "any --source: gfs reads the analysis when TIME is a cycle it has posted, else the newest "
+                         "posted run that reaches TIME (its nearest posted hour at or before TIME); an analysis-only "
+                         "source reads its newest analysis at or before TIME (hourly: era5, rap, hrrr, rrfs). The "
+                         "model starts there and runs that much longer, and the first output is TIME. Prints the plan "
+                         "in one line and writes it to <case-dir>/raw/START.json, which woof-nam run reads")
     ap.add_argument("--hours", type=int, default=DEFAULT_HOURS,
                     help=f"forecast length to fetch inputs for, in hours (default {DEFAULT_HOURS})")
-    ap.add_argument("--case-dir", required=True, help="case folder, e.g. cases/2025-03-14_12z")
+    ap.add_argument("--case-dir", default=None,
+                    help="case folder, e.g. cases/2025-03-14_12z (default: cases/<start time> in the working folder)")
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                     help=f"parallel fetches (default {DEFAULT_WORKERS})")
     ap.add_argument("--inputs-only", action="store_true",
@@ -188,9 +279,30 @@ def main(argv=None) -> int:
     if getattr(a, "member", None):
         __import__("os").environ["NAMGPU_SOURCE_MEMBER"] = str(a.member)
     from namgpu import config
+    from namgpu.init import sources as srcmod
+    import math
+    import os
+    from namgpu.init import window
+    c = choose(a)
+    start, lead, plan = c["start"], c["lead_h"], c["plan"]
+    case_dir = case_folder(a.case_dir, start, lead, c["how"] if plan is not None else "--cycle")
+    if plan is not None:
+        print(f"woof-nam fetch: {c['line']}; case folder {case_dir}", flush=True)
     cfg = config.load(a.config) if a.config else config.load()
-    bad = fetch(datetime.strptime(a.cycle, "%Y%m%d%H"), Path(a.case_dir), a.hours, a.workers, a.gfs_only, a.source,
-                cfg=cfg, age_h=a.boco_age, inputs_only=a.inputs_only, spinup_hours=a.spinup_hours)
+    # the choice is written before the files arrive, so a fetch that is run again, the run and a resume agree
+    if plan is None:
+        srcmod.record_start(case_dir, start, 0, "--cycle")
+        hours, source = a.hours, a.source
+    else:
+        rec = window.record(case_dir, plan)
+        os.environ.update(window.env_for(rec))       # a gefs window's run age and spacing for its fetch
+        hours, source = int(math.ceil(plan["model_hours"] - 1e-9)), plan["source"]
+    try:
+        bad = fetch(start, case_dir, hours, a.workers, a.gfs_only or source == "gfs", source,
+                    cfg=cfg, age_h=None if (lead or (plan or {}).get("source") == "gefs") else a.boco_age,
+                    inputs_only=a.inputs_only, spinup_hours=a.spinup_hours, lead_h=lead)
+    except ValueError as e:
+        raise SystemExit(f"woof-nam fetch: refused: {str(e).replace('fetch-case: ', '')}") from None
     return 1 if bad else 0
 
 

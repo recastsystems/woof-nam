@@ -166,9 +166,13 @@ def parent_hours_for_nest(hours: float) -> int:
 
 
 def plan(t: dict, cycle: datetime, cards: list[str], only: list[str] | None = None, hours_cap: float | None = None,
-         loc: Path | None = None) -> dict:
-    """What one cycle runs: per domain its hours, cards, grid, door arguments and product file names."""
-    if cycle.hour not in t["cycles"]:
+         loc: Path | None = None, lead: int = 0) -> dict:
+    """What one cycle runs: per domain its hours, cards, grid, door arguments and product file names.
+    cycle: the start time. lead above 0: the parent starts from that forecast hour of the GFS run `lead` hours
+    before it (woof-nam suite --cycle C --lead H: the start is C + H), so the start need not be a suite cycle;
+    the nests follow the parent, and the fire-weather nest takes the table's default point when nam_firewx_loc
+    has no line for the start hour."""
+    if cycle.hour not in t["cycles"] and not lead:
         raise SystemExit(f"woof-nam suite: cycle {cycle:%HZ} is not a suite cycle ({t['cycles']})")
     lay = layout(t, cards)
     want = only or domains(t)
@@ -176,6 +180,10 @@ def plan(t: dict, cycle: datetime, cards: list[str], only: list[str] | None = No
     if unknown:
         raise SystemExit(f"woof-nam suite: unknown domains {unknown} (the table has {domains(t)})")
     out = {"cycle": cycle.strftime("%Y-%m-%dT%HZ"), "cards": cards, "domains": {}}
+    if lead:
+        from datetime import timedelta
+        out.update(start_from="gfs-forecast-hour", lead_h=int(lead),
+                   gfs_cycle=(cycle - timedelta(hours=int(lead))).strftime("%Y-%m-%dT%HZ"))
     p = t["parent"]
     for d in want:
         if d == p["domain"]:
@@ -236,7 +244,7 @@ def ncep_rows() -> set[str]:
 
 
 def door_argv(d: str, row: dict, cycle: datetime, parent_run: Path, out: Path, options: str = "",
-              rows: set[str] | None = None) -> list[str]:
+              rows: set[str] | None = None, words: list[str] | None = None) -> list[str]:
     """`woof-nam nest` for one suite nest, one-way from the parent's history. options: the installed door's --help
     text; rows: the nests it has an NCEP row for. A door with --ncep-nest and a row for this nest runs NCEP's own nest
     (its grid on the parent's pole, its keys); otherwise NCEP's point counts and spacing at NCEP's centre on the nest's
@@ -256,4 +264,6 @@ def door_argv(d: str, row: dict, cycle: datetime, parent_run: Path, out: Path, o
              "--no-sheets", "--no-warm", "--wait-min", "120"]
     if len(row["cards"]) > 1:
         argv += ["--cards", str(len(row["cards"])), "--card-list", ",".join(row["cards"])]
+    if words and "--write" in options:
+        argv += list(words)              # the output schedule (woof-nam suite --nest-write / --nest-grib-at)
     return argv

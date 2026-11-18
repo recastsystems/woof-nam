@@ -107,3 +107,42 @@ def test_hours_cap_keeps_the_parent_long_enough_for_its_nests():
     assert T.parent_hours_for_nest(1) == 6 and T.parent_hours_for_nest(7) == 9 and T.parent_hours_for_nest(60) == 60
     p = T.plan(t, cyc(12), [str(i) for i in range(2)], only=["12km"], hours_cap=1)
     assert p["domains"]["12km"]["hours"] == 1          # no nests: the cap holds
+
+
+def test_a_start_from_a_forecast_hour_need_not_be_a_suite_cycle():
+    """woof-nam suite --cycle 2026111212 --lead 201: the suite starts at 2026-11-20 21Z, files are named for that
+    start, and the fire-weather nest takes the default point (nam_firewx_loc has no 21Z line)."""
+    t = T.load()
+    start = datetime(2026, 11, 20, 21, tzinfo=timezone.utc)
+    with pytest.raises(SystemExit):
+        T.plan(t, start, ["0"])
+    p = T.plan(t, start, ["0"], lead=201)
+    assert (p["cycle"], p["gfs_cycle"], p["lead_h"]) == ("2026-11-20T21Z", "2026-11-12T12Z", 201)
+    assert set(p["domains"]) == set(T.domains(t))
+    assert p["domains"]["firewxnest"]["firewx"]["how"].startswith("default")
+    assert T.file_name(t, "12km", start, 3).endswith(".t21z.awphys03.tm00.grib2")
+    assert "lead_h" not in T.plan(t, cyc(6), ["0"])
+
+
+def test_suite_door_takes_a_lead_with_or_without_a_parent_run(tmp_path, capsys):
+    """--cycle is the GFS run and --lead the hour: the plan's start is cycle + lead, alone or beside --parent-run (the
+    nests of a parent that was itself started from that hour, which is how a worker box runs the suite)."""
+    from namgpu.suite import cli as suite_cli
+    base = ["--cycle", "2026111212", "--lead", "201", "--card-list", "0", "--dry-run", "--hours-cap", "6"]
+    assert suite_cli.main([*base, "--out", str(tmp_path / "a")]) == 0
+    plan = __import__("json").loads((tmp_path / "a" / "suite-plan.json").read_text())
+    assert plan["cycle"] == "2026-11-20T21Z" and plan["lead_h"] == 201 and "12km" in plan["domains"]
+    assert suite_cli.main([*base, "--out", str(tmp_path / "b"), "--parent-run", str(tmp_path / "p")]) == 0
+    nests = __import__("json").loads((tmp_path / "b" / "suite-plan.json").read_text())
+    assert nests["cycle"] == "2026-11-20T21Z" and "12km" not in nests["domains"]
+    # hour 200 is not posted: the suite starts at the nearest posted hour before it and says so
+    assert suite_cli.main(["--cycle", "2026111212", "--lead", "200", "--card-list", "0", "--dry-run", "--out",
+                           str(tmp_path / "c"), "--hours-cap", "6"]) == 0
+    assert "hour 200 is not posted" in capsys.readouterr().out
+    assert __import__("json").loads((tmp_path / "c" / "suite-plan.json").read_text())["lead_h"] == 198
+    with pytest.raises(SystemExit, match="--cycle is the GFS run"):
+        suite_cli.main(["--cycle", "2026111215", "--lead", "198", "--card-list", "0", "--dry-run", "--out", str(tmp_path / "d")])
+    # the whole 84 h parent does not fit after hour 378: it is cut at hour 384, and the suite says so
+    assert suite_cli.main(["--cycle", "2026111212", "--lead", "378", "--card-list", "0", "--dry-run", "--out",
+                           str(tmp_path / "e")]) == 0
+    assert "cut 78 h short" in capsys.readouterr().out

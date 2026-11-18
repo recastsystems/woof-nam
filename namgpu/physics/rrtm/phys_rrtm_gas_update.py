@@ -22,6 +22,9 @@ State shared with the other gas units (one table, one set of names):
                                 phys-rrtm-getgases reads this table.
   ctx.tables["rrtm_gas_update"] the GasState (k1oz, k2oz, facoz, ...) read by phys-rrtm-getozn.
 
+One departure, where the Fortran stops: at ictmflg 0 a year before MINYEAR with no 2-D file of its own (before 1956)
+reads the historical global means, as ictmflg > 0 does (co2_from_global_means), so ERA5 starts from 1940 run.
+
 Refusals (the Fortran STOPs, kept as RuntimeError with the same breakage): the historical file missing,
 the monthly file missing for a requested year (ictmflg > 10), no earlier monthly file found, the
 climatology ozone index used before any change day set it (Fortran leaves it undefined), a truncated
@@ -98,6 +101,18 @@ def ozone_factor(st: GasState, imon: int, iday: int, ihour: int, loz1st: bool) -
     else:
         ident = iday
     st.facoz = np.float32(ident - st.midm) / np.float32(st.midp - st.midm)
+
+
+def co2_from_global_means(idyr: int, ictmflg: int, co2dat_file: str, exists=os.path.exists) -> bool:
+    """Whether the year's CO2 comes from the historical semi-yearly global means (co2gbl_file) instead of a monthly
+    2-D file. The Fortran takes them only at ictmflg > 0 (Fortran 610). At ictmflg 0, the NAM's, a year before MINYEAR
+    with no monthly file of its own finds no earlier one either (the search runs down from the year only while it is at
+    least MINYEAR), and the Fortran stops ("Can not find co2 data source file"). NOAA's 2-D files start in 1956 and ERA5
+    starts reach 1940, so such a year reads the same historical means the ictmflg > 0 path reads, the one source NOAA
+    ships for it. Every year the Fortran runs keeps the Fortran's choice."""
+    if idyr >= MINYEAR:
+        return False
+    return ictmflg > 0 or not exists(co2_file_name(co2dat_file, idyr))
 
 
 def co2_file_name(template: str, year: int) -> str:
@@ -203,7 +218,7 @@ def run(ctx, *, iyear: int, imon: int, iday: int, ihour: int, loz1st: bool, ldoc
     st.kyrsav = iyear
     iyr = iyear
 
-    if idyr < MINYEAR and ictmflg > 0:
+    if co2_from_global_means(idyr, ictmflg, co2dat_file):
         # Historical semi-yearly global means (Fortran 610-674).
         if not os.path.exists(co2gbl_file):
             raise RuntimeError(f'Requested co2 data file "{co2gbl_file}" not found - Stopped in '

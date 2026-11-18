@@ -1,5 +1,176 @@
 # Changelog
 
+## 0.2.2
+
+Fixed: a 1.5 km nest inside a live 12 km parent (published 0.2.0 and 0.2.1)
+- In 0.2.0 and 0.2.1 (the same code; shown on 0.2.1), `woof-nam nest --res-km 1.5` with a live 12 km parent (`--concurrent`, `--two-way`, or a parent
+  given with `--parent-center`, `--parent-size-km` or `--parent-size-y-km`) read the nest's edges from the wrong part of
+  the parent. The couplers interpolated the parent onto the nest with the time ratio (12 nest steps to a parent step)
+  where the space ratio (8 nest cells to a parent cell) was needed. They now interpolate on the space ratio and step on
+  the time ratio.
+- How to tell whether a run was affected: its log line `two-way: parent ... ratio 12, ...` names one ratio; 0.2.2
+  prints `ratio 12 in time and 8 in space`. Only nests whose two ratios differ were wrong, which in these versions is a
+  1.5 km nest in a 12 km parent. 3 km and 4 km nests in a live 12 km parent (ratios 4 and 4, 3 and 3), NCEP's CONUS,
+  Alaska, Hawaii and Puerto Rico nests, `woof-nam suite`, `--source parent` and every nest without a live parent were
+  right. 0.1.x had no 1.5 km nest.
+- What it looked like: a 1.5 km nest of 240 km inside a live 12 km parent of 1,200 km, on the South Pacific tropical
+  cyclone of GFS 2026-11-17 00Z (`woof-nam nest --concurrent --center 9S,163W --res-km 1.5 --size-km 240
+  --parent-size-km 1200 --parent-size-y-km 1200 --source gfs --start 2026111700 --hours 1`). At +1 h, on 0.2.1: up to 16.6 m/s of vertical
+  motion in the nest's outer 12 rows (6.8 m/s inside), the nest's surface pressure 5.6 hPa from the parent's on those
+  rows (mean of the absolute difference), and the nest's lowest pressure 62 km from the parent's. On 0.2.2: 3.4 m/s
+  (4.6 m/s inside), 0.24 hPa and 6 km.
+- `woof-nam nest --ncep-nest firewxnest --concurrent` is refused in words. In 0.2.0 and 0.2.1 it coupled the
+  fire-weather nest to the 12 km parent at the cell numbers of NCEP's 3 km nest, which holds it in NCEP's suite, so the
+  nest took its boundaries from parent cells that do not hold it. The fire-weather nest runs one-way as before
+  (`woof-nam suite`, or `woof-nam nest --ncep-nest firewxnest` from the source's boundaries).
+- A run with a live parent draws its maps. In 0.2.1 such a run stopped at `maps nest rc 1` with no maps, and the
+  earlier versions with this door have the same code (the history was right; `woof-nam maps --out DIR
+  <run>/nest/wrfout_d01_*` draws the maps afterwards).
+
+Added
+- Ladders: nests inside nests in one process, `woof-nam nest --concurrent --ladder RES:SIZE[,RES:SIZE...]`, e.g.
+  12 -> 3 -> 1.5 km. Each level steps inside the one outside it (a 3 km level takes 4 steps to a 12 km step, a 1.5 km
+  level 3 steps to a 3 km step) and is written to its own folder (`parent/`, `nest/`, `nest2/`), with maps.
+  `--parent-res-km 3` starts the ladder at 3 km (for example IFS 0.1 degree -> 3 -> 1.5 km), and a step can take its
+  own north-south size (`1.5:300x400`). Each level must be a whole number of times finer than the one outside it;
+  anything else is refused in words. `--two-way` and `--ladder` together are refused.
+- A storm-following nest inside the live parent: `woof-nam nest --concurrent --move-nest`, off by default. The nest
+  moves by whole parent cells when the storm (the sea-level-pressure minimum after a 60 km smooth) is more than 3 parent
+  cells from its centre, checked every 15 minutes of model time. Kept cells are carried over bit for bit; new ground is
+  filled from the live parent at that step, on the nest's own terrain. Before the forecast the door builds the static
+  fields of the whole area the nest may visit (`--move-reach-km`). One-way only: two-way feedback during moves, a
+  ladder inside a moving nest, and a moving nest on several cards are refused in words. With `--move-nest` off a
+  fixed nest gives the same bytes as before. `--follow` (the moving nest that runs one-way from GFS, IFS or a
+  WOOF-NAM 12 km run) is unchanged.
+- A run can start from a GFS forecast hour instead of an analysis: `--lead H` on `woof-nam fetch`, `run`, `nest`
+  and `suite`. The run starts at the GFS cycle plus H hours, reads its start state from that forecast file (soil,
+  snow, sea ice, canopy water, skin temperature and the hydrometeors are in every GFS forecast file) and takes the
+  same GFS run's later hours as boundaries. `woof-nam fetch --at TIME` starts at a chosen time: the analysis when
+  there is one, else the newest posted GFS run that reaches it. The fetch prints the run and hour it chose and
+  writes them to `<case>/raw/START.json`, which `woof-nam run` reads.
+- The rule is one function for every command (`namgpu/init/window.py`). An hour the source does not post is not
+  refused: the run starts at the nearest posted hour before it and runs that much longer, and one line says so
+  (GFS hour 200: start at 198, 2 h longer, first output at hour 200; hour 100 for 24 h: start at 99). A window past
+  the last posted hour is cut there. It stops only when nothing can run: a date outside the source's archive, or a
+  time no run reaches, naming the sources that do. GFS runs before 2015-01-15 have no forecast files.
+- Every source takes `woof-nam fetch --at TIME` or `--cycle C --lead H`, and `woof-nam nest --at TIME` or
+  `--start T --lead H` (`woof-nam run` reads the fetch's choice; `woof-nam suite` takes `--cycle C --lead H` of a
+  GFS run): GFS and GEFS from their forecast hours (GEFS past 240 h takes its edges every 6 h), the other sources from their newest analysis at or before the
+  time (hourly for ERA5, RAP, HRRR, RRFS; RAP, HRRR and RRFS take the GFS forecast hour of the same valid time
+  around them). A time may have minutes. `woof-nam sources [--json]` lists every source with its archive and posted
+  hours. The 12 km domain rows and the nest door take every source (the nest door's own list is gone).
+- Output times: `woof-nam run --write SPEC` (`1h`, `15m`, `0,1.5,3,6`, `0-6/15m,6-24/1h`), `--maps-at`, `--grib-at`,
+  on run, nest (`--write`) and suite (`--write`, `--nest-write`). A schedule beside `minutes_history`, which the
+  convection driver reads and which stays 60, so the forecast is the same whatever is written. The run adds the
+  history times its products read (rain bucket starts, the frames before each rain map, a nest's edge hours),
+  written lean, never drawn or exported. `<out>/OUTPUTS.json` lists them all; the maps, the GRIB2 follower, the
+  column store and a resume read it. GRIB2 stays on whole hours. `woof-nam compare --shared` compares two runs of
+  one case written at different times.
+- The receipt (`source_cycle`, `source_lead_h`, `start_is`) and the start log name the GFS run and forecast hour,
+  and every map's title or subtitle names the forecast hour. Nothing calls such a start an analysis.
+- Proof run (one 32 GB card): the 12 km grid for 9 h from hour 201 of the 2026-11-12 12Z GFS run (start valid
+  2026-11-20 21Z) with GRIB2 products.
+
+Fixed
+- Maps leave a grid's boundary rows off. The outer LNSH rows (5) on each side hold the start's boundary values,
+  written there every step, not the forecast, and the next two rows the seam between them. A 3 km box over the
+  southern Plains from GFS 2026-11-13 00Z showed a band of stronger 10 m wind along its edges (east edge at +3 h:
+  9.3 to 10.0 kt in the outer five rows, 4.0 to 5.0 kt from the seventh row in) and a warm strip along its west
+  edge. Against METARs over hours 1 to 20, stations in the outer five rows were 7.6 F too warm and 4.1 kt too windy
+  (60 pairs); stations 30 or more rows in, +0.2 F and -0.4 kt (691). Every map (`woof-nam maps`, a run's and a
+  nest's own maps) is now drawn on the grid less LNSH + 2 rows a side, framed on what it draws. The history, GRIB2
+  and column store keep every row. The history now carries LNSH and LNSV; an older history is read as LNSH 5.
+- Dense output no longer stalls the forecast. With `--write 5m` every frame was a whole products history (3.3 GB,
+  33 s to compress on one core), at most four writers ran, and the forecast waited for them: on the 12 km grid on one
+  RTX PRO 6000 (16 cores) a model hour took 102.7 s against 27.3 s hourly, 6.8 s for each extra frame. Now the
+  forecast hands each frame to a queue in shared memory bounded by host memory and goes on; with more than two
+  frames a model hour the writers take every core but four. A frame off the whole hour that no GRIB2 file, nest or
+  carrier reads (a light frame, marked in `OUTPUTS.json`) holds only what the maps read (0.68 GB in place of 1.33 GB).
+  Same box: 28.2 s for that model hour, under 0.1 s a frame; the history at the shared hours and the GRIB2 files are
+  bitwise identical to the hourly run's. A run whose writers cannot keep up says so in one line and waits; the
+  receipt's `history.waits` gives the total. Named `--history-fields` are kept at every time.
+- `--write 5m --products` ended MAPS ERROR, rc 1: a frame off the hour took its hour's MRMS file for the reflectivity
+  overlay and the renderer refused it. Off the hour the map is drawn without the overlay.
+- `woof-nam columns` skips light frames (they hold no whole column).
+- GFS files for starts from 2021-02-26 00Z to 2023-02-02 18Z come with their cloud water again. NCEP's index names
+  GFS cloud water CLWMR in those two years and CLMR before and after; the fetch asked for CLMR only, so each start
+  file of those years had 397 records in place of 419 and each boundary file lacked its 22 cloud water levels (the
+  2021-12-10 18Z start: 397 records, now 419). Both names are taken now. No forecast changes: a GFS start is a cold
+  condensate start (cloud water 0, as NCEP's NPS does for the NAM), so no route reads these records today. A 12 km
+  6 h run from that start gives the same bits with and without them (819 of 819 history fields, every hour).
+- A box south of the equator gets its Lambert product grid where it is. The grid's inverse dropped the cone's sign, so
+  a southern box's GRIB2 grid landed 180/n degrees of longitude away: `--products hiresf` wrote 0-byte files ("0
+  records") while the run said the files were written, and no catalog map frame was drawn. A 3 km box at 9S 163W now
+  writes 786 and 799 records at 0 h and +1 h. Northern grids are unchanged.
+- `woof-nam nest --products` with no set (auto) on a box takes `hiresf`. It took `awphys`, whose grid the box does not
+  cover, and wrote nothing (exit 6, "points outside the NMMB domain").
+- ERA5, IFS and AIFS starts in arctic air: a pressure level under the ground takes the 2 m air carried down at
+  6.5 K/km for the interpolation and the humidity. ECMWF carries such a level down from above a surface inversion, so
+  these starts were up to 20 K warm on their lowest levels and their 0 h 2 m temperature 6.9 K warm on the coldest
+  tenth of the land (ERA5 2015-01-26 12Z). NCEP sources are unchanged.
+- Sea and lake ice start from their own column, and near a pole the soil fill follows the sphere. Every water cell
+  with ice cover over half takes Noah's sea-ice column (skin temperature down to 271.16 K under 1.5 m of ice) in
+  place of land soil filled out from the nearest coast, and north of 60 degrees one ring of the fill reaches as far
+  east and west as it does north and south. A box holding the pole showed rays from it in the deep-soil and soil
+  temperatures. Open water takes the NAM's own deep-soil temperature, 280 K, as the NAM's analysis does, in place of
+  land soil filled out from the coasts (it is written as TG and TMN; Noah does not run on open water).
+- A GFS start at forecast hour 3 no longer goes to NaN at step 2: the wind-rotation coefficients reach the card fresh
+  on every call, and a boundary folder holding impossible values (finite but far outside physical bounds) is rebuilt,
+  not reused; the builder refuses to write one.
+- An ERA5 run shorter than 6 h fetches the boundary times it reads. It stopped after its fetch.
+- An IFS run may be as long as ECMWF's open data reaches at every cycle, 144 h. The fetch read only to 90 h, the old
+  length of the 06Z and 18Z runs, so a 100 h run stopped in its fetch.
+- A start from a forecast hour of a GFS or GEFS run that has not happened, or has not yet posted the hours the
+  window reads, is refused in one line before any fetch (`woof-nam fetch --cycle C --lead H`, `woof-nam nest --start
+  T --lead H`, `woof-nam suite --cycle C --lead H`). It printed its plan and ended with bare "HTTP Error 404" lines.
+- An ERA5 start before 2000 runs: the CO2 (1956-2003) and volcanic aerosol (1850-1999) radiation files are shipped
+  (NOAA fix files, unmodified), and a year before 1956 reads the historical global means. It stopped at its first
+  radiation call.
+- The fit memory path (cards under 64 GiB) sizes its radiation batches at 0.34 MB a row-column; at 0.26 MB it ran out
+  of card memory.
+- The NAM static surface file is built per start month (`static/nam12_static.mMM.npz`). One file was built for the
+  first start and reused for every later month, so a July start on a work root first used in November took
+  November's greenness and albedo.
+- A finished history hour is claimed once (its folder is renamed), never twice.
+- A stalled download is retried after 20 s, the ECMWF open-data bucket's regional name included (it kept 300 s per
+  ranged request). GEFS receipts credit NOAA open data.
+- Maps: on a pip install the data credit is on the title line; with the renderer built from a checkout
+  (`tools/renderer/install_renderer.sh --from-src`) a box that holds a pole or crosses the date line keeps its mesh
+  (stripes over a quarter of the map and a 10-15 hPa seam before); a map frame of the 12 km grid takes about
+  5 s, not 11-14 s, on a host with fragmented memory (NumPy huge pages off for the frame pool; the frame is byte for
+  byte the same).
+- A comparison sheet whose panels come out at two sizes is composed: they are padded to one size first. A WOOF-NAM
+  panel whose 10 m wind passes 60 kt carries the longer wind ladder and is wider than the GFS panel beside it, and
+  on a pip install the run ended rc 5 at that sheet after its maps were drawn (the 1.5 km nest command above).
+- The live-parent door's memory estimate counts the GFS decode once for the process, not once per domain (a
+  53,000-column ladder was estimated at 13.15 GiB and held 4.80).
+
+Changed in a plain run (no new option)
+- The deep-soil temperature (TG, TMN) over open water is 280 K, and so is the 3 m soil temperature record of the
+  GRIB2 files there, on every isobaric start (every source but `native`, the NAM's own analysis, and `parent`). A
+  3 km box over the Gulf of Mexico (30N 90W, GFS 2026-11-17 00Z, 1 h, `--products hiresf`) differs from 0.2.1 in 7,218 TG values, all on open water, and in that one GRIB2 record; the other 19.8 million
+  history values and 786 of 787 (0 h) and 799 of 800 (+1 h) GRIB2 records are bit for bit the same.
+- Sea and lake ice, and soil north of 60 degrees, start as above, so a run whose grid holds ice or land north of 60N
+  (the NAM 12 km grid holds Hudson Bay and the Canadian Arctic) differs from 0.2.1 in its forecast there. A 12 km box
+  of 1,200 km over the Canadian Arctic (70N 90W, GFS 2026-11-17 00Z, 1 h): 8,885,902 of 19,964,104 history values
+  differ from 0.2.1. At +1 h over its 2,773 sea-ice cells the skin temperature is 0.64 K and the 2 m temperature
+  0.29 K lower on average (at most 4.3 K and 2.2 K); over land and open water the mean change is under 0.01 K, and
+  surface pressure moves at most 0.04 hPa anywhere.
+- The history carries MSLET, written by the forecast on the card.
+- ECMWF starts (ERA5, IFS, AIFS) where a pressure level is under the ground (arctic air) start colder near the ground
+  (above). ERA5 2015-01-26 12Z, a 12 km box over Baffin Island: the 0 h 2 m temperature of the coldest tenth of the
+  land is 2.7 K lower than in 0.2.1.
+- Maps leave the boundary rows off and carry the data credit on the title line (above).
+
+Not in this release
+- A storm-following nest (`--follow`) from a forecast hour; `--start spinup` with a forecast-hour start; forecast-hour starts from IFS,
+  AIFS, AIGFS, RAP, HRRR and RRFS (a window starts from their analysis before it), and from GEFS on a box; GRIB2 off the
+  whole hour; boundary spacing that changes inside one run.
+- Two-way feedback during moves, a ladder inside a moving nest, a moving nest on several cards; the fire-weather nest
+  inside a live 3 km nest.
+- Held for a later version: where the winds of a native (NAM analysis) start sit on the grid, a below-ground
+  temperature ramp for ECMWF starts, and larger radiation batches on the fit memory path.
+
 ## 0.2.1
 
 Fixed

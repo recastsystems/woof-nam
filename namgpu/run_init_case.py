@@ -39,6 +39,12 @@ def main(argv=None):
 
     from namgpu import domains
     domains.select(a.domain, a.source)
+    # a case fetched for a start from a GFS forecast hour (raw/START.json): the same start here as in woof-nam run
+    from namgpu.init import sources as _srcmod
+    try:
+        _srcmod.door_lead(paths.case_dir(a.case), a.source, None, domains.start_of(paths.case_dir(a.case)))
+    except ValueError as e:
+        raise SystemExit(f"woof-nam init: refused: {e}") from None
     rs = domains.ensure_static(paths.case_dir(a.case), domains.start_of(paths.case_dir(a.case)), a.source)
     print(f"static: {rs['action']} {rs['file']} ({rs['seconds']} s)", flush=True)
     import cupy as cp

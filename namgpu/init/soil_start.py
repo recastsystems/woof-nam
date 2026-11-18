@@ -323,7 +323,7 @@ def gfs_soilw(ctx, path, tmp):
     out = []
     for k in range(1, 5):
         a = got[f"SOILW{k}"]
-        a, _ = gs._ring_fill(a, (a == MISSING) | ~land_src, lon_periodic=True)
+        a, _ = gs._ring_fill(a, (a == MISSING) | ~land_src, lon_periodic=True, grid=hin.Grid(**hin.GFS_QUARTER_DEG))
         o, _ = hin.interp_full(cp.ascontiguousarray(a, dtype=cp.float32)[None], cp.ones((1,) + a.shape, cp.uint8),
                                ctx.st["GLAT"], ctx.st["GLON"])
         out.append(cp.clip(o[0], SMIN, SMAX))

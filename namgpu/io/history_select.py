@@ -17,7 +17,9 @@ first post, COMPOSITE before the first microphysics call) is absent, as before.
 
 --full-every N (hours, default 3): every Nth output hour (0, N, 2N, ...) is written with every field whatever the
 preset, so a run always has full states to restart analysis from and to check against. 0 = never.
-Default: --history-fields products --full-every 3h.
+Default: --history-fields products --full-every 3h. With the default, an output time off the whole hour that no GRIB2
+file and no nest reads (a light frame, namgpu/outputs.py) carries only what the maps read; naming --history-fields
+keeps the named set at every time.
 """
 from __future__ import annotations
 
@@ -41,8 +43,8 @@ PRODUCT_CARRIERS = (
 PRESETS = {
     "full": None,
     # W is in: the awphys VVEL/DZDT records need it every hour
-    "products": ("PSFC", "HGT", "T2", "Q2", "U10", "V10", "MSLP", "RAINNC", "RAINC", "COMPOSITE",
-                 "T", "QVAPOR", "QCLOUD", "QRAIN", "QICE", "QSNOW", "PRES", "PH", "U", "V", "W", "REFL_10CM")
+    "products": ("PSFC", "HGT", "T2", "Q2", "U10", "V10", "MSLP", "MSLET", "RAINNC", "RAINC",
+                 "COMPOSITE", "T", "QVAPOR", "QCLOUD", "QRAIN", "QICE", "QSNOW", "PRES", "PH", "U", "V", "W", "REFL_10CM")
     + PRODUCT_CARRIERS,
     "state": ("PSFC", "HGT", "T", "QVAPOR", "QCLOUD", "QRAIN", "QICE", "QSNOW", "PRES", "PH", "U", "V", "W"),
 }
@@ -50,7 +52,7 @@ DEFAULT_PRESET = "products"
 DEFAULT_FULL_EVERY = "3h"
 # Every name io-history-fields can write (io_history_fields.run), for checking a list before the run starts.
 KNOWN = ("PSFC", "HGT", "T", "PRES", "PH", "QVAPOR", "QCLOUD", "QRAIN", "QICE", "QSNOW", "U10", "V10", "RAINNC",
-         "RAINC", "U", "V", "W", "T2", "Q2", "MSLP", "REFL_10CM", "COMPOSITE") + PRODUCT_CARRIERS
+         "RAINC", "U", "V", "W", "T2", "Q2", "MSLP", "REFL_10CM", "COMPOSITE", "MSLET") + PRODUCT_CARRIERS
 
 
 def parse(spec: str):
@@ -84,5 +86,15 @@ class Selection:
 
 
 def select(ctx, fields: dict) -> dict:
+    sch = getattr(ctx, "outputs", None)
+    if sch is not None and sch.lean(int(ctx.ntimestep)):
+        # a rain carrier of the output schedule (namgpu/outputs.py): only what a rain bucket or a rain map reads
+        from namgpu.outputs import LEAN_FIELDS  # noqa: PLC0415
+        return {k: v for k, v in fields.items() if k in LEAN_FIELDS}
+    if sch is not None and getattr(sch, "light", None) is not None and sch.light(int(ctx.ntimestep)):
+        # a light frame of the output schedule (namgpu/outputs.py): an off-hour time only drawn, so only what the maps
+        # read; a field another option adds (a nest hand-off set) stays, as in Selection.pick
+        keep = set(sch.light_fields)
+        return {k: v for k, v in fields.items() if k in keep or k not in KNOWN}
     sel = getattr(ctx, "history_select", None)
     return fields if sel is None else sel.pick(int(ctx.ntimestep), fields)

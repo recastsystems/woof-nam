@@ -88,7 +88,7 @@ def run(ctx):
     # hyb_coor (source 185-189): ground-up file order unless GHT(1,1,10) >= GHT(1,1,11)
     hyb_coor = not bool(gi["GHT_IN"][9, 0, 0] < gi["GHT_IN"][10, 0, 0])
     if hyb_coor:
-        for key in REVERSED_KEYS:
+        for key in REVERSED_KEYS + (("TT_LEV_IN",) if "TT_LEV_IN" in gi else ()):
             gi[key] = cp.ascontiguousarray(gi[key][::-1])
         # source 224-245: HGT_M limited to GHT(2) +/- 150 m (reversed order, so level 2 is index 1)
         ref = gi["GHT_IN"][1]
@@ -97,6 +97,9 @@ def run(ctx):
     pres = gi["PRES_IN"]
     ght = gi["GHT_IN"]
     tt = gi["TT_IN"]
+    # the temperature the interpolation reads: TT_IN, or for a source whose under-ground levels are not the surface's
+    # air, its columns' TT_LEV_IN (gfs_start.below_ground_from_2m); the surface-pressure reduction reads TT_IN
+    tt_lev = gi.get("TT_LEV_IN", tt)
 
     # GHT(1) = SOILHGT swap (source 397-405), before surfp; in place on GHT as the source does
     if "SOILHGT" not in st.fields:
@@ -174,11 +177,11 @@ def run(ctx):
             i32(im), i32(jm), i32(lm), f32(pdtop), f32(pt), i32(VCOORD), i32(0)))
         # 5. temperature: linear in log p, extrapolated, direct T (direct_temp = .TRUE.)
         K("init_gfs_vinterp_lin")(grid_c, blk_c, (
-            pres, p3d, tt, st["T"], i32(im), i32(jm), i32(nlev), i32(lm),
+            pres, p3d, tt_lev, st["T"], i32(im), i32(jm), i32(nlev), i32(lm),
             i32(1), i32(1), i32(1), i32(skip_interior), i32(lnsh), i32(ide), i32(jde)))
         # 6. humidity: RH -> mixing ratio -> specific humidity, log-p interpolation
         K("init_gfs_vinterp_rhq")(grid_2d_lev, blk_2d, (
-            gi["RH_IN"], tt, pres, qtmp2, i32(im), i32(jm), i32(nlev)))
+            gi["RH_IN"], tt_lev, pres, qtmp2, i32(im), i32(jm), i32(nlev)))
         K("init_gfs_vinterp_log")(grid_c, blk_c, (
             pres, p3d, qtmp2, st["Q"], i32(im), i32(jm), i32(nlev), i32(lm),
             i32(0), i32(1), i32(skip_interior), i32(lnsh), i32(ide), i32(jde)))

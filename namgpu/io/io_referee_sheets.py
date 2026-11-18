@@ -143,26 +143,71 @@ def _sheet_subtitle_ok(renderer) -> bool:
     return rev.is_file() and "04-ensemble-sheet" in rev.read_text()
 
 
+def same_size(rows, into: Path):
+    """The sheet's panels, each padded on the right and bottom with its own corner colour to the largest panel's
+    size (copies in `into`; panels already that size are passed as they are). Breakage it prevents: gpuwm's own
+    renderer, the one a pip install draws with, refuses panels of two sizes, and a WOOF-NAM panel whose 10 m wind
+    passes 60 kt carries the longer wind ladder (WIND_LADDER_TOP_KT) and is wider than the GFS panel beside it: the
+    CHANGELOG's 1.5 km nest command ended rc 5 at "sheet f001_wind10.png: panel 1 is 1154x891 and panel 0 is
+    1163x891" after its maps were drawn."""
+    from PIL import Image  # noqa: PLC0415
+    sizes = {}
+    for row in rows:
+        for p in row:
+            with Image.open(p) as im:
+                sizes[str(p)] = im.size
+    w = max(s[0] for s in sizes.values())
+    h = max(s[1] for s in sizes.values())
+    if all(s == (w, h) for s in sizes.values()):
+        return rows
+    out = []
+    for i, row in enumerate(rows):
+        r = []
+        for j, p in enumerate(row):
+            if sizes[str(p)] == (w, h):
+                r.append(p)
+                continue
+            with Image.open(p) as im:
+                im = im.convert("RGBA") if im.mode not in ("RGB", "RGBA") else im.copy()
+            canvas = Image.new(im.mode, (w, h), im.getpixel((0, 0)))
+            canvas.paste(im, (0, 0))
+            q = Path(into) / f"pad-{i}-{j}-{Path(p).name}"
+            canvas.save(q)
+            r.append(q)
+        out.append(r)
+    return out
+
+
 def _compose(renderer, rows, output: Path, title: str, valid_time: str, subtitle: str | None = None) -> Path:
     """rw_wrfbatch --ensemble-sheet (the layout gpuwm.rustwx.compose_ensemble_sheet drives), called
     directly so the nam venv needs no gpuwm import. subtitle: the whole header line (patch 04); a renderer
-    without it draws "valid {valid_time} UTC"."""
+    without it draws "valid {valid_time} UTC". Panels of two sizes are padded to one first (same_size)."""
     import json  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    desc = {"rows": [[str(Path(p).resolve()) for p in row] for row in rows], "output": str(output.resolve()),
-            "title": str(title), "valid_time": str(valid_time)}
-    if subtitle:
-        desc["subtitle"] = str(subtitle)
     with tempfile.TemporaryDirectory(prefix="sheet-", dir=output.parent) as td:
+        rows = same_size(rows, Path(td))
+        desc = {"rows": [[str(Path(p).resolve()) for p in row] for row in rows], "output": str(output.resolve()),
+                "title": str(title), "valid_time": str(valid_time)}
+        if subtitle:
+            desc["subtitle"] = str(subtitle)
         req = Path(td) / "request.json"
         req.write_text(json.dumps(desc))
         r = subprocess.run([str(renderer), "--ensemble-sheet", str(req)], capture_output=True, text=True)
     if r.returncode or not output.is_file():
         raise RuntimeError(f"sheet {output.name}: {(r.stderr or r.stdout).strip()[-300:]}")
     return output
+
+
+def _source_hour(row, start, h: int) -> str:
+    """For a run started from a forecast hour of its source run: which run and hour the source column shows
+    (", hour 204 of the 2026-11-12 12Z run"); nothing for an analysis start or a truth column."""
+    from datetime import timedelta  # noqa: PLC0415
+    from namgpu.io import referee_rows  # noqa: PLC0415
+    lead0 = referee_rows._start_lead(row)
+    return f", hour {lead0 + h} of the {start - timedelta(hours=lead0):%Y-%m-%d %H}Z run" if lead0 else ""
 
 
 def _referee_job(job):
@@ -195,7 +240,10 @@ def _referee_job(job):
     if row["role"] == "truth":
         title = f"{field}  valid {valid:%Y-%m-%d %H}Z  (sampled to the {res_label} grid)"
     else:
-        title = maps.panel_title(field, start, valid)
+        # the source forecast's own run and hour: for a run started from forecast hour H of its source run that run
+        # began H hours before the start (referee_rows._start_lead), so the panel reads "init <that run> (+H+lead h)"
+        from datetime import timedelta  # noqa: PLC0415
+        title = maps.panel_title(field, start - timedelta(hours=referee_rows._start_lead(row)), valid, "")
     table = cf.with_suffix(".json")
     # the row's own credit line names the licensor (IMERG: the NCAR GDEX mirror, not NASA); was the label plus
     # " open data, CC BY 4.0" for any CC BY row, which credited NASA for a GDEX licence (fix round 2)
@@ -455,7 +503,8 @@ def nest_sheets(history, source: str, out: Path, leads=None, products=NEST_PRODU
                 key = (prod, role, h)
                 if key in drawn:
                     cols.append(drawn[key])
-                    names.append(row["label"] + (" (later analysis)" if row.get("lead") == "analysis" else ""))
+                    names.append(row["label"] + (" (later analysis)" if row.get("lead") == "analysis" else "")
+                                 + _source_hour(row, start, h))
                 elif row is None:
                     missing.append(f"{role}: {picks[prod]['why'].get(role, 'no row')}")
                 elif key in errors:

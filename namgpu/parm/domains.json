@@ -8,7 +8,16 @@
    "configfile": "nam_configfile",
    "sources": [
     "native",
-    "gfs"
+    "gfs",
+    "gefs",
+    "ifs",
+    "ifs-0p25",
+    "era5",
+    "rap",
+    "hrrr",
+    "rrfs",
+    "aifs",
+    "aigfs"
    ],
    "static": "nam-analysis",
    "managed_init": false
@@ -18,7 +27,16 @@
    "configfile": "nam_configfile_rrtmgp",
    "sources": [
     "native",
-    "gfs"
+    "gfs",
+    "gefs",
+    "ifs",
+    "ifs-0p25",
+    "era5",
+    "rap",
+    "hrrr",
+    "rrfs",
+    "aifs",
+    "aigfs"
    ],
    "static": "nam-analysis",
    "managed_init": false
@@ -66,7 +84,16 @@
    "configfile": "nam_configfile_suite12",
    "sources": [
     "native",
-    "gfs"
+    "gfs",
+    "gefs",
+    "ifs",
+    "ifs-0p25",
+    "era5",
+    "rap",
+    "hrrr",
+    "rrfs",
+    "aifs",
+    "aigfs"
    ],
    "static": "nam-analysis",
    "managed_init": false
@@ -76,7 +103,16 @@
    "configfile": "nam_configfile_mp28",
    "sources": [
     "native",
-    "gfs"
+    "gfs",
+    "gefs",
+    "ifs",
+    "ifs-0p25",
+    "era5",
+    "rap",
+    "hrrr",
+    "rrfs",
+    "aifs",
+    "aigfs"
    ],
    "static": "nam-analysis",
    "managed_init": false
@@ -86,7 +122,16 @@
    "configfile": "nam_configfile_mp8",
    "sources": [
     "native",
-    "gfs"
+    "gfs",
+    "gefs",
+    "ifs",
+    "ifs-0p25",
+    "era5",
+    "rap",
+    "hrrr",
+    "rrfs",
+    "aifs",
+    "aigfs"
    ],
    "static": "nam-analysis",
    "managed_init": false
@@ -96,7 +141,16 @@
    "configfile": "nam_configfile_p3",
    "sources": [
     "native",
-    "gfs"
+    "gfs",
+    "gefs",
+    "ifs",
+    "ifs-0p25",
+    "era5",
+    "rap",
+    "hrrr",
+    "rrfs",
+    "aifs",
+    "aigfs"
    ],
    "static": "nam-analysis",
    "managed_init": false
@@ -104,7 +158,13 @@
   "sref16": {
    "title": "SREF-shape 16 km North America (716 x 627 x 60, BMJ convection; the NMMB half of the SREF mock)",
    "configfile": "nam_configfile_sref16",
-   "sources": ["gfs", "gefs", "era5", "ifs-0p25", "ifs"],
+   "sources": [
+    "gfs",
+    "gefs",
+    "era5",
+    "ifs-0p25",
+    "ifs"
+   ],
    "static": "geog",
    "managed_init": false
   }

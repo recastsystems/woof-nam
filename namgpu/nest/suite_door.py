@@ -110,6 +110,23 @@ def _preflight(grids: dict, cards: list[str], rows_given) -> dict:
             "card": domain.card_name(cards[0])}
 
 
+def live_parent_refusal(names: list[str]) -> str | None:
+    """The refusal for a nest this door cannot couple to its true parent, else None. The fire-weather nest is placed
+    inside NCEP's 3 km nest (its i/j_parent_start and space ratio 2 count 3 km cells), and this door couples every nest
+    to the 12 km parent. Breakage it prevents: `--ncep-nest firewxnest --concurrent` cropped and read the 12 km parent
+    at the 3 km nest's cell numbers, so the nest took its boundaries from parent cells that do not hold it (the 00Z
+    point 39.0 N 112.0 W: a parent crop at rotated 23.1..45.0 N, -1.6..26.9 E around a nest at -17.0..-12.5 N,
+    -7.4..-2.2 E)."""
+    from namgpu.nest import ncep_nests
+    per_cycle = [n for n in names if ncep_nests.row(n).get("placement") == "firewx"]
+    if not per_cycle:
+        return None
+    return (f"--ncep-nest {per_cycle[0]} --concurrent: NCEP ran the fire-weather nest inside its 3 km nest, and this "
+            "door couples every nest to the 12 km parent, so the nest would take its boundaries from the wrong parent "
+            "cells. Run it one-way: `woof-nam suite` (from the 12 km run's history) or `woof-nam nest --ncep-nest "
+            f"{per_cycle[0]}` (from the source's boundaries)")
+
+
 def main(a, argv) -> int:
     from namgpu import config as configmod
     from namgpu.init import static_build as _sb
@@ -120,6 +137,9 @@ def main(a, argv) -> int:
                          "Use --concurrent (one-way)")
     if a.source == "parent":
         raise SystemExit("--ncep-nest --concurrent starts the parent and the nests from a source analysis (gfs, ...)")
+    why = live_parent_refusal([n.strip() for n in a.ncep_nest.split(",") if n.strip()])
+    if why:
+        raise SystemExit(why)
     t_all = time.perf_counter()
     out = a.out.resolve()
     out.mkdir(parents=True, exist_ok=True)

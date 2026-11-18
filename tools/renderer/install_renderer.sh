@@ -8,10 +8,13 @@
 # --from-src copies gpuwm's tools/ (no target/) to a scratch dir, applies every tools/renderer/*.patch, builds
 # rw-wrfbatch with all cores (cargo build --release --locked --offline -p rw-wrfbatch) and installs it. The gpuwm
 # cut must be 42631c9f83e or later (dateline frames). Patches:
-#   01-cf_grid-recenter-order.patch  CfGrid::recenter undoes open()'s -180/180 seam rotation before re-seaming, so a
-#                                 curvilinear row across 180 keeps its column order (without it the cells east of
-#                                 180 were drawn from the wrong neighbours: the stepped strip on the Gabrielle
-#                                 37S 175E sheets, 2026-11-05).
+#   01-cf_grid-curvilinear-mesh.patch  CfGrid::open and recenter reverse or rotate a row only when it is a cyclic
+#                                 longitude axis (1-D coordinates, or 2-D ones repeating one axis on every row): a
+#                                 curvilinear grid keeps its column order, which is its mesh. Without it a box holding
+#                                 a pole put every row past the pole reversed and the rows across the seam rotated
+#                                 (stripes over a quarter of the map and a 10 to 15 hPa seam, 88.9N 0E, 2026-11-13),
+#                                 and a row across 180 was drawn from the wrong neighbours (Gabrielle 37S 175E sheets,
+#                                 2026-11-05; the recenter-order patch this replaces). 02 is already in the gpuwm 2.9.13 source.
 #   02-cf_scale-mask-below.patch  a CF product row's scale may carry mask_below: values under it are blank instead
 #                                 of clamped into the first colour (a dry 1 h / 6 h window painted a domain-wide
 #                                 first band that read as rain).

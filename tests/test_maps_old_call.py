@@ -23,7 +23,7 @@ RAIN = {}                                                   # path name -> RAINN
 WRITTEN = {}                                                # cf path -> source label
 
 
-def _read(path, need):
+def _read(path, need, upto_pa=None):
     h = int(Path(path).name.split("_f")[1])
     ny, nx = 4, 5
     lat, lon = np.meshgrid(np.linspace(30, 40, ny), np.linspace(-100, -90, nx), indexing="ij")

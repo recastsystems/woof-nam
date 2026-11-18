@@ -45,19 +45,22 @@ ROOT = domain.ROOT
 CASES = Path(os.environ.get("NAMGPU_CASES", str(ROOT / "cases")))
 STATIC_CACHE = Path(os.environ.get("NAMGPU_STATIC_CACHE", str(ROOT / "static" / "nest-cache")))
 
-# Source rows the door can run: name -> (fetch callable "module:function", licence line). The fetch itself is
-# table work in namgpu/init/fetch_case.py FETCH_ROWS (lane init-gfs-anywhere) and sources.SOURCES; a source is
-# runnable when sources.SOURCES has its row. fetch(cycle, case_dir, hours, cfg, args) -> {"failed": [...], ...}.
-FETCH = {
-    "gfs": ("namgpu.nest.cli:fetch_rows", "NOAA NCEP GFS 0.25 deg, US Government work, public domain"),
-    "ifs": ("namgpu.nest.cli:fetch_rows", "ECMWF open data (IFS HRES 0.1 deg), CC BY 4.0; sea ice from NOAA GFS "
-            "f000 (public domain)"),
-    "ifs-0p25": ("namgpu.nest.cli:fetch_rows", "ECMWF open data (IFS HRES 0.25 deg), CC BY 4.0; sea ice from "
-                 "NOAA GFS f000 (public domain)"),
-    "era5": ("namgpu.nest.cli:fetch_rows", "Contains modified Copernicus Climate Change Service information (ERA5 "
-             "reanalysis, CC BY 4.0), read from Google's public ARCO-ERA5 copy"),
-    "parent": ("namgpu.nest.cli:fetch_parent", "WOOF-NAM 12 km history (ours)"),
-}
+# Source rows the door can run: name -> (fetch callable "module:function", licence line), read from the source table
+# (namgpu/init/sources.py SOURCES: every isobaric row, and our own parent run). The fetch itself is table work in
+# namgpu/init/fetch_case.py. fetch(cycle, case_dir, hours, cfg, args) -> {"failed": [...], ...}. The archived NAM
+# analysis (native) is not a door source: it is the NAM 12 km grid itself, with no interpolation onto another grid
+# (woof-nam run --source native runs it on that grid).
+
+
+def _fetch_table() -> dict:
+    from namgpu.init import sources
+    out = {n: ("namgpu.nest.cli:fetch_rows", r.get("attribution") or r.get("licence") or n)
+           for n, r in sources.SOURCES.items() if r.get("kind") == "isobaric"}
+    out["parent"] = ("namgpu.nest.cli:fetch_parent", "WOOF-NAM 12 km history (ours)")
+    return out
+
+
+FETCH = _fetch_table()
 SINGLE_CORE_S = 30.0
 
 
@@ -96,7 +99,23 @@ def build_parser() -> argparse.ArgumentParser:
                    "BY 4.0' (the maps must carry it)")
     n.add_argument("--no-handoff", action="store_true", help="a 12 km (parent row) run: do not write the parent "
                    "hand-off set (history_handoff) into its history")
-    n.add_argument("--start", required=True, help="YYYYMMDDHH (00/06/12/18 for gfs/ifs)")
+    n.add_argument("--start", default=None, help="YYYYMMDDHH (00/06/12/18 for gfs/ifs; with --lead, the start "
+                   "time: the run it is read from is --lead hours earlier). Or give --at")
+    n.add_argument("--at", default=None, metavar="TIME",
+                   help="the window starts at this time (YYYYMMDDHH or YYYYMMDDHHMM, UTC) on any --source: the source's "
+                        "analysis or posted forecast hour at or before it (woof-nam fetch --at), the model that much "
+                        "longer and the first output at TIME. In place of --start")
+    n.add_argument("--lead", type=float, default=None, metavar="H",
+                   help="the window starts at hour H of the run H hours before --start (gfs, gefs: that forecast, "
+                        "with the same run's later hours as boundaries). An hour the source does not post starts at "
+                        "the nearest posted hour before it, and the run is that much longer (said in one line). Not "
+                        "with --follow in this release")
+    n.add_argument("--member", default=None, help="--source gefs: the member (c00, p01-p30)")
+    n.add_argument("--write", default=None, metavar="SPEC", help="the times written (woof-nam run --write: 1h, "
+                   "15m, 0,6,12 or 0-6/15m,6-24/1h; counted from the time asked); default 1h")
+    n.add_argument("--maps-at", default=None, metavar="SPEC", help="maps at these times, when not every --write time")
+    n.add_argument("--grib-at", default=None, metavar="SPEC", help="with --products: GRIB2 at these times, when not "
+                   "every --write time (whole hours)")
     n.add_argument("--hours", type=float, default=None, help="forecast hours (default 48; an --ncep-nest row's own "
                    "length, 60 for NCEP's 3 km nests; --ncep-nest --concurrent: the parent, default 84 as NCEP)")
     n.add_argument("--out", type=Path, required=True)
@@ -141,6 +160,18 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--keep-init", action="store_true", help="--ncep-nest --concurrent: keep the saved inits")
     n.add_argument("--hist-workers", type=int, default=8, help="--ncep-nest --concurrent on several cards: history "
                    "writer processes per nest (the parent gets half); a 3 km CONUS hour takes one writer ~3 min")
+    n.add_argument("--restart-every", default="0", metavar="DURATION",
+                   help="write a restart set of the forecast every N hours (1h, 90m, 3; default 0 = none) under "
+                        "--restart-dir (woof-nam run's restart sets, namgpu/restart.py): a box taken back mid-run "
+                        "continues from the newest one with --resume instead of starting again from hour 0")
+    n.add_argument("--restart-dir", type=Path, default=None, help="restart root (default <out>/run/restart)")
+    n.add_argument("--restart-keep", type=int, default=1, help="restart sets kept (newest; default 1)")
+    n.add_argument("--resume", type=Path, default=None, metavar="SET",
+                   help="continue this nest's forecast from a restart set (or a restart root: its newest set) to the "
+                        "end the first run asked: give the first run's own words again, with --resume. The domain, "
+                        "static and pre-flight are made again as before; the fetch and the start are not (the set "
+                        "carries the state and its boundary files). One card, a fixed nest (not --follow, --two-way "
+                        "or --concurrent)")
     from namgpu.nest import twoway_door           # --two-way / --concurrent (a parent and this nest in one process)
     twoway_door.add_args(n)
     from namgpu.nest import follow_door           # --follow (a storm-following nest, one-way from a parent run or a source)
@@ -353,9 +384,19 @@ def fetch_rows(cycle: datetime, case_dir: Path, hours: int, cfg, args) -> dict:
     lines = []
     # a storm-following run (args.follow, the door's --follow) fetches the start record set at every boundary lead:
     # a window move lands there and the new window's fresh start is made from it (fetch_case.plan follow)
+    from namgpu.init import sources
+    win = getattr(args, "window", None)
+    lead = int((win or {}).get("gfs_lead_h") or 0)
+    # the case folder is shared by every domain of that start time: write what this fetch chose (the window's plan),
+    # or remove what an earlier fetch chose (a plain start), so the run reads the same thing
+    if win is not None:
+        from namgpu.init import window
+        window.record(case_dir, win)
+    else:
+        sources.record_start(case_dir, cycle, 0, "--cycle")
     bad = fetch_case.fetch(cycle, case_dir, hours, 16, cfg, args.source_name, args.boco_age_h,
                            log=lambda m: (lines.append(m), print(m, flush=True)),
-                           follow=bool(getattr(args, "follow", None)))
+                           follow=bool(getattr(args, "follow", None)), lead_h=lead)
     raw = Path(case_dir) / "raw"
     nbytes = sum(f.stat().st_size for f in raw.rglob("*") if f.is_file()) if raw.is_dir() else 0
     return {"failed": [l for l in lines if l.startswith("FAILED") and "(optional)" not in l] if bad else [],
@@ -419,6 +460,30 @@ def main(argv=None) -> int:
               f"(the door picks from {domain.RRTM_ROW_CHOICES}); give 3 or more", file=sys.stderr)
         return 2
     following = bool(a.follow or a.storm or a.storm_id or a.follow_config)
+    if getattr(a, "member", None):
+        os.environ["NAMGPU_SOURCE_MEMBER"] = str(a.member)
+    try:
+        lead_start(a, following)       # --lead / --at: planned before any door runs; sets the environment for them
+    except ValueError as e:
+        print(f"woof-nam nest: refused: {e}", file=sys.stderr)
+        return 2
+    if a.start is None:
+        ap.error("nest: give --start YYYYMMDDHH or --at TIME")
+    if (a.resume is not None or str(a.restart_every).strip() not in ("", "0")) and (
+            following or a.two_way or a.concurrent or a.cards > 1 or a.parent_center or a.parent_size_km
+            or a.parent_size_y_km or a.parent_margin is not None):
+        # breakage it prevents: these doors build their own forecast commands (a moving nest, a live parent) or write
+        # restart sets on no card (several cards, namgpu/restart.py), so a set would be asked for and never written
+        print("woof-nam nest: refused: --restart-every/--resume: restart sets are written for a fixed nest on one card "
+              "(not --follow, --two-way, --concurrent, --parent-* or --cards N) in this release", file=sys.stderr)
+        return 2
+    if a.resume is not None:
+        from namgpu import restart as _rst
+        try:
+            a.resume = _rst.resolve(a.resume.resolve())
+        except (OSError, ValueError, SystemExit) as e:
+            print(f"woof-nam nest: refused: --resume {a.resume}: {e}", file=sys.stderr)
+            return 2
     if a.products and (following or a.two_way or a.concurrent or a.parent_center or a.parent_size_km
                        or a.parent_size_y_km or a.parent_margin is not None):
         # these doors build their own forecast commands with no follower: say so instead of dropping it quietly
@@ -509,9 +574,16 @@ def main(argv=None) -> int:
         raise SystemExit(f"--source {source}: no files for {cycle:%Y-%m-%d %H}Z (row from {r_.get('valid_from')})"
                          + (f"; use --source {r_['before_use']} or auto" if r_.get("before_use") else ""))
     resolve_fetch(source)                 # a source with no row stops here, dry run included, before any stage
+    if getattr(a, "window", None) is None:
+        # a plain --start on a source whose edges are its own forecast: refused by name past its reach (a window's
+        # plan has made the same check, with its earlier start, in lead_start)
+        from namgpu.init import window as _win
+        why = _win.reach_error(source, cycle, hours)
+        if why:
+            raise SystemExit(f"woof-nam nest: refused: {why}")
     if source == "parent":
         a.parent_run = resolve_parent_run(a.parent_run)
-    boco_age, boco_why = boco_age_for(source, cycle, a.boco_age_h)
+    boco_age, boco_why = boco_age_for(source, cycle, a.boco_age_h, getattr(a, "window", None))
     if follow is not None:
         follow["landable"] = follow_door.landable(source, follow)
     credit, credit_lines = data_credits(source, parent_run=a.parent_run, given=a.parent_credit)
@@ -668,20 +740,30 @@ def main(argv=None) -> int:
         return 0
 
     # fetch
-    stage("fetch")
     case = f"{cycle:%Y-%m-%d_%H}z"
     case_dir = (a.cases_root / case).resolve()
     case_dir.mkdir(parents=True, exist_ok=True)
     fetch, lic = resolve_fetch(source)
+    if a.resume is not None:
+        # the restart set carries the whole state and a copy of the run's boundary files (namgpu/restart.py)
+        rec["source_licence"] = lic
+        rec["resumed_from"] = str(a.resume)
+        print(f"woof-nam: resume from {a.resume}: no fetch, no start", flush=True)
+        fetch = None
+    if fetch is not None:
+        stage("fetch")
     from namgpu import config as configmod
     a.source_name = source
-    fr = fetch(cycle, case_dir, max(6, int(hours + 0.999)), configmod.load(cfgfile), a)
-    rec["source_licence"] = lic
-    done("fetch", **{k: v for k, v in fr.items()})
-    if fr.get("failed"):
-        print(f"woof-nam: fetch failed: {fr['failed']}", flush=True)
-        _write(out, rec, stages, sampler, t_all)
-        return 4
+    if fetch is not None:
+        win = getattr(a, "window", None)
+        fetch_h = hours + (float(win["offset_h"]) if win else 0.0)        # the model runs the window's offset longer
+        fr = fetch(cycle, case_dir, max(6, int(fetch_h + 0.999)), configmod.load(cfgfile), a)
+        rec["source_licence"] = lic
+        done("fetch", **{k: v for k, v in fr.items()})
+        if fr.get("failed"):
+            print(f"woof-nam: fetch failed: {fr['failed']}", flush=True)
+            _write(out, rec, stages, sampler, t_all)
+            return 4
 
     # the card must have room now (a shared card: wait for it, never take memory from another process).
     # Checked again here even when the pre-flight passed: the fetch takes minutes, and on a shared card another run took
@@ -711,10 +793,21 @@ def main(argv=None) -> int:
 
     # forecast (init + bocos + TDFI + run) and maps
     run_dir = out / "run"
-    cmd = [sys.executable, "-m", "namgpu.run_forecast", "--case", case, "--case-dir", str(case_dir),
-           "--source", source, "--hours", str(hours), "--out", str(run_dir)]
+    if a.resume is not None:
+        # the set names the case, source, end hour and output schedule of the first run (restart.read_meta)
+        cmd = [sys.executable, "-m", "namgpu.run_forecast", "--resume", str(a.resume), "--out", str(run_dir)]
+    else:
+        cmd = [sys.executable, "-m", "namgpu.run_forecast", "--case", case, "--case-dir", str(case_dir),
+               "--source", source, "--hours", str(hours), "--out", str(run_dir)]
     if a.no_maps:
         cmd.append("--no-maps")
+    for opt, val in (("--write", a.write), ("--maps-at", a.maps_at), ("--grib-at", a.grib_at)):
+        if val and a.resume is None:
+            cmd += [opt, str(val)]          # the output schedule (namgpu/outputs.py), counted from the time asked
+    if str(a.restart_every).strip() not in ("", "0"):
+        cmd += ["--restart-every", str(a.restart_every), "--restart-keep", str(a.restart_keep),
+                "--restart-dir", str((a.restart_dir or run_dir / "restart").resolve())]
+        rec["restart_every"] = str(a.restart_every)
     if getattr(a, "products", None):
         # an NCEP nest writes its own NOAA file (--ncep-nest conusnest -> the conusnest hiresf files)
         pset = a.products
@@ -932,15 +1025,80 @@ def _static_stale(static: Path) -> str | None:
 
 # ------------------------------------------------------------------------------------------ boundaries, credits
 
-def boco_age_for(source: str, cycle: datetime, given: int | None) -> tuple[int, str]:
+def lead_start(a, following: bool = False) -> int:
+    """--lead H or --at TIME on the nest door: the window's plan (namgpu/init/window.py) on the door's source, made
+    once here for every door behind it. An unposted hour starts at the nearest posted hour before it and the run is
+    that much longer (one line says so); ValueError only when nothing can run. Sets --start to the model start,
+    a.window to the plan, and NAMGPU_START_LEAD_H (the GFS hour) for this process and every child. Returns the GFS
+    hour (0 for an analysis or another source)."""
+    from namgpu.init import fetch_case, sources, window
+    a.window = None
+    if not getattr(a, "lead", None) and not getattr(a, "at", None):
+        a.lead = 0
+        os.environ.pop(sources.LEAD_ENV, None)      # an analysis start: nothing inherited from the calling shell
+        return 0
+    if a.source == "auto":
+        a.source = "gfs"
+    if a.source == "parent":
+        raise ValueError("--lead/--at with --source parent: a nest under a WOOF-NAM parent starts when its parent "
+                         "does; give the window to the parent")
+    if a.source == "native":
+        raise ValueError("--source native is the NAM 12 km grid itself; run it with woof-nam run (the window words "
+                         "are the same there)")
+    if following:
+        raise ValueError("--lead/--at with --follow: a storm-following nest from a forecast hour is not written yet "
+                         "(each window move makes its own fresh start); run it from a parent started at that time")
+    if getattr(a, "at", None) and getattr(a, "start", None):
+        raise ValueError("--at chooses the start itself; give --at TIME or --start (with --lead)")
+    if a.hours is None and not getattr(a, "ncep_nest", None):
+        a.hours = 48.0
+    hours = float(a.hours if a.hours is not None else 6.0)
+    if getattr(a, "at", None):
+        p = window.resolve(a.source, hours=hours, at=window.parse_time(a.at), posted=fetch_case.posted_for(a.source))
+    else:
+        if not a.start:
+            raise ValueError("--lead needs --start (the run's start time; the source run is --lead hours earlier)")
+        st = window.parse_time(a.start, "--start")
+        p = window.resolve(a.source, hours=hours, cycle=st - timedelta(hours=float(a.lead)), lead=float(a.lead),
+                           posted=fetch_case.posted_for(a.source))
+    if getattr(a, "boco_age_h", None) is not None and p.get("lead_h") and int(a.boco_age_h) != int(p["lead_h"]):
+        raise ValueError(f"--boco-age-h {a.boco_age_h} with a start from forecast hour {p['lead_h']}: the boundaries "
+                         "are the same run's later hours")
+    a.window = p
+    a.start = f"{p['start']:%Y%m%d%H}"
+    a.lead = int(p.get("gfs_lead_h") or 0)
+    if a.lead:
+        os.environ[sources.LEAD_ENV] = str(a.lead)
+    else:
+        os.environ.pop(sources.LEAD_ENV, None)
+    for k, v in window.env_for({"source": p["source"], "lead_h": p.get("lead_h"), "edges_h": p["edges_h"]}).items():
+        os.environ[k] = v
+    print(f"woof-nam nest: {p['line']}", flush=True)
+    return a.lead
+
+
+def boco_age_for(source: str, cycle: datetime, given: int | None, win: dict | None = None) -> tuple[int, str]:
     """Boundary cycle age (h) and why. A past start whose own cycle forecast is published (now >= cycle + the
     row's published_after_h) takes its boundaries from that same cycle: the 6 h older GFS cycle cost the Japan
     nest 71 vs 23 km track error at f24 and 171 vs 76 km at f36 (2026-11-04). A live start
-    keeps the row's operational age (NAM's 6 h)."""
-    if given is not None:
-        return int(given), "given (--boco-age-h)"
+    keeps the row's operational age (NAM's 6 h). A start from a forecast hour (--lead H): the age is H."""
     from namgpu.init import sources
     row = sources.SOURCES.get(source) or {}
+    if win is not None and win.get("gfs_lead_h") and source == win.get("source") and source != "gfs":
+        # rap, hrrr, rrfs at a time that is not a GFS cycle: the edges are the GFS run around it, its hours from the
+        # one valid at the start (e5, 2026-11-12: an age of 0 here contradicted the GFS hour 3 and the fetch refused)
+        return int(win["gfs_lead_h"]), (f"{source} start at a time that is not a GFS cycle: the edges are GFS forecast "
+                                         f"hour {win['gfs_lead_h']} of the {win['gfs_cycle']:%Y-%m-%d %H}Z run and its "
+                                         "later hours")
+    if win is not None and win.get("source") == "gefs" and source == "gefs":
+        return int(win["lead_h"]), (f"start from GEFS forecast hour {win['lead_h']} of the "
+                                    f"{win['cycle']:%Y-%m-%d %H}Z run: the boundaries are that run's own later hours")
+    lead = sources.start_lead_h(row)
+    if lead:
+        return lead, (f"start from {sources.lead_credit(lead, cycle)}: the boundaries are that run's own later "
+                      "hours")
+    if given is not None:
+        return int(given), "given (--boco-age-h)"
     b = row.get("boundary") or {}
     age = int(b.get("age_h", row.get("boco_age_h", 0)) or 0)
     if not age:
@@ -1005,7 +1163,14 @@ def data_credits(source: str, static_ds=None, parent_run=None, given: str | None
         lines += [f"parent run, {ln}" for ln in pc["lines"]]
         short += [c.strip() for c in pc["credit"].split(",") if c.strip()]
     elif row.get("attribution"):
-        lines.append(f"start and boundaries: {row['attribution']}")
+        lead = sources.start_lead_h(row)
+        if lead:
+            # a start from a forecast hour is said on every map and in every file list, never as an analysis
+            lines.append(f"start and boundaries: {row['attribution']}, {sources.lead_credit(lead)} and that "
+                         "run's later hours")
+            short.append(f"start: GFS forecast hour {lead}")
+        else:
+            lines.append(f"start and boundaries: {row['attribution']}")
         if str(row.get("licence", "")).startswith("CC-BY"):
             short.append(row["attribution"].replace(", CC BY", " CC BY"))
         if (row.get("fetch") or {}).get("donors"):
